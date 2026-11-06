@@ -124,7 +124,9 @@ public class HostBoundaryTests
     [Fact]
     public void CompilationObeysTheExecutionTimeoutAndInterrupt()
     {
-        var src = string.Concat(Enumerable.Repeat("x = 1 + 2;\n", 1_000_000));   // ~11M chars
+        // ~6.6M chars, ~3.6M AST nodes: below the default 4M node budget (eval always uses it), so only the timeout or
+        // Interrupt can stop the compilation however late a coarse timer fires; still far longer to compile than 30 ms
+        var src = string.Concat(Enumerable.Repeat("x = 1 + 2;\n", 600_000));
         var compileOptions = new JsCompileOptions { MaxSourceLength = 64 * 1024 * 1024 };
         using (var engine = new JsEngine(new JsEngineOptions { CompileOptions = compileOptions, Limits = new JsLimits { Timeout = TimeSpan.FromMilliseconds(30) } }))
         {
