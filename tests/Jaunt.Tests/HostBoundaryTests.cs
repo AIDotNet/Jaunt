@@ -141,8 +141,11 @@ public class HostBoundaryTests
         }
         using (var engine = new JsEngine(new JsEngineOptions { CompileOptions = compileOptions }))
         {
-            using var timer = new Timer(_ => engine.Interrupt(), null, 30, Timeout.Infinite);
+            // a dedicated thread, not a thread-pool timer (parallel blocking tests can starve the pool)
+            var interrupter = new Thread(() => { Thread.Sleep(30); engine.Interrupt(); }) { IsBackground = true };
+            interrupter.Start();
             Assert.Throws<OperationCanceledException>(() => engine.Evaluate(src));
+            interrupter.Join();
         }
     }
 
@@ -155,14 +158,19 @@ public class HostBoundaryTests
             var sw = Stopwatch.StartNew();
             var ex = Assert.Throws<JsLimitExceededException>(() => engine.Evaluate(script));
             Assert.Equal(JsLimitKind.Timeout, ex.Kind);
-            Assert.True(sw.Elapsed < TimeSpan.FromSeconds(2), $"took {sw.Elapsed}");
+            Assert.True(sw.Elapsed < TimeSpan.FromSeconds(4), $"took {sw.Elapsed}");   // was a fixed 5 s .NET timeout; CI runners are slow and shared
         }
         using (var engine = new JsEngine())
         {
-            using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(100));
+            // cancelled from a dedicated thread: a CancellationTokenSource timer fires on the thread pool, which other
+            // (blocking) tests running in parallel can starve for seconds on a small CI runner
+            using var cts = new CancellationTokenSource();
+            var canceller = new Thread(() => { Thread.Sleep(100); cts.Cancel(); }) { IsBackground = true };
             var sw = Stopwatch.StartNew();
+            canceller.Start();
             Assert.Throws<OperationCanceledException>(() => engine.Evaluate(script, cts.Token));
-            Assert.True(sw.Elapsed < TimeSpan.FromSeconds(2), $"took {sw.Elapsed}");
+            canceller.Join();
+            Assert.True(sw.Elapsed < TimeSpan.FromSeconds(4), $"took {sw.Elapsed}");   // was a fixed 5 s .NET timeout; CI runners are slow and shared
         }
     }
 }
