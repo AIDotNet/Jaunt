@@ -164,9 +164,10 @@ public class RobustnessTests
     public void LargeStringOperationsAreChargedBeforeTheyAllocate(string source)
     {
         using var engine = new JsEngine(new JsEngineOptions { Limits = new JsLimits { MaxTrackedBytes = 16 * 1024 * 1024 } });
-        long before = GC.GetTotalAllocatedBytes(precise: true);
+        // this thread only: other tests allocate concurrently (the engine runs on the calling thread)
+        long before = GC.GetAllocatedBytesForCurrentThread();
         var ex = Assert.Throws<JsLimitExceededException>(() => engine.Evaluate(source));
-        long allocated = GC.GetTotalAllocatedBytes(precise: true) - before;
+        long allocated = GC.GetAllocatedBytesForCurrentThread() - before;
         Assert.Equal(JsLimitKind.TrackedBytes, ex.Kind);
         Assert.True(allocated < 200L * 1024 * 1024, $"allocated {allocated / 1048576} MB before the 16 MB budget stopped it");
     }
