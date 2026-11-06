@@ -34,7 +34,7 @@ JsScript Harness(string name) => harnessCache.GetOrAdd(name, n =>
 
 var files = Directory.EnumerateFiles(Path.Combine(root, "test"), "*.js", SearchOption.AllDirectories)
     .Where(f => !f.Contains("_FIXTURE"))
-    .Where(f => !f.Contains("/staging/"))
+    .Where(f => !f.Replace('\\', '/').Contains("/staging/"))
     .Where(f => filter == null || f.Contains(filter))
     .Where(f => only == null || only.Contains(Path.GetRelativePath(root, f).Replace('\\', '/')))
     .OrderBy(f => f, StringComparer.Ordinal)

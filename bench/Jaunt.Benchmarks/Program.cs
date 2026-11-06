@@ -69,6 +69,11 @@ if (args.Length > 0 && args[0] == "--realm")
     RealmProfile.Run();
     return;
 }
+if (args.Length > 2 && args[0] == "--cross")
+{
+    CrossBench.Run(args.Skip(1).ToArray());
+    return;
+}
 if (args.Length > 0 && args[0] == "--quick")
 {
     QuickBench.Run(args.Skip(1).ToArray());

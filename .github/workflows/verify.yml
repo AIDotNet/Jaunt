@@ -55,6 +55,8 @@ jobs:
           mkdir -p artifacts/test262
           cd artifacts/test262
           git init -q
+          # keep the test sources byte-exact (no CRLF conversion on Windows): line terminators are part of the tests
+          git config core.autocrlf false
           git remote add origin https://github.com/tc39/test262.git
           git fetch -q --depth 1 origin "$TEST262_REVISION"
           git checkout -q FETCH_HEAD

@@ -5,6 +5,8 @@ known-failures.txt lines: `<test path>` (expected with any ICU) or `icu<NN <test
 ICU major version is below NN, i.e. older locale data than the reference ICU 78 / CLDR 48)."""
 import json, os, sys
 
+sys.stdout.reconfigure(encoding="utf-8", errors="backslashreplace")
+
 out = sys.argv[1]
 here = os.path.dirname(os.path.abspath(__file__))
 icu = open(os.path.join(out, "icu-version.txt")).read().strip()
