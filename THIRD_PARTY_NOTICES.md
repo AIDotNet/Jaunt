@@ -116,6 +116,8 @@ license (Unicode License V3) applies to the copy provided by the platform.
 | xunit, Microsoft.NET.Test.Sdk | Apache-2.0 / MIT | unit tests |
 | BenchmarkDotNet | MIT | benchmarks |
 | Jint 4.17.0 | BSD-2-Clause | comparison baseline in `bench/` only |
+| Okojo.JavaScript.Embedding 0.2.0-preview.2 | MIT | comparison in `bench/Jaunt.Benchmarks/EngineComparison.cs` only |
+| Microsoft.ClearScript.V8 7.5.1.1 (+ native V8 packages) | MIT (V8: BSD-3-Clause) | comparison in `bench/Jaunt.Benchmarks/EngineComparison.cs` only |
 | MoeJS (`github.com/MoeForge/moejs`) | Apache-2.0 | Go dependency of the cross-engine benchmark runner `bench/cross/moejs-runner` only (fetched by `go mod`, not committed or redistributed) |
 | tc39/test262 @ `045bf6f9966ce3291b8fbc1e0403cd97b9201b00` | BSD-3-Clause | conformance tests, fetched into `artifacts/` (not committed) |
 

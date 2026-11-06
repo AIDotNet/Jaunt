@@ -60,16 +60,90 @@ Fixed-arity call of a cached JS function with two numbers, returning a number.
 
 ## Reading the results
 
-* Interpreter-bound workloads (calls, numeric loops, classes, objects) are 2.3–2.9× faster than Jint; the
-  register VM keeps numbers unboxed in 16-byte values and JS→JS calls don't recurse on the CLR stack.
-* Builtin-heavy workloads (arrays, strings, JSON) are 1.25–1.4× faster; time is dominated by builtin code
-  rather than dispatch. (JSON allocation has since been brought to within 7 % of Jint — see the last section.)
-* A bare `JsEngine` is still ~2× slower to create than a Jint `Engine`, even with lazily created intrinsic
-  groups and shared builtin layouts. In the end-to-end plugin request — the workload FreshRealm exists for —
-  Jaunt is ~1.27× faster overall.
+These are single `ShortRun` measurements of CoreCLR .NET 10 on one busy developer workstation; they describe these
+workloads on this machine, not Jaunt's performance in general (research doc §3.5/§7: no fixed multiples, no
+"necessarily faster"). NativeAOT performance is not measured here (the AOT gate checks behaviour, not speed).
+
+* In these runs the interpreter-bound workloads (calls, numeric loops, classes, objects) took 0.35–0.44× of Jint's
+  time; the register VM keeps numbers unboxed in 16-byte values and JS→JS calls don't recurse on the CLR stack.
+* The builtin-heavy workloads (arrays, strings, JSON) took 0.72–0.80× of Jint's time; time is dominated by builtin
+  code rather than dispatch.
+* Creating a bare `JsEngine` is the one measurement where Jaunt is slower than Jint (about 2× here). Note the two
+  "new engine" figures in this document measure different things: `Isolation.JauntNewEngine` only constructs the
+  engine (1,280 ns), while the quick harness and `EngineCreation` also evaluate `1` (which initializes the intrinsic
+  groups a script touches). In the end-to-end plugin request — the workload FreshRealm exists for — Jaunt took
+  0.79× of Jint's time in `Isolation` (BenchmarkDotNet) and 0.46× in the quick harness (alternating in-process loop,
+  later code); the two harnesses differ in warm-up and GC accounting, so read each ratio within its own table.
 * History: the first implementation took 224 µs to create an engine and 840 µs per plugin request; lazy
   intrinsics, realm-independent shapes, predicted builtin layouts and removing per-realm dictionaries brought
   that to the numbers above.
+
+## Other engines: Okojo and ClearScript/V8 (`EngineWarmInvocation`, `EngineHostCalls`, `EngineCreation`)
+
+Research doc §1/§2/§4 names Okojo (managed register VM, the closest architecture) and ClearScript/V8 (native V8) as
+required comparisons. `bench/Jaunt.Benchmarks/EngineComparison.cs` runs the same JS on all four engines, each used
+the way its documentation recommends for repeated calls (compiled once, function handle cached):
+
+* Jint **4.17.0** (stable), `PrepareScript`;
+* Okojo **0.2.0-preview.2** (NuGet `Okojo.JavaScript.Embedding`; the snapshot the research reviewed; prerelease,
+  .NET 10+), `realm.Execute` + `realm.Call`;
+* ClearScript **7.5.1.1** (`Microsoft.ClearScript.V8` + native package; V8 JIT tiers enabled), `ScriptObject.InvokeAsFunction`.
+  Host functions are measured both with the convenience binding (a delegate via `AddHostObject`) and with the
+  FastProxy binding (`V8FastHostFunction`).
+
+`--engines-check` verifies that all engines compute the same `main(1)` for every workload (they do). Measured
+2026-11-07, same machine and job as above; the machine was loaded (load average 16.6 → 6.3 during the run), so
+absolute times are inflated — **compare ratios** (engine time ÷ Jint time; < 1 is faster than Jint).
+
+| Workload | Jaunt | Okojo | ClearScript V8 |
+| --- | ---: | ---: | ---: |
+| numeric loop | 0.42 | 0.49 | 0.12 |
+| fib (recursive calls) | 0.40 | 0.31 | 0.02 |
+| classes | 0.50 | 0.67 | 0.06 |
+| objects | 0.37 | 0.63 | 0.009 |
+| arrays | 0.74 | 1.16 | 0.13 |
+| strings | 0.64 | 1.15 | 0.24 |
+| JSON stringify + parse | 0.64 | 1.69 | 0.41 |
+
+| JS → host calls (10,000 × `add(a, b)`) | Ratio to Jint | Managed allocation per run |
+| --- | ---: | ---: |
+| Jint (`Func<double,double,double>`) | 1.00 | 1.3 MB |
+| Jaunt typed (`SetFunction((double a, double b) => …)`) | 0.28 | 120 B |
+| Jaunt raw (`JsNativeFunction`) | 0.29 | 120 B |
+| Okojo (`JsHostFunctionBody`) | 0.55 | 0 B |
+| ClearScript V8, convenience (delegate host object) | 33.8 | 100.7 MB |
+| ClearScript V8, FastProxy (`V8FastHostFunction`) | 0.97 | 297 B |
+
+| Create an instance and evaluate `1` | Ratio to Jint | Managed allocation |
+| --- | ---: | ---: |
+| Jint | 1.00 | 9.5 KB |
+| Jaunt | 2.6 | 15.1 KB |
+| Okojo | 213 | 1,215 KB |
+| ClearScript V8, new `V8ScriptEngine` (new isolate) | 515 | 9.5 KB (+ native) |
+| ClearScript V8, engine from a shared `V8Runtime` | 303 | 5.9 KB (+ native) |
+
+Retained memory per live instance (`--engines-memory 50`: 50 live instances, after full collections; ClearScript's
+native V8 heap reported separately via `V8Runtime.GetHeapInfo().TotalHeapSize`; working-set deltas are noisy and
+include code pages and allocator slack):
+
+| Engine | Managed, empty | V8 heap, empty | Managed, `classes` loaded | V8 heap, `classes` loaded |
+| --- | ---: | ---: | ---: | ---: |
+| Jaunt | 22 KB | — | 53 KB | — |
+| Jint 4.17.0 | 19 KB | — | 279 KB | — |
+| Okojo 0.2.0-preview.2 | 1,373 KB | — | 1,608 KB | — |
+| ClearScript V8 7.5.1.1 | 18 KB | 768 KB | 21 KB | 2,877 KB |
+
+Reading: on these warm loops V8's optimizing JIT is 1.6× (JSON) to 41× (objects) faster than the fastest managed engine, at the cost of a native
+isolate per engine (sub-millisecond to create, ~0.8–2.9 MB native heap each) and of a JS↔.NET boundary whose
+convenience binding is expensive (FastProxy brings host calls to Jint's level). Among the managed engines, Jaunt and
+Okojo are close on interpreter-bound code (Okojo ahead on recursive calls, Jaunt on object allocation and builtins);
+Okojo creates its realm eagerly (≈1.2 MB per instance), Jaunt and Jint lazily. Reproduce:
+
+```bash
+dotnet run -c Release --project bench/Jaunt.Benchmarks -- --engines-check
+dotnet run -c Release --project bench/Jaunt.Benchmarks -- --filter '*Engine*' --job short
+dotnet run -c Release --project bench/Jaunt.Benchmarks -- --engines-memory 50
+```
 
 ## Quick harness after the feature-complete pass
 
