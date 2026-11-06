@@ -1,0 +1,85 @@
+# Release verification matrix (design/05-dotnet-support.md §4–5): the first-round committed RIDs
+# Linux x64, Windows x64 and macOS ARM64, each on .NET 8 and .NET 10 CoreCLR plus NativeAOT net8/net10/net11.
+# A RID only enters the verified list in docs/ after this workflow has produced green evidence for it.
+name: verify
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+env:
+  DOTNET_NOLOGO: "1"
+  DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+  TEST262_REVISION: 045bf6f9966ce3291b8fbc1e0403cd97b9201b00
+
+jobs:
+  verify:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            rid: linux-x64
+          - os: windows-2022
+            rid: win-x64
+          - os: macos-15
+            rid: osx-arm64
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install .NET 8, 10 and the pinned .NET 11 SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: |
+            8.0.x
+            10.0.401
+            11.0.100-rc.2.26504.105
+
+      - name: Record environment
+        run: |
+          dotnet --info
+          uname -a || true
+
+      - name: Unit tests (CoreCLR net8.0 + net10.0)
+        run: |
+          dotnet test tests/Jaunt.Tests -c Release -p:JauntTestAllFrameworks=true -f net8.0
+          dotnet test tests/Jaunt.Tests -c Release -p:JauntTestAllFrameworks=true -f net10.0
+
+      - name: Fetch test262 at the pinned revision
+        run: |
+          mkdir -p artifacts/test262
+          cd artifacts/test262
+          git init -q
+          git remote add origin https://github.com/tc39/test262.git
+          git fetch -q --depth 1 origin "$TEST262_REVISION"
+          git checkout -q FETCH_HEAD
+
+      - name: test262 on CoreCLR net10.0
+        run: |
+          dotnet run -c Release --project tools/Jaunt.Test262 -- artifacts/test262 --out artifacts/test262-net10 | tail -1
+          python3 tools/Jaunt.Test262/check-results.py artifacts/test262-net10
+
+      - name: test262 on CoreCLR net8.0
+        run: |
+          dotnet run -c Release --project tools/Jaunt.Test262 -p:JauntRunnerFramework=net8.0 -- artifacts/test262 --threads 2 --out artifacts/test262-net8 | tail -1
+          python3 tools/Jaunt.Test262/check-results.py artifacts/test262-net8
+
+      - name: NativeAOT gate (publish, then run new JS against the native binaries)
+        env:
+          REQUIRE_TFMS: "3"
+        run: ./eng/verify-aot.sh ${{ matrix.rid }}
+
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: verify-${{ matrix.rid }}
+          path: |
+            artifacts/test262-net10/summary.md
+            artifacts/test262-net8/summary.md
+          if-no-files-found: ignore

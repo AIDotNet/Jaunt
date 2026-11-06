@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFrameworks>net8.0;net10.0</TargetFrameworks>
+    <TargetFrameworks Condition="$([MSBuild]::VersionGreaterThanOrEquals('$(NETCoreSdkVersion)', '11.0'))">net8.0;net10.0;net11.0</TargetFrameworks>
+    <RootNamespace>Jaunt</RootNamespace>
+    <AssemblyName>Jaunt</AssemblyName>
+    <IsAotCompatible>true</IsAotCompatible>
+    <IsTrimmable>true</IsTrimmable>
+    <EnableTrimAnalyzer>true</EnableTrimAnalyzer>
+    <EnableAotAnalyzer>true</EnableAotAnalyzer>
+    <EnableSingleFileAnalyzer>true</EnableSingleFileAnalyzer>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <NoWarn>$(NoWarn);CS1591;CS0618</NoWarn>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <Description>Jaunt: a fully managed, NativeAOT-compatible JavaScript engine for .NET.</Description>
+    <Version>0.1.0-alpha.1</Version>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Acornima" Version="1.9.1" />
+  </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="Jaunt.Tests" />
+    <InternalsVisibleTo Include="Jaunt.Benchmarks" />
+  </ItemGroup>
+</Project>

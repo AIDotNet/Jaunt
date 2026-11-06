@@ -1,0 +1,24 @@
+<Project>
+  <!--
+    Pin NativeAOT/runtime packs to patched servicing releases (GHSA-p3jp-9v83-76w9 / CVE-2026-111497 fixed in
+    8.0.33, 10.0.14 and 11.0.0-rc.3). The SDKs installed on the build machine only know older patch levels.
+  -->
+  <PropertyGroup>
+    <JauntPatched8>8.0.33</JauntPatched8>
+    <JauntPatched10>10.0.14</JauntPatched10>
+    <JauntPatched11>11.0.0-rc.3.26522.148</JauntPatched11>
+  </PropertyGroup>
+  <Target Name="JauntPinServicingPacks" BeforeTargets="ProcessFrameworkReferences;_ComputeToolPackInputsToProcessFrameworkReferences">
+  <ItemGroup>
+    <KnownILCompilerPack Update="Microsoft.DotNet.ILCompiler" Condition="'%(TargetFramework)' == 'net8.0'" ILCompilerPackVersion="$(JauntPatched8)" />
+    <KnownILCompilerPack Update="Microsoft.DotNet.ILCompiler" Condition="'%(TargetFramework)' == 'net10.0'" ILCompilerPackVersion="$(JauntPatched10)" />
+    <KnownILCompilerPack Update="Microsoft.DotNet.ILCompiler" Condition="'%(TargetFramework)' == 'net11.0'" ILCompilerPackVersion="$(JauntPatched11)" />
+    <KnownFrameworkReference Update="Microsoft.NETCore.App" Condition="'%(TargetFramework)' == 'net8.0'" LatestRuntimeFrameworkVersion="$(JauntPatched8)" />
+    <KnownFrameworkReference Update="Microsoft.NETCore.App" Condition="'%(TargetFramework)' == 'net10.0'" LatestRuntimeFrameworkVersion="$(JauntPatched10)" />
+    <KnownFrameworkReference Update="Microsoft.NETCore.App" Condition="'%(TargetFramework)' == 'net11.0'" LatestRuntimeFrameworkVersion="$(JauntPatched11)" />
+    <KnownRuntimePack Update="Microsoft.NETCore.App" Condition="'%(TargetFramework)' == 'net8.0'" LatestRuntimeFrameworkVersion="$(JauntPatched8)" />
+    <KnownRuntimePack Update="Microsoft.NETCore.App" Condition="'%(TargetFramework)' == 'net10.0'" LatestRuntimeFrameworkVersion="$(JauntPatched10)" />
+    <KnownRuntimePack Update="Microsoft.NETCore.App" Condition="'%(TargetFramework)' == 'net11.0'" LatestRuntimeFrameworkVersion="$(JauntPatched11)" />
+  </ItemGroup>
+  </Target>
+</Project>

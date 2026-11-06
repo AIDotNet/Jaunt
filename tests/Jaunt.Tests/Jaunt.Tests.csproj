@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <!-- CI: -p:JauntTestAllFrameworks=true runs the suite on every supported runtime (needs those runtimes installed) -->
+    <TargetFrameworks Condition="'$(JauntTestAllFrameworks)' == 'true'">net8.0;net10.0</TargetFrameworks>
+    <IsPackable>false</IsPackable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <NoWarn>$(NoWarn);xUnit1026;CS1591</NoWarn>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
+    <PackageReference Include="xunit" Version="2.9.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="3.1.4" />
+    <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="4.8.0" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../src/Jaunt/Jaunt.csproj" />
+    <ProjectReference Include="../../src/Jaunt.Generators/Jaunt.Generators.csproj" OutputItemType="Analyzer" ReferenceOutputAssembly="false" />
+    <ProjectReference Include="../../src/Jaunt.Generators/Jaunt.Generators.csproj" Aliases="gen" ReferenceOutputAssembly="true" Private="true" />
+  </ItemGroup>
+</Project>

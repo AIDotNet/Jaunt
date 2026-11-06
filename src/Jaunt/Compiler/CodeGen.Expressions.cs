@@ -1,0 +1,2030 @@
+using System;
+using System.Collections.Generic;
+using Acornima;
+using Acornima.Ast;
+
+namespace Jaunt.Compiler;
+
+internal enum PatternMode { Assign, Init }
+
+internal sealed partial class CodeGen
+{
+    // ------------------------------------------------------------------ conditions
+
+    /// <summary>Evaluates <paramref name="test"/> and jumps to <paramref name="falseLabel"/> when it is falsy.</summary>
+    private void Condition(Expression test, int falseLabel)
+    {
+        if (test is BinaryExpression be && be is not LogicalExpression)
+        {
+            Op? op = be.Operator switch
+            {
+                Operator.LessThan => Op.LtJmpFalse,
+                Operator.LessThanOrEqual => Op.LeJmpFalse,
+                Operator.GreaterThan => Op.GtJmpFalse,
+                Operator.GreaterThanOrEqual => Op.GeJmpFalse,
+                Operator.StrictEquality => Op.StrictEqJmpFalse,
+                Operator.StrictInequality => Op.StrictNeJmpFalse,
+                _ => null,
+            };
+            if (op != null && be.Left is not PrivateIdentifier)
+            {
+                int m = Mark;
+                var (a, b) = Operands(be.Left, be.Right);
+                _fb.JumpCmp(op.Value, a, b, falseLabel);
+                ResetTo(m);
+                return;
+            }
+        }
+        if (test is LogicalExpression le)
+        {
+            if (le.Operator == Operator.LogicalAnd)
+            {
+                Condition(le.Left, falseLabel);
+                Condition(le.Right, falseLabel);
+                return;
+            }
+            if (le.Operator == Operator.LogicalOr)
+            {
+                int trueL = _fb.NewLabel(), nextL = _fb.NewLabel();
+                Condition(le.Left, nextL);
+                _fb.Jump(trueL);
+                _fb.Mark(nextL);
+                Condition(le.Right, falseLabel);
+                _fb.Mark(trueL);
+                return;
+            }
+        }
+        if (test is UnaryExpression { Operator: Operator.LogicalNot } un)
+        {
+            int m2 = Mark;
+            int r2 = Expr(un.Argument);
+            _fb.JumpIf(Op.JmpTrue, r2, falseLabel);
+            ResetTo(m2);
+            return;
+        }
+        int mm = Mark;
+        int r = Expr(test);
+        _fb.JumpIf(Op.JmpFalse, r, falseLabel);
+        ResetTo(mm);
+    }
+
+    /// <summary>Evaluates two operands left-to-right, protecting the left value from being clobbered by the right.</summary>
+    private (int, int) Operands(Expression left, Expression right)
+    {
+        int m = Mark;
+        int a = Expr(left);
+        if (a < m && HasSideEffects(right))
+        {
+            int t = Temp();
+            _fb.Emit(Op.Mov, t, a);
+            a = t;
+        }
+        int b = Expr(right);
+        return (a, b);
+    }
+
+    private static bool HasSideEffects(Node n)
+    {
+        switch (n)
+        {
+            case Literal or Identifier or ThisExpression: return false;
+            case AssignmentExpression or UpdateExpression: return true;
+            case IFunction: return false;
+        }
+        foreach (var c in n.ChildNodes)
+            if (c != null && HasSideEffects(c)) return true;
+        return false;
+    }
+
+    // ------------------------------------------------------------------ expressions
+
+    /// <summary>
+    /// Compiles an expression. When <paramref name="dst"/> is non-negative the result is placed there; otherwise the
+    /// returned register holds it (it may be a binding register that must not be written).
+    /// </summary>
+    private int Expr(Expression e, int dst = -1, string? nameHint = null)
+    {
+        Enter(e);
+        int r = ExprCore(e, dst, nameHint);
+        Leave();
+        if (dst >= 0 && r != dst)
+        {
+            _fb.Emit(Op.Mov, dst, r);
+            return dst;
+        }
+        return r;
+    }
+
+    private int Dst(int dst) => dst >= 0 ? dst : Temp();
+
+    private int ExprCore(Expression e, int dst, string? nameHint)
+    {
+        switch (e)
+        {
+            case NumericLiteral n when dst < 0 && _loopConsts != null && _loopConsts.TryGetValue(n.Value, out int creg):
+                return creg;
+            case StringLiteral sl when dst < 0 && _loopStringConsts != null && _loopStringConsts.TryGetValue(sl.Value, out int sreg):
+                return sreg;
+            case NumericLiteral n:
+            {
+                int d = Dst(dst);
+                double v = n.Value;
+                if (v == Math.Floor(v) && v >= int.MinValue && v <= int.MaxValue && !(v == 0 && double.IsNegative(v)))
+                    _fb.Emit(Op.LoadInt, d, (int)v);
+                else _fb.Emit(Op.LoadConst, d, _fb.Const(v));
+                return d;
+            }
+            case StringLiteral s:
+            {
+                int d = Dst(dst);
+                _fb.Emit(Op.LoadConst, d, _fb.Const(s.Value));
+                return d;
+            }
+            case BooleanLiteral b:
+            {
+                int d = Dst(dst);
+                _fb.Emit(b.Value ? Op.LoadTrue : Op.LoadFalse, d);
+                return d;
+            }
+            case NullLiteral:
+            {
+                int d = Dst(dst);
+                _fb.Emit(Op.LoadNull, d);
+                return d;
+            }
+            case RegExpLiteral re:
+            {
+                int d = Dst(dst);
+                _fb.Emit(Op.NewRegExp, d, _fb.Const(re.RegExp.Pattern), _fb.Const(re.RegExp.Flags));
+                return d;
+            }
+            case BigIntLiteral bi:
+            {
+                int d = Dst(dst);
+                _fb.Emit(Op.LoadConst, d, _fb.ConstValue(JsValue.FromBigInteger(bi.Value)));
+                return d;
+            }
+            case Identifier id:
+                if (id.Name == "undefined" && _refs[id] is { Binding: null, Dynamic: false })
+                {
+                    int d = Dst(dst);
+                    _fb.Emit(Op.LoadUndef, d);
+                    return d;
+                }
+                return LoadIdentifier(id, dst);
+            case ThisExpression:
+            {
+                int d = Dst(dst);
+                _fb.Emit(Op.LoadThis, d);
+                return d;
+            }
+            case TemplateLiteral tl: return Template(tl, dst);
+            case TaggedTemplateExpression tt: return TaggedTemplate(tt, dst);
+            case ArrayExpression ae: return ArrayLiteral(ae, dst);
+            case ObjectExpression oe: return ObjectLiteral(oe, dst);
+            case FunctionExpression fe:
+            {
+                int d = Dst(dst);
+                int idx = CompileNestedFunction(fe, fe.Id?.Name ?? nameHint ?? "");
+                _fb.Emit(Op.Closure, d, idx);
+                return d;
+            }
+            case ArrowFunctionExpression af:
+            {
+                int d = Dst(dst);
+                int idx = CompileNestedFunction(af, nameHint ?? "");
+                _fb.Emit(Op.Closure, d, idx);
+                return d;
+            }
+            case ClassExpression ce:
+                return Class(ce, ce.Id, ce.SuperClass, ce.Body, ce.Id?.Name ?? nameHint ?? "", dst);
+            case UnaryExpression ue when ue is not UpdateExpression: return Unary(ue, dst);
+            case UpdateExpression up: return Update(up, dst);
+            case LogicalExpression le: return Logical(le, dst);
+            case BinaryExpression be: return Binary(be, dst);
+            case AssignmentExpression ae: return Assignment(ae, dst);
+            case ConditionalExpression c:
+            {
+                int d = Dst(dst);
+                int elseL = _fb.NewLabel(), end = _fb.NewLabel();
+                Condition(c.Test, elseL);
+                // a conditional is not an anonymous function definition: its branches are not named
+                Expr(c.Consequent, d);
+                _fb.Jump(end);
+                _fb.Mark(elseL);
+                Expr(c.Alternate, d);
+                _fb.Mark(end);
+                return d;
+            }
+            case CallExpression call: return Call(call, dst);
+            case NewExpression ne: return New(ne, dst);
+            case MemberExpression me: return Member(me, dst);
+            case ChainExpression ch:
+            {
+                int d = Dst(dst);
+                int savedExit = _optionalExit;
+                int exit = _fb.NewLabel(), end = _fb.NewLabel();
+                _optionalExit = exit;
+                Expr(ch.Expression, d);
+                _optionalExit = savedExit;
+                _fb.Jump(end);
+                _fb.Mark(exit);
+                _fb.Emit(Op.LoadUndef, d);
+                _fb.Mark(end);
+                return d;
+            }
+            case SequenceExpression se:
+            {
+                int m = Mark;
+                for (int i = 0; i < se.Expressions.Count - 1; i++)
+                {
+                    Expr(se.Expressions[i]);
+                    ResetTo(m);
+                }
+                return Expr(se.Expressions[se.Expressions.Count - 1], dst);
+            }
+            case YieldExpression y: return Yield(y, dst);
+            case AwaitExpression aw:
+            {
+                int d = Dst(dst);
+                int m = Mark;
+                int v = Expr(aw.Argument);
+                int mode = Temp();
+                _fb.Position(aw);
+                _fb.Emit(Op.Await, v, d, mode);
+                int ok = _fb.NewLabel();
+                _fb.JumpIf(Op.JmpFalse, mode, ok);
+                _fb.Emit(Op.Throw, d);
+                _fb.Mark(ok);
+                ResetTo(Math.Max(m, d + 1));
+                return d;
+            }
+            case MetaProperty mp:
+            {
+                int d = Dst(dst);
+                if (mp.Meta.Name == "new") _fb.Emit(Op.LoadNewTarget, d);
+                else _fb.Emit(Op.ImportMeta, d);
+                return d;
+            }
+            case ParenthesizedExpression pe: return Expr(pe.Expression, dst, nameHint);
+            case ImportExpression ie:
+            {
+                int d = Dst(dst);
+                int m = Mark;
+                int s = Expr(ie.Source);
+                int o = ie.Options != null ? Expr(ie.Options) : -1;
+                // import.defer() / import.source() carry their phase as an immediate
+                var phase = ie.Phase switch { ImportPhase.Defer => ModulePhase.Defer, ImportPhase.Source => ModulePhase.Source, _ => ModulePhase.Evaluation };
+                _fb.Emit(Op.DynamicImport, d, s, o, (int)phase);
+                ResetTo(Math.Max(m, d + 1));
+                return d;
+            }
+            case Super:
+                throw new CompileError("InvalidSuper", "'super' keyword unexpected here", e);
+            default:
+                throw new CompileError("Unsupported", $"Unsupported expression '{e.Type}'.", e);
+        }
+    }
+
+    // ------------------------------------------------------------------ literals
+
+    private int Template(TemplateLiteral tl, int dst)
+    {
+        int d = Dst(dst);
+        var quasis = tl.Quasis;
+        _fb.Emit(Op.LoadConst, d, _fb.Const(quasis[0].Value.Cooked ?? ""));
+        for (int i = 0; i < tl.Expressions.Count; i++)
+        {
+            int m = Mark;
+            int v = Expr(tl.Expressions[i]);
+            int s = Temp();
+            _fb.Emit(Op.ToStringOp, s, v);
+            _fb.Emit(Op.Add, d, d, s);
+            string cooked = quasis[i + 1].Value.Cooked ?? "";
+            if (cooked.Length > 0)
+            {
+                _fb.Emit(Op.LoadConst, s, _fb.Const(cooked));
+                _fb.Emit(Op.Add, d, d, s);
+            }
+            ResetTo(m);
+        }
+        return d;
+    }
+
+    private int TaggedTemplate(TaggedTemplateExpression tt, int dst)
+    {
+        bool tail = _tailCall;
+        _tailCall = false;
+        int d = Dst(dst);
+        int m = Mark;
+        var site = new TemplateSite
+        {
+            Cooked = new string?[tt.Quasi.Quasis.Count],
+            Raw = new string[tt.Quasi.Quasis.Count],
+        };
+        for (int i = 0; i < site.Raw.Length; i++)
+        {
+            site.Cooked[i] = tt.Quasi.Quasis[i].Value.Cooked;
+            site.Raw[i] = tt.Quasi.Quasis[i].Value.Raw;
+        }
+        int fn, thisR = -1;
+        if (tt.Tag is MemberExpression me && me.Object is not Super)
+        {
+            thisR = Temp();
+            Expr(me.Object, thisR);
+            fn = Temp();
+            MemberGet(me, thisR, fn);
+        }
+        else fn = Expr(tt.Tag);
+        int argc = 1 + tt.Quasi.Expressions.Count;
+        int argStart = _fb.NextReg;
+        int a0 = Temp();
+        _fb.Emit(Op.GetTemplateObject, a0, _fb.AddObject(site), _fb.NewIc());
+        foreach (var x in tt.Quasi.Expressions) Expr(x, Temp());
+        _fb.Position(tt);
+        _fb.Emit(tail ? Op.TailCall : Op.Call, d, fn, thisR, argStart, argc);
+        ResetTo(Math.Max(m, d + 1));
+        return d;
+    }
+
+    private int ArrayLiteral(ArrayExpression ae, int dst)
+    {
+        int d = Dst(dst);
+        _fb.Emit(Op.NewArray, d, ae.Elements.Count);
+        foreach (var el in ae.Elements)
+        {
+            int m = Mark;
+            if (el == null) _fb.Emit(Op.ArrayPushHole, d);
+            else if (el is SpreadElement sp)
+            {
+                int v = Expr(sp.Argument);
+                _fb.Emit(Op.ArraySpread, d, v);
+            }
+            else
+            {
+                int v = Expr(el);
+                _fb.Emit(Op.ArrayPush, d, v);
+            }
+            ResetTo(m);
+        }
+        return d;
+    }
+
+    private int ObjectLiteral(ObjectExpression oe, int dst)
+    {
+        int d = Dst(dst);
+        _fb.Emit(Op.NewObject, d);
+        foreach (var p in oe.Properties)
+        {
+            int m = Mark;
+            if (p is SpreadElement sp)
+            {
+                int v = Expr(sp.Argument);
+                _fb.Emit(Op.CopyDataProps, d, v);
+                ResetTo(m);
+                continue;
+            }
+            var prop = (Property)p;
+            string? staticName = !prop.Computed ? PropertyKeyName(prop.Key) : null;
+            if (prop.Kind is PropertyKind.Get or PropertyKind.Set)
+            {
+                int key = Temp();
+                LoadKey(prop, key);
+                int fn = Temp();
+                int idx = CompileNestedFunction((FunctionExpression)prop.Value, staticName ?? "",
+                    FunctionFlags.Method | (prop.Kind == PropertyKind.Get ? FunctionFlags.IsGetter : FunctionFlags.IsSetter), prop.Start);
+                _fb.Emit(Op.Closure, fn, idx);
+                _fb.Emit(Op.SetHomeObject, fn, d);
+                _fb.Emit(Op.DefineAccessor, d, key, fn, (prop.Kind == PropertyKind.Get ? 0 : 1) | 4);
+            }
+            else if (prop.Method)
+            {
+                int key = Temp();
+                LoadKey(prop, key);
+                int fn = Temp();
+                int idx = CompileNestedFunction((FunctionExpression)prop.Value, staticName ?? "", FunctionFlags.Method, prop.Start);
+                _fb.Emit(Op.Closure, fn, idx);
+                _fb.Emit(Op.SetHomeObject, fn, d);
+                // computed method keys (incl. symbols) name the function at run time
+                _fb.Emit(Op.DefineAccessor, d, key, fn, 2 | 4 | (staticName == null ? 8 : 0));
+            }
+            else if (staticName != null)
+            {
+                if (staticName == "__proto__" && !prop.Shorthand)
+                {
+                    int v = Expr((Expression)prop.Value);
+                    _fb.Emit(Op.SetProto, d, v);
+                }
+                else
+                {
+                    int v = Expr((Expression)prop.Value, -1, staticName);
+                    _fb.Emit(Op.DefinePropK, d, _fb.Const(staticName), v);
+                }
+            }
+            else
+            {
+                int key = Temp();
+                LoadKey(prop, key);
+                int v = Expr((Expression)prop.Value);
+                bool anonFn = prop.Value is ArrowFunctionExpression or FunctionExpression { Id: null } or ClassExpression { Id: null };
+                if (anonFn) _fb.Emit(Op.DefineAccessor, d, key, v, 2 | 4 | 8);
+                else _fb.Emit(Op.DefineProp, d, key, v);
+            }
+            ResetTo(m);
+        }
+        return d;
+    }
+
+    private static string? PropertyKeyName(Node key) => key switch
+    {
+        Identifier id => id.Name,
+        StringLiteral s => s.Value,
+        NumericLiteral n => Jaunt.Runtime.NumberFormatting.ToString(n.Value),
+        BigIntLiteral b => b.Value.ToString(System.Globalization.CultureInfo.InvariantCulture),
+        _ => null,
+    };
+
+    private void LoadKey(IProperty prop, int dst)
+    {
+        if (prop.Computed)
+        {
+            int v = Expr(prop.Key);
+            _fb.Emit(Op.ToPropertyKey, dst, v);
+            return;
+        }
+        string? name = PropertyKeyName(prop.Key);
+        if (name == null) throw new CompileError("Unsupported", "Unsupported property key.", prop.Key);
+        _fb.Emit(Op.LoadConst, dst, _fb.Const(name));
+    }
+
+    // ------------------------------------------------------------------ operators
+
+    private int Unary(UnaryExpression ue, int dst)
+    {
+        switch (ue.Operator)
+        {
+            case Operator.TypeOf:
+                if (ue.Argument is Identifier gid && _refs[gid].Binding == null)
+                {
+                    int d0 = Dst(dst);
+                    int t = Temp();
+                    if (_refs[gid].Dynamic) _fb.Emit(Op.LdName, t, _fb.Const(gid.Name), 1);
+                    else _fb.Emit(Op.GetGlobalTypeof, t, _fb.Const(gid.Name), _fb.NewIc());
+                    _fb.Emit(Op.Typeof, d0, t);
+                    Release(t);
+                    return d0;
+                }
+                break;
+            case Operator.Delete:
+            {
+                int d0 = Dst(dst);
+                int m = Mark;
+                if (ue.Argument is MemberExpression sme && sme.Object is Super)
+                {
+                    // delete super[x]: the this binding and the key expression are evaluated, then ReferenceError
+                    int th = Temp();
+                    _fb.Emit(Op.LoadThis, th);
+                    if (sme.Computed) Expr(sme.Property);
+                    _fb.Emit(Op.ThrowRefError, _fb.Const("super")); // message: "super is not defined"
+                    ResetTo(Math.Max(m, d0 + 1));
+                    return d0;
+                }
+                if (ue.Argument is MemberExpression me && me.Object is not Super)
+                {
+                    int o = Expr(me.Object);
+                    if (!me.Computed && me.Property is Identifier pid) _fb.Emit(Op.DelProp, d0, o, _fb.Const(pid.Name));
+                    else
+                    {
+                        int k = Expr(me.Property);
+                        _fb.Emit(Op.DelElem, d0, o, k);
+                    }
+                }
+                else if (ue.Argument is ChainExpression)
+                {
+                    Expr(ue.Argument);
+                    _fb.Emit(Op.LoadTrue, d0);
+                }
+                else if (ue.Argument is Identifier did)
+                {
+                    var dref = _refs[did];
+                    if (dref.Binding == null) _fb.Emit(Op.DelName, d0, _fb.Const(did.Name));
+                    else if (dref.Binding.IsEvalDynamic) _fb.Emit(Op.DelName, d0, _fb.Const(did.Name));
+                    else _fb.Emit(Op.LoadFalse, d0);
+                }
+                else
+                {
+                    Expr(ue.Argument);
+                    _fb.Emit(Op.LoadTrue, d0);
+                }
+                ResetTo(Math.Max(m, d0 + 1));
+                return d0;
+            }
+            case Operator.Void:
+            {
+                int m = Mark;
+                Expr(ue.Argument);
+                ResetTo(m);
+                int d0 = Dst(dst);
+                _fb.Emit(Op.LoadUndef, d0);
+                return d0;
+            }
+        }
+        int mm = Mark;
+        int v = Expr(ue.Argument);
+        int d = dst >= 0 ? dst : (v >= mm ? v : Temp());
+        var op = ue.Operator switch
+        {
+            Operator.UnaryNegation => Op.Neg,
+            Operator.UnaryPlus => Op.Plus,
+            Operator.LogicalNot => Op.Not,
+            Operator.BitwiseNot => Op.BitNot,
+            Operator.TypeOf => Op.Typeof,
+            _ => throw new CompileError("Unsupported", $"Unsupported unary operator {ue.Operator}.", ue),
+        };
+        _fb.Emit(op, d, v);
+        return d;
+    }
+
+    private static Op BinaryOp(Operator op, Node node) => op switch
+    {
+        Operator.Addition or Operator.AdditionAssignment => Op.Add,
+        Operator.Subtraction or Operator.SubtractionAssignment => Op.Sub,
+        Operator.Multiplication or Operator.MultiplicationAssignment => Op.Mul,
+        Operator.Division or Operator.DivisionAssignment => Op.Div,
+        Operator.Remainder or Operator.RemainderAssignment => Op.Mod,
+        Operator.Exponentiation or Operator.ExponentiationAssignment => Op.Exp,
+        Operator.BitwiseAnd or Operator.BitwiseAndAssignment => Op.BitAnd,
+        Operator.BitwiseOr or Operator.BitwiseOrAssignment => Op.BitOr,
+        Operator.BitwiseXor or Operator.BitwiseXorAssignment => Op.BitXor,
+        Operator.LeftShift or Operator.LeftShiftAssignment => Op.Shl,
+        Operator.RightShift or Operator.RightShiftAssignment => Op.Shr,
+        Operator.UnsignedRightShift or Operator.UnsignedRightShiftAssignment => Op.UShr,
+        Operator.Equality => Op.Eq,
+        Operator.Inequality => Op.Ne,
+        Operator.StrictEquality => Op.StrictEq,
+        Operator.StrictInequality => Op.StrictNe,
+        Operator.LessThan => Op.Lt,
+        Operator.LessThanOrEqual => Op.Le,
+        Operator.GreaterThan => Op.Gt,
+        Operator.GreaterThanOrEqual => Op.Ge,
+        Operator.InstanceOf => Op.InstanceOf,
+        Operator.In => Op.In,
+        _ => throw new CompileError("Unsupported", $"Unsupported operator {op}.", node),
+    };
+
+    private int Binary(BinaryExpression be, int dst)
+    {
+        if (be.Operator == Operator.In && be.Left is PrivateIdentifier ppid)
+        {
+            int d0 = Dst(dst);
+            int m0 = Mark;
+            int obj = Expr(be.Right);
+            int name = LoadPrivateName(ppid);
+            _fb.Emit(Op.PrivateIn, d0, obj, name);
+            ResetTo(Math.Max(m0, d0 + 1));
+            return d0;
+        }
+        int m = Mark;
+        var op = BinaryOp(be.Operator, be);
+        // constant folding of `x + k` for number constants
+        var (a, b) = Operands(be.Left, be.Right);
+        int d = dst >= 0 ? dst : Temp();
+        if (dst < 0 && d != m) { ResetTo(m); d = Temp(); }
+        _fb.Emit(op, d, a, b);
+        ResetTo(Math.Max(m, d + 1));
+        return d;
+    }
+
+    private int Logical(LogicalExpression le, int dst)
+    {
+        int d = Dst(dst);
+        int end = _fb.NewLabel();
+        Expr(le.Left, d);
+        switch (le.Operator)
+        {
+            case Operator.LogicalAnd: _fb.JumpIf(Op.JmpFalse, d, end); break;
+            case Operator.LogicalOr: _fb.JumpIf(Op.JmpTrue, d, end); break;
+            default: _fb.JumpIf(Op.JmpNotNullish, d, end); break;
+        }
+        Expr(le.Right, d);
+        _fb.Mark(end);
+        return d;
+    }
+
+    /// <summary>Compiles an expression whose value is not used (statement / for-update / sequence prefix).</summary>
+    private void ExprDiscard(Expression e)
+    {
+        int m = Mark;
+        if (e is UpdateExpression up && up.Argument is Identifier)
+        {
+            Enter(e);
+            Update(up, -1, discard: true);
+            Leave();
+        }
+        else Expr(e);
+        ResetTo(m);
+    }
+
+    /// <summary>
+    /// Annex B (sloppy code): a call expression as an assignment / update / for-in-of target is evaluated and then
+    /// throws a ReferenceError (the right-hand side is not evaluated).
+    /// </summary>
+    private int CallAssignmentTarget(CallExpression call, int dst)
+    {
+        int m = Mark;
+        Expr(call);
+        _fb.Emit(Op.ThrowRefError, _fb.Const("Invalid left-hand side in assignment"));
+        ResetTo(m);
+        return Dst(dst);
+    }
+
+    private int Update(UpdateExpression up, int dst, bool discard = false)
+    {
+        bool inc = up.Operator == Operator.Increment;
+        var op = inc ? Op.Inc : Op.Dec;
+        int m = Mark;
+        if (up.Argument is CallExpression ucall) return CallAssignmentTarget(ucall, dst);
+        if (up.Argument is Identifier id)
+        {
+            var res = _refs[id];
+            if (res.Binding != null && !res.Binding.Captured && res.Binding.Register >= 0 && !res.Binding.IsConst && res.Binding.Kind != BindingKind.FuncName)
+            {
+                int reg = res.Binding.Register;
+                if (res.NeedsTdzCheck && res.Binding.HasTdz) _fb.Emit(Op.CheckTdz, reg, _fb.Const(id.Name));
+                if (up.Prefix || discard)
+                {
+                    _fb.Emit(op, reg, reg);
+                    if (dst >= 0) { _fb.Emit(Op.Mov, dst, reg); return dst; }
+                    return reg;
+                }
+                int old = Dst(dst);
+                _fb.Emit(Op.ToNumeric, old, reg);
+                _fb.Emit(op, reg, old);
+                return old;
+            }
+            if (IsDynamicRef(id))
+            {
+                int res2 = Dst(dst);
+                int rr = EmitResolveRef(id);
+                int c2 = Temp();
+                _fb.Emit(Op.LdRef, c2, rr);
+                if (up.Prefix) { _fb.Emit(op, c2, c2); EmitStoreRef(rr, c2); _fb.Emit(Op.Mov, res2, c2); }
+                else { _fb.Emit(Op.ToNumeric, res2, c2); _fb.Emit(op, c2, res2); EmitStoreRef(rr, c2); }
+                ResetTo(Math.Max(m, res2 + 1));
+                return res2;
+            }
+            int cur = LoadIdentifier(id, Temp());
+            int result = Dst(dst);
+            if (up.Prefix)
+            {
+                _fb.Emit(op, cur, cur);
+                StoreIdentifier(id, cur, false);
+                if (result != cur) _fb.Emit(Op.Mov, result, cur);
+            }
+            else
+            {
+                _fb.Emit(Op.ToNumeric, result, cur);
+                _fb.Emit(op, cur, result);
+                StoreIdentifier(id, cur, false);
+            }
+            ResetTo(Math.Max(m, result + 1));
+            return result;
+        }
+        if (up.Argument is MemberExpression me)
+        {
+            int result = Dst(dst);
+            var target = PrepareMemberTarget(me);
+            int cur = Temp();
+            ReadMemberTarget(target, cur);
+            if (up.Prefix)
+            {
+                _fb.Emit(op, cur, cur);
+                WriteMemberTarget(target, cur);
+                _fb.Emit(Op.Mov, result, cur);
+            }
+            else
+            {
+                _fb.Emit(Op.ToNumeric, result, cur);
+                _fb.Emit(op, cur, result);
+                WriteMemberTarget(target, cur);
+            }
+            ResetTo(Math.Max(m, result + 1));
+            return result;
+        }
+        throw new CompileError("InvalidUpdate", "Invalid left-hand side expression in update operation", up);
+    }
+
+    // ------------------------------------------------------------------ member targets
+
+    private struct MemberTarget
+    {
+        public int Obj;
+        public int Key;          // register for computed / super / private
+        public string? Name;     // static name
+        public int Ic;
+        public bool IsSuper;
+        public bool IsPrivate;
+        public int This;
+    }
+
+    private MemberTarget PrepareMemberTarget(MemberExpression me, bool deferKey = false)
+    {
+        var t = new MemberTarget { Key = -1, Ic = -1, This = -1 };
+        if (me.Object is Super)
+        {
+            t.IsSuper = true;
+            t.This = Temp();
+            _fb.Emit(Op.LoadThis, t.This);
+            t.Key = Temp();
+            t.Obj = Temp();   // super base: GetSuperBase happens when the reference is made, before ToPropertyKey
+            if (me.Computed)
+            {
+                int k = Expr(me.Property);
+                _fb.Emit(Op.LoadSuperBase, t.Obj);
+                _fb.Emit(deferKey ? Op.Mov : Op.ToPropertyKey, t.Key, k);
+            }
+            else
+            {
+                _fb.Emit(Op.LoadSuperBase, t.Obj);
+                _fb.Emit(Op.LoadConst, t.Key, _fb.Const(((Identifier)me.Property).Name));
+            }
+            return t;
+        }
+        t.Obj = Temp();
+        Expr(me.Object, t.Obj);
+        if (me.Property is PrivateIdentifier pid)
+        {
+            t.IsPrivate = true;
+            t.Key = LoadPrivateName(pid);
+        }
+        else if (me.Computed)
+        {
+            t.Key = Temp();
+            int k = Expr(me.Property);
+            if (me.Property is NumericLiteral or StringLiteral || deferKey) _fb.Emit(Op.Mov, t.Key, k); // simple assignment: PutValue converts
+            else
+            {
+                // the base is checked (ToObject) before the key is converted
+                int ok = _fb.NewLabel();
+                _fb.JumpIf(Op.JmpNotNullish, t.Obj, ok);
+                _fb.Emit(Op.ThrowTypeError, _fb.Const("Cannot read properties of null or undefined"));
+                _fb.Mark(ok);
+                _fb.Emit(Op.ToPropertyKey, t.Key, k);
+            }
+        }
+        else
+        {
+            t.Name = ((Identifier)me.Property).Name;
+            t.Ic = _fb.NewIc();
+        }
+        return t;
+    }
+
+    private void ReadMemberTarget(in MemberTarget t, int dst)
+    {
+        if (t.IsSuper) _fb.Emit(Op.GetSuper, dst, t.Key, t.This, t.Obj);
+        else if (t.IsPrivate) _fb.Emit(Op.PrivateGet, dst, t.Obj, t.Key);
+        else if (t.Name != null) _fb.Emit(Op.GetProp, dst, t.Obj, _fb.Const(t.Name), t.Ic);
+        else _fb.Emit(Op.GetElem, dst, t.Obj, t.Key);
+    }
+
+    private void WriteMemberTarget(in MemberTarget t, int src)
+    {
+        if (t.IsSuper) _fb.Emit(Op.SetSuper, t.Key, src, t.This, t.Obj);
+        else if (t.IsPrivate) _fb.Emit(Op.PrivateSet, t.Obj, t.Key, src);
+        else if (t.Name != null) _fb.Emit(Op.SetProp, t.Obj, _fb.Const(t.Name), src, _fb.NewIc());
+        else _fb.Emit(Op.SetElem, t.Obj, t.Key, src);
+    }
+
+    private int LoadPrivateName(PrivateIdentifier pid)
+    {
+        var fake = _analyzer.PrivateRef(pid);
+        return LoadIdentifier(fake, -1);
+    }
+
+    // ------------------------------------------------------------------ member access
+
+    private int Member(MemberExpression me, int dst)
+    {
+        int m = Mark;
+        if (me.Object is Super)
+        {
+            int d0 = Dst(dst);
+            var t = PrepareMemberTarget(me);
+            _fb.Position(me);
+            ReadMemberTarget(t, d0);
+            ResetTo(Math.Max(m, d0 + 1));
+            return d0;
+        }
+        int obj = Expr(me.Object);
+        if (me.Optional && _optionalExit >= 0) _fb.JumpIf(Op.JmpNullish, obj, _optionalExit);
+        int d = dst >= 0 ? dst : Temp();
+        _fb.Position(me);
+        MemberGet(me, obj, d);
+        ResetTo(Math.Max(m, d + 1));
+        return d;
+    }
+
+    private void MemberGet(MemberExpression me, int obj, int d)
+    {
+        if (me.Property is PrivateIdentifier pid)
+        {
+            int name = LoadPrivateName(pid);
+            _fb.Emit(Op.PrivateGet, d, obj, name);
+        }
+        else if (me.Computed)
+        {
+            if (me.Property is StringLiteral sl && !PropertyKey_IsIndex(sl.Value))
+            {
+                _fb.Emit(Op.GetProp, d, obj, _fb.Const(sl.Value), _fb.NewIc());
+                return;
+            }
+            int k = Expr(me.Property);
+            _fb.Emit(Op.GetElem, d, obj, k);
+        }
+        else
+        {
+            _fb.Emit(Op.GetProp, d, obj, _fb.Const(((Identifier)me.Property).Name), _fb.NewIc());
+        }
+    }
+
+    private static bool PropertyKey_IsIndex(string s) => Jaunt.Runtime.PropertyKey.TryParseArrayIndex(s, out _);
+
+    // ------------------------------------------------------------------ calls
+
+    private bool HasSpread(in NodeList<Expression> args)
+    {
+        foreach (var a in args) if (a is SpreadElement) return true;
+        return false;
+    }
+
+    /// <summary>Evaluates arguments into consecutive fresh registers; returns the first register.</summary>
+    private int Arguments(in NodeList<Expression> args)
+    {
+        int start = _fb.NextReg;
+        foreach (var a in args)
+        {
+            int r = Temp();
+            Expr(a, r);
+            _fb.NextReg = r + 1;
+        }
+        return start;
+    }
+
+    private int SpreadArguments(in NodeList<Expression> args)
+    {
+        int arr = Temp();
+        _fb.Emit(Op.NewArray, arr, args.Count);
+        foreach (var a in args)
+        {
+            int m = Mark;
+            if (a is SpreadElement sp)
+            {
+                int v = Expr(sp.Argument);
+                _fb.Emit(Op.ArraySpread, arr, v);
+            }
+            else
+            {
+                int v = Expr(a);
+                _fb.Emit(Op.ArrayPush, arr, v);
+            }
+            ResetTo(m);
+        }
+        return arr;
+    }
+
+    /// <summary>Arguments whose evaluation cannot observe or be observed by a property getter (literals, uncaptured locals).</summary>
+    private bool ArgumentsArePure(in NodeList<Expression> args)
+    {
+        foreach (var a in args)
+            if (!IsPureExpression(a)) return false;
+        return true;
+    }
+
+    /// <summary>Names declared at the top level of this script (always resolvable: var/function globals are non-configurable).</summary>
+    private bool DeclaredByScript(string name)
+    {
+        for (var sc = _scope; sc != null; sc = sc.Parent)
+            if (sc.Kind == ScopeKind.Script) return sc.Lookup(name) != null;
+        return false;
+    }
+
+    /// <summary>Expressions that run no user code and read no observable state (literals, uncaptured locals, closures).</summary>
+    private bool IsPureExpression(Node e) => e switch
+    {
+        Literal => true,
+        UnaryExpression { Operator: Operator.UnaryNegation, Argument: NumericLiteral } => true,
+        FunctionExpression or ArrowFunctionExpression => true,
+        Identifier id => _refs.TryGetValue(id, out var r) && !r.Dynamic && !r.NeedsTdzCheck && r.Binding is { Captured: false, Register: >= 0 },
+        _ => false,
+    };
+
+    private int Call(CallExpression call, int dst)
+    {
+        bool tail = _tailCall;   // only this call is in tail position, not calls in its callee or arguments
+        _tailCall = false;
+        int m = Mark;
+        int d = Dst(dst);
+        bool spread = HasSpread(call.Arguments);
+        if (call.Callee is Super)
+        {
+            if (spread)
+            {
+                int arr = SpreadArguments(call.Arguments);
+                _fb.Position(call);
+                _fb.Emit(Op.SuperCallSpread, d, arr);
+            }
+            else
+            {
+                int start = Arguments(call.Arguments);
+                _fb.Position(call);
+                _fb.Emit(Op.SuperCall, d, start, call.Arguments.Count);
+            }
+            ResetTo(Math.Max(m, d + 1));
+            return d;
+        }
+        int fn, thisR = -1;
+        if (call.Callee is MemberExpression me)
+        {
+            if (me.Object is Super)
+            {
+                var t = PrepareMemberTarget(me);
+                fn = Temp();
+                ReadMemberTarget(t, fn);
+                thisR = t.This;
+            }
+            else
+            {
+                int obj = Temp();
+                Expr(me.Object, obj);
+                if (me.Optional && _optionalExit >= 0) _fb.JumpIf(Op.JmpNullish, obj, _optionalExit);
+                // the fused op reads the method after the arguments: only when that order is unobservable
+                if (!me.Computed && me.Property is Identifier pid && !spread && !call.Optional && ArgumentsArePure(call.Arguments))
+                {
+                    // fused property load + call
+                    int start = Arguments(call.Arguments);
+                    _fb.Position(call);
+                    _fb.Emit(tail ? Op.TailCallMethod : Op.CallMethod, d, obj, _fb.Const(pid.Name), _fb.NewIc(), start, call.Arguments.Count);
+                    ResetTo(Math.Max(m, d + 1));
+                    return d;
+                }
+                fn = Temp();
+                MemberGet(me, obj, fn);
+                thisR = obj;
+            }
+        }
+        else if (call.Callee is ChainExpression { Expression: MemberExpression cme } && cme.Object is not Super)
+        {
+            // (a?.b)(): the parenthesized optional chain still yields a Reference, so `a` is the this value
+            fn = Temp();
+            thisR = Temp();
+            int savedExit = _optionalExit;
+            int exit = _fb.NewLabel(), end = _fb.NewLabel();
+            _optionalExit = exit;
+            Expr(cme.Object, thisR);
+            if (cme.Optional) _fb.JumpIf(Op.JmpNullish, thisR, exit);
+            MemberGet(cme, thisR, fn);
+            _optionalExit = savedExit;
+            _fb.Jump(end);
+            _fb.Mark(exit);
+            _fb.Emit(Op.LoadUndef, fn);
+            _fb.Emit(Op.LoadUndef, thisR);
+            _fb.Mark(end);
+        }
+        else if (call.Callee is Identifier cid && _refs[cid] is { Binding: null, Dynamic: true })
+        {
+            fn = Temp();
+            thisR = Temp();
+            _fb.Emit(Op.LdNameCall, fn, thisR, _fb.Const(cid.Name));
+        }
+        else
+        {
+            fn = Temp();
+            Expr(call.Callee, fn);
+        }
+        if (call.Optional && _optionalExit >= 0) _fb.JumpIf(Op.JmpNullish, fn, _optionalExit);
+        if (call.Callee is Identifier { Name: "eval" } && !call.Optional && spread)
+        {
+            int arr = SpreadArguments(call.Arguments);
+            _fb.Position(call);
+            _fb.Emit(Op.CallEvalSpread, d, fn, thisR, arr, EvalCallFlags());
+            ResetTo(Math.Max(m, d + 1));
+            return d;
+        }
+        if (call.Callee is Identifier { Name: "eval" } && !call.Optional && !spread)
+        {
+            int start = Arguments(call.Arguments);
+            _fb.Position(call);
+            _fb.Emit(tail ? Op.TailCallEval : Op.CallEval, d, fn, thisR, start, call.Arguments.Count, EvalCallFlags());
+            ResetTo(Math.Max(m, d + 1));
+            return d;
+        }
+        if (spread)
+        {
+            int arr = SpreadArguments(call.Arguments);
+            _fb.Position(call);
+            _fb.Emit(tail ? Op.TailCallSpread : Op.CallSpread, d, fn, thisR, arr);
+        }
+        else
+        {
+            int start = Arguments(call.Arguments);
+            _fb.Position(call);
+            _fb.Emit(tail ? Op.TailCall : Op.Call, d, fn, thisR, start, call.Arguments.Count);
+        }
+        ResetTo(Math.Max(m, d + 1));
+        return d;
+    }
+
+    private int New(NewExpression ne, int dst)
+    {
+        int m = Mark;
+        int d = Dst(dst);
+        int fn = Temp();
+        Expr(ne.Callee, fn);
+        if (HasSpread(ne.Arguments))
+        {
+            int arr = SpreadArguments(ne.Arguments);
+            _fb.Position(ne);
+            _fb.Emit(Op.NewSpread, d, fn, arr);
+        }
+        else
+        {
+            int start = Arguments(ne.Arguments);
+            _fb.Position(ne);
+            _fb.Emit(Op.New, d, fn, start, ne.Arguments.Count);
+        }
+        ResetTo(Math.Max(m, d + 1));
+        return d;
+    }
+
+    // ------------------------------------------------------------------ assignment
+
+    /// <summary>NamedEvaluation name for `id = &lt;anonymous fn&gt;`: none when the target is parenthesized ((id) = …).</summary>
+    private static string? AssignName(AssignmentExpression ae, Identifier id) => id.Start == ae.Start ? id.Name : null;
+
+    private int Assignment(AssignmentExpression ae, int dst)
+    {
+        int m = Mark;
+        if (ae.Left is CallExpression lcall) return CallAssignmentTarget(lcall, dst);
+        if (ae.Operator == Operator.Assignment)
+        {
+            // strict code: an unresolvable global reference throws even if the right-hand side creates the
+            // property, because the reference is resolved first (6.2.5.6) — resolve eagerly when the RHS may run code
+            if (ae.Left is Identifier did0 && (IsDynamicRef(did0)
+                || (_func.Strict && _refs[did0] is { Binding: null, Dynamic: false } && !IsPureExpression(ae.Right) && !DeclaredByScript(did0.Name))))
+            {
+                int rr = EmitResolveRef(did0);
+                int v = Expr(ae.Right, -1, AssignName(ae, did0));
+                EmitStoreRef(rr, v);
+                if (dst >= 0 && dst != v) { _fb.Emit(Op.Mov, dst, v); return dst; }
+                return v;
+            }
+            if (ae.Left is Identifier id)
+            {
+                var res = _refs[id];
+                if (res.Binding != null && !res.Binding.Captured && res.Binding.Register >= 0 && !res.Binding.IsConst
+                    && res.Binding.Kind is not BindingKind.FuncName and not BindingKind.Import && !res.NeedsTdzCheck
+                    && (WritesDestinationLast(ae.Right) || !Mentions(ae.Right, id.Name)))
+                {
+                    int reg = res.Binding.Register;
+                    Expr(ae.Right, reg, AssignName(ae, id));
+                    if (dst >= 0) { _fb.Emit(Op.Mov, dst, reg); return dst; }
+                    return reg;
+                }
+                int v = Expr(ae.Right, -1, AssignName(ae, id));
+                StoreIdentifier(id, v, false);
+                if (dst >= 0 && dst != v) { _fb.Emit(Op.Mov, dst, v); return dst; }
+                return v;
+            }
+            if (ae.Left is MemberExpression me)
+            {
+                var t = PrepareMemberTarget(me, deferKey: true);
+                int v = Expr(ae.Right);
+                _fb.Position(ae);
+                WriteMemberTarget(t, v);
+                if (dst >= 0) { _fb.Emit(Op.Mov, dst, v); ResetTo(Math.Max(m, dst + 1)); return dst; }
+                return v;
+            }
+            {
+                int v = Temp();
+                Expr(ae.Right, v);
+                BindPattern(ae.Left, v, PatternMode.Assign);
+                if (dst >= 0) { _fb.Emit(Op.Mov, dst, v); return dst; }
+                return v;
+            }
+        }
+        bool logical = ae.Operator is Operator.LogicalAndAssignment or Operator.LogicalOrAssignment or Operator.NullishCoalescingAssignment;
+        if (!logical && ae.Left is Identifier rid && _refs[rid] is { Binding: { Captured: false, Register: >= 0 } rb } rres
+            && !rb.IsConst && rb.Kind is not BindingKind.FuncName and not BindingKind.Import && !rres.NeedsTdzCheck && !HasSideEffects(ae.Right))
+        {
+            int reg = rb.Register;
+            int rv = Expr(ae.Right);
+            _fb.Emit(BinaryOp(ae.Operator, ae), reg, reg, rv);
+            ResetTo(m);
+            if (dst >= 0) { _fb.Emit(Op.Mov, dst, reg); return dst; }
+            return reg;
+        }
+        if (ae.Left is Identifier xid && IsDynamicRef(xid))
+        {
+            int d = Dst(dst);
+            int rr = EmitResolveRef(xid);
+            _fb.Emit(Op.LdRef, d, rr);
+            if (logical)
+            {
+                int end = _fb.NewLabel();
+                EmitLogicalSkip(ae.Operator, d, end);
+                Expr(ae.Right, d, AssignName(ae, xid));
+                EmitStoreRef(rr, d);
+                _fb.Mark(end);
+            }
+            else
+            {
+                int rv = Expr(ae.Right);
+                _fb.Emit(BinaryOp(ae.Operator, ae), d, d, rv);
+                EmitStoreRef(rr, d);
+            }
+            ResetTo(Math.Max(m, d + 1));
+            return d;
+        }
+        if (ae.Left is Identifier lid)
+        {
+            int d = Dst(dst);
+            LoadIdentifier(lid, d);
+            if (logical)
+            {
+                int end = _fb.NewLabel();
+                EmitLogicalSkip(ae.Operator, d, end);
+                Expr(ae.Right, d, AssignName(ae, lid));
+                StoreIdentifier(lid, d, false);
+                _fb.Mark(end);
+                return d;
+            }
+            int mm = Mark;
+            int rv = Expr(ae.Right);
+            _fb.Emit(BinaryOp(ae.Operator, ae), d, d, rv);
+            ResetTo(mm);
+            StoreIdentifier(lid, d, false);
+            return d;
+        }
+        if (ae.Left is MemberExpression lme)
+        {
+            int d = Dst(dst);
+            var t = PrepareMemberTarget(lme);
+            ReadMemberTarget(t, d);
+            if (logical)
+            {
+                int end = _fb.NewLabel();
+                EmitLogicalSkip(ae.Operator, d, end);
+                Expr(ae.Right, d);
+                WriteMemberTarget(t, d);
+                _fb.Mark(end);
+            }
+            else
+            {
+                int rv = Expr(ae.Right);
+                _fb.Emit(BinaryOp(ae.Operator, ae), d, d, rv);
+                WriteMemberTarget(t, d);
+            }
+            ResetTo(Math.Max(m, d + 1));
+            return d;
+        }
+        throw new CompileError("InvalidAssignment", "Invalid left-hand side in assignment", ae);
+    }
+
+    /// <summary>
+    /// True when compiling <paramref name="e"/> into a destination register reads all operands before the single
+    /// final write (so the destination may alias a register the expression reads).
+    /// </summary>
+    private static bool WritesDestinationLast(Expression e) => e switch
+    {
+        Literal or Identifier or ThisExpression => true,
+        LogicalExpression => false,
+        BinaryExpression => true,
+        UnaryExpression u when u is not UpdateExpression => u.Operator != Operator.Delete,
+        CallExpression or NewExpression or MemberExpression => true,
+        ConditionalExpression c => WritesDestinationLast(c.Consequent) && WritesDestinationLast(c.Alternate),
+        _ => false,
+    };
+
+    private void EmitLogicalSkip(Operator op, int reg, int end)
+    {
+        switch (op)
+        {
+            case Operator.LogicalAndAssignment: _fb.JumpIf(Op.JmpFalse, reg, end); break;
+            case Operator.LogicalOrAssignment: _fb.JumpIf(Op.JmpTrue, reg, end); break;
+            default: _fb.JumpIf(Op.JmpNotNullish, reg, end); break;
+        }
+    }
+
+    // ------------------------------------------------------------------ patterns
+
+    /// <summary>For destructuring assignment: a member-expression target (optionally with a default initializer).</summary>
+    private static (MemberExpression? target, Expression? dflt) SplitTarget(Node? n, PatternMode mode)
+    {
+        if (mode != PatternMode.Assign || n == null) return (null, null);
+        if (n is AssignmentPattern ap && ap.Left is MemberExpression am) return (am, ap.Right);
+        if (n is MemberExpression me) return (me, null);
+        return (null, null);
+    }
+
+    private (Identifier? Id, Expression? Default) DynamicPatternTarget(Node target, PatternMode mode)
+    {
+        if (mode == PatternMode.Init) return (null, null);
+        var (id, dflt) = target switch
+        {
+            Identifier i => (i, (Expression?)null),
+            AssignmentPattern { Left: Identifier i2 } ap => (i2, ap.Right),
+            _ => ((Identifier?)null, (Expression?)null),
+        };
+        return id != null && IsDynamicRef(id) ? (id, dflt) : (null, null);
+    }
+
+    private void EmitDefault(int v, Expression? dflt)
+    {
+        if (dflt == null) return;
+        int skip = _fb.NewLabel();
+        _fb.JumpIf(Op.JmpNotUndef, v, skip);
+        Expr(dflt, v);
+        _fb.Mark(skip);
+    }
+
+    private void BindPattern(Node target, int value, PatternMode mode)
+    {
+        Enter(target);
+        switch (target)
+        {
+            case Identifier id:
+                StoreIdentifier(id, value, mode == PatternMode.Init);
+                break;
+            case MemberExpression me:
+            {
+                int m = Mark;
+                var t = PrepareMemberTarget(me);
+                WriteMemberTarget(t, value);
+                ResetTo(m);
+                break;
+            }
+            case AssignmentPattern ap:
+            {
+                int m = Mark;
+                int v = Temp();
+                _fb.Emit(Op.Mov, v, value);
+                int skip = _fb.NewLabel();
+                _fb.JumpIf(Op.JmpNotUndef, v, skip);
+                Expr(ap.Right, v, ap.Left is Identifier hid ? hid.Name : null);
+                _fb.Mark(skip);
+                BindPattern(ap.Left, v, mode);
+                ResetTo(m);
+                break;
+            }
+            case ObjectPattern op:
+            {
+                int m = Mark;
+                int ok = _fb.NewLabel();
+                _fb.JumpIf(Op.JmpNotNullish, value, ok);
+                _fb.Emit(Op.ThrowTypeError, _fb.Const("Cannot destructure value as it is null or undefined."));
+                _fb.Mark(ok);
+                var keyRegs = new List<int>();
+                bool hasRest = false;
+                foreach (var p in op.Properties) if (p is RestElement) hasRest = true;
+                int keysStart = -1;
+                if (hasRest)
+                {
+                    keysStart = _fb.NextReg;
+                    foreach (var p in op.Properties) if (p is Property) keyRegs.Add(Temp());
+                }
+                int ki = 0;
+                foreach (var p in op.Properties)
+                {
+                    int mm = Mark;
+                    if (p is Property prop)
+                    {
+                        int v = Temp();
+                        string? name = !prop.Computed ? PropertyKeyName(prop.Key) : null;
+                        int keyReg = -1;
+                        if (name == null || hasRest)
+                        {
+                            keyReg = hasRest ? keyRegs[ki] : Temp();
+                            LoadKey(prop, keyReg);
+                        }
+                        // assignment: the target reference is evaluated before the property value is read
+                        var (memberTarget, memberDefault) = SplitTarget(prop.Value, mode);
+                        // an identifier resolved by name at run time (with / sloppy eval) is resolved before the read
+                        if (DynamicPatternTarget(prop.Value, mode) is var (dynId, dynDefault) && dynId != null)
+                        {
+                            int rr = EmitResolveRef(dynId);
+                            if (keyReg < 0) _fb.Emit(Op.GetProp, v, value, _fb.Const(name!), _fb.NewIc());
+                            else _fb.Emit(Op.GetElem, v, value, keyReg);
+                            if (dynDefault != null)
+                            {
+                                int skip = _fb.NewLabel();
+                                _fb.JumpIf(Op.JmpNotUndef, v, skip);
+                                Expr(dynDefault, v, dynId.Name);
+                                _fb.Mark(skip);
+                            }
+                            EmitStoreRef(rr, v);
+                            ki++;
+                            ResetTo(mm);
+                            continue;
+                        }
+                        if (memberTarget != null)
+                        {
+                            var mt = PrepareMemberTarget(memberTarget, deferKey: true);
+                            if (keyReg < 0) _fb.Emit(Op.GetProp, v, value, _fb.Const(name!), _fb.NewIc());
+                            else _fb.Emit(Op.GetElem, v, value, keyReg);
+                            EmitDefault(v, memberDefault);
+                            WriteMemberTarget(mt, v);
+                            ki++;
+                            ResetTo(mm);
+                            continue;
+                        }
+                        if (keyReg < 0)
+                        {
+                            _fb.Emit(Op.GetProp, v, value, _fb.Const(name!), _fb.NewIc());
+                        }
+                        else
+                        {
+                            _fb.Emit(Op.GetElem, v, value, keyReg);
+                        }
+                        ki++;
+                        BindPattern(prop.Value, v, mode);
+                    }
+                    else if (p is RestElement re)
+                    {
+                        int v = Temp();
+                        _fb.Emit(Op.ObjectRest, v, value, keyRegs.Count > 0 ? keysStart : -1, keyRegs.Count);
+                        BindPattern(re.Argument, v, mode);
+                    }
+                    ResetTo(mm);
+                }
+                ResetTo(m);
+                break;
+            }
+            case ArrayPattern ap:
+            {
+                int m = Mark;
+                int iter = Temp();
+                _fb.Emit(Op.GetIterator, iter, value);
+                int regionStart = _fb.Pc;
+                int depth = _envDepth;
+                // a return completion while suspended inside the pattern (generator .return()) closes the iterator
+                _control.Add(new ControlEntry { Kind = EntryKind.Iterator, Reg = iter });
+                foreach (var el in ap.Elements)
+                {
+                    int mm = Mark;
+                    int v = Temp();
+                    var (elMember, elDefault) = SplitTarget(el is RestElement rr0 ? rr0.Argument : el, mode);
+                    if (elMember != null)
+                    {
+                        var mt = PrepareMemberTarget(elMember, deferKey: true);
+                        if (el is RestElement) _fb.Emit(Op.IterRest, v, iter);
+                        else
+                        {
+                            _fb.Emit(Op.IterNextOrUndef, v, iter);
+                            EmitDefault(v, elDefault);
+                        }
+                        WriteMemberTarget(mt, v);
+                        ResetTo(mm);
+                        continue;
+                    }
+                    if (el is RestElement re)
+                    {
+                        _fb.Emit(Op.IterRest, v, iter);
+                        BindPattern(re.Argument, v, mode);
+                    }
+                    else
+                    {
+                        _fb.Emit(Op.IterNextOrUndef, v, iter);
+                        if (el != null) BindPattern(el, v, mode);
+                    }
+                    ResetTo(mm);
+                }
+                _control.RemoveAt(_control.Count - 1);
+                int regionEnd = _fb.Pc;
+                _fb.Emit(Op.IterClose, iter);
+                int after = _fb.NewLabel();
+                _fb.Jump(after);
+                int handler = _fb.NewLabel();
+                _fb.Mark(handler);
+                int exc = Temp();
+                _fb.Handlers.Add(new HandlerEntry { Start = regionStart, End = regionEnd, Target = _fb.LabelPosition(handler), ExceptionReg = exc, EnvDepth = depth });
+                _fb.Emit(Op.IterCloseQuiet, iter);
+                _fb.Emit(Op.Throw, exc);
+                _fb.Mark(after);
+                ResetTo(m);
+                break;
+            }
+            case RestElement re2:
+                BindPattern(re2.Argument, value, mode);
+                break;
+            default:
+                throw new CompileError("InvalidPattern", "Invalid destructuring assignment target", target);
+        }
+        Leave();
+    }
+
+    // ------------------------------------------------------------------ generators
+
+    private int Yield(YieldExpression y, int dst)
+    {
+        int d = Dst(dst);
+        int m = Mark;
+        if (IsAsyncGenerator) return y.Delegate ? YieldDelegateAsync(y, d, m) : YieldAsync(y, d, m);
+        if (y.Delegate) return YieldDelegate(y, d, m);
+        int v;
+        if (y.Argument != null) v = Expr(y.Argument);
+        else { v = Temp(); _fb.Emit(Op.LoadUndef, v); }
+        int mode = Temp();
+        _fb.Position(y);
+        _fb.Emit(Op.Yield, v, d, mode);
+        EmitResumeDispatch(d, mode);
+        ResetTo(Math.Max(m, d + 1));
+        return d;
+    }
+
+    /// <summary>After a resume: mode 0 = next (value in d), 1 = throw, 2 = return.</summary>
+    private void EmitResumeDispatch(int d, int mode)
+    {
+        int next = _fb.NewLabel(), isReturn = _fb.NewLabel();
+        _fb.JumpIf(Op.JmpFalse, mode, next);
+        int two = Temp();
+        _fb.Emit(Op.LoadInt, two, 2);
+        int cmp = Temp();
+        _fb.Emit(Op.StrictEq, cmp, mode, two);
+        _fb.JumpIf(Op.JmpTrue, cmp, isReturn);
+        _fb.Emit(Op.Throw, d);
+        _fb.Mark(isReturn);
+        EmitReturn(d);
+        _fb.Mark(next);
+    }
+
+    private int YieldDelegate(YieldExpression y, int d, int m)
+    {
+        int src = Expr(y.Argument!);
+        int iter = Temp();
+        _fb.Emit(Op.GetIteratorObj, iter, src);
+        int received = Temp(), mode = Temp(), res = Temp(), tmp = Temp(), fn = Temp();
+        _fb.Emit(Op.LoadUndef, received);
+        _fb.Emit(Op.LoadInt, mode, 0);
+        // obtain the raw iterator object (iter register holds an iterator record; ops below treat it as object)
+        int loop = _fb.NewLabel(), done = _fb.NewLabel(), notNext = _fb.NewLabel(), notThrow = _fb.NewLabel(), haveRes = _fb.NewLabel();
+        _fb.Mark(loop);
+        _fb.JumpIf(Op.JmpTrue, mode, notNext);
+        _fb.Emit(Op.CallMethod, res, iter, _fb.Const("next"), _fb.NewIc(), received, 1);
+        _fb.Emit(Op.ThrowIfNotObject, res, _fb.Const("Iterator result is not an object"));
+        _fb.Jump(haveRes);
+        _fb.Mark(notNext);
+        _fb.Emit(Op.LoadInt, tmp, 1);
+        _fb.Emit(Op.StrictEq, tmp, mode, tmp);
+        _fb.JumpIf(Op.JmpFalse, tmp, notThrow);
+        // throw mode
+        {
+            _fb.Emit(Op.GetProp, fn, iter, _fb.Const("throw"), _fb.NewIc());
+            int hasThrow = _fb.NewLabel();
+            _fb.JumpIf(Op.JmpNotNullish, fn, hasThrow);
+            _fb.Emit(Op.GetProp, fn, iter, _fb.Const("return"), _fb.NewIc());
+            int noRet = _fb.NewLabel();
+            _fb.JumpIf(Op.JmpNullish, fn, noRet);
+            _fb.Emit(Op.Call, tmp, fn, iter, tmp, 0);
+            _fb.Mark(noRet);
+            _fb.Emit(Op.ThrowTypeError, _fb.Const("The iterator does not provide a 'throw' method"));
+            _fb.Mark(hasThrow);
+            _fb.Emit(Op.Call, res, fn, iter, received, 1);
+            _fb.Emit(Op.ThrowIfNotObject, res, _fb.Const("Iterator result is not an object"));
+            _fb.Jump(haveRes);
+        }
+        _fb.Mark(notThrow);
+        // return mode
+        {
+            _fb.Emit(Op.GetProp, fn, iter, _fb.Const("return"), _fb.NewIc());
+            int hasReturn = _fb.NewLabel();
+            _fb.JumpIf(Op.JmpNotNullish, fn, hasReturn);
+            EmitReturn(received);
+            _fb.Mark(hasReturn);
+            _fb.Emit(Op.Call, res, fn, iter, received, 1);
+            _fb.Emit(Op.ThrowIfNotObject, res, _fb.Const("Iterator result is not an object"));
+            int okObj = _fb.NewLabel();
+            _fb.Emit(Op.GetProp, tmp, res, _fb.Const("done"), _fb.NewIc());
+            _fb.JumpIf(Op.JmpFalse, tmp, okObj);
+            _fb.Emit(Op.GetProp, tmp, res, _fb.Const("value"), _fb.NewIc());
+            EmitReturn(tmp);
+            _fb.Mark(okObj);
+            _fb.Emit(Op.YieldRaw, res, received, mode);
+            _fb.Jump(loop);
+        }
+        _fb.Mark(haveRes);
+        _fb.Emit(Op.GetProp, tmp, res, _fb.Const("done"), _fb.NewIc());
+        _fb.JumpIf(Op.JmpTrue, tmp, done);
+        _fb.Emit(Op.YieldRaw, res, received, mode);
+        _fb.Jump(loop);
+        _fb.Mark(done);
+        _fb.Emit(Op.GetProp, d, res, _fb.Const("value"), _fb.NewIc());
+        ResetTo(Math.Max(m, d + 1));
+        return d;
+    }
+
+    // ------------------------------------------------------------------ classes
+
+    /// <summary>Per-class compile state shared with the synthesized element initializers.</summary>
+    private sealed class ClassCompileInfo
+    {
+        /// <summary>Captured bindings holding computed field keys (evaluated at class definition time).</summary>
+        public readonly Dictionary<ClassProperty, Binding> KeyBindings = new();
+        /// <summary>Captured bindings holding the private storage name of each auto-accessor.</summary>
+        public readonly Dictionary<AccessorProperty, Binding> Storage = new();
+        /// <summary>Decorated classes only: the decoration state binding and the element index of decorated fields/accessors.</summary>
+        public Binding? DecState;
+        public readonly Dictionary<ClassProperty, int> DecIndex = new();
+    }
+
+    internal static NodeList<Decorator> ClassDecorators(Node node) => node switch
+    {
+        ClassDeclaration cd => cd.Decorators,
+        ClassExpression ce => ce.Decorators,
+        _ => default,
+    };
+
+    internal static NodeList<Decorator> ElementDecorators(Node element) => element switch
+    {
+        MethodDefinition md => md.Decorators,
+        PropertyDefinition pd => pd.Decorators,
+        AccessorProperty ap => ap.Decorators,
+        _ => default,
+    };
+
+    /// <summary>Evaluates a decorator list (in source order) into a new array.</summary>
+    private void DecoratorList(in NodeList<Decorator> decorators, int dst)
+    {
+        _fb.Emit(Op.NewArray, dst, decorators.Count);
+        foreach (var dec in decorators)
+        {
+            int mm = Mark;
+            int v = Expr(dec.Expression);
+            _fb.Emit(Op.ArrayPush, dst, v);
+            ResetTo(mm);
+        }
+    }
+
+    /// <summary>Emits <see cref="Op.Intrinsic"/> with the given operand registers (-1 = undefined) copied to a contiguous window.</summary>
+    private void EmitIntrinsic(int dst, Jaunt.Runtime.ClassIntrinsic id, params int[] args)
+    {
+        int start = Mark;
+        foreach (var a in args)
+        {
+            int r = Temp();
+            if (a < 0) _fb.Emit(Op.LoadUndef, r);
+            else _fb.Emit(Op.Mov, r, a);
+        }
+        _fb.Emit(Op.Intrinsic, dst, (int)id, start, args.Length);
+        ResetTo(start);
+    }
+
+    private int IntReg(int value)
+    {
+        int r = Temp();
+        _fb.Emit(Op.LoadInt, r, value);
+        return r;
+    }
+
+    private int Class(Node node, Identifier? id, Expression? superClass, ClassBody body, string name, int dst)
+    {
+        Enter(node);
+        int m = Mark;
+        var classScope = _scopes[node];
+        var classDecs = ClassDecorators(node);
+        bool decorated = classDecs.Count > 0;
+        foreach (var el in body.Body) if (ElementDecorators(el).Count > 0) { decorated = true; break; }
+        // class decorators are evaluated first, in the enclosing scope
+        int classDecsR = -1;
+        if (classDecs.Count > 0)
+        {
+            classDecsR = Temp();
+            DecoratorList(classDecs, classDecsR);
+        }
+        // synthetic captured bindings: computed field keys, auto-accessor storage, decoration state
+        var info = new ClassCompileInfo();
+        int synth = 0;
+        foreach (var el in body.Body)
+        {
+            if (el is PropertyDefinition pd && pd.Computed)
+            {
+                var b = classScope.Declare("%fk" + (synth++), BindingKind.Synthetic, 0);
+                b.Captured = true;
+                info.KeyBindings[pd] = b;
+            }
+            else if (el is AccessorProperty ap)
+            {
+                var b = classScope.Declare("%as" + (synth++), BindingKind.Synthetic, 0);
+                b.Captured = true;
+                info.Storage[ap] = b;
+            }
+        }
+        if (decorated)
+        {
+            info.DecState = classScope.Declare("%dec", BindingKind.Synthetic, 0);
+            info.DecState.Captured = true;
+        }
+        var scope = EnterScope(node)!;
+        // private names
+        foreach (var b in classScope.Ordered)
+        {
+            if (b.Kind != BindingKind.PrivateName) continue;
+            int r = Temp();
+            int kind = 0;
+            foreach (var el in body.Body)
+            {
+                if (el is MethodDefinition md && md.Key is PrivateIdentifier p && "#" + p.Name == b.Name)
+                    kind = md.Kind == PropertyKind.Method ? 1 : 2;
+                else if (el is AccessorProperty { Key: PrivateIdentifier ap } && "#" + ap.Name == b.Name)
+                    kind = 2;
+            }
+            _fb.Emit(Op.NewPrivateName, r, _fb.Const(b.Name), kind);
+            StoreBinding(b, r, init: true, node);
+            Release(r);
+        }
+        int superR = -1;
+        if (superClass != null)
+        {
+            superR = Temp();
+            Expr(superClass, superR);
+        }
+        MethodDefinition? ctorDef = null;
+        foreach (var el in body.Body) if (el is MethodDefinition { Kind: PropertyKind.Constructor } md) ctorDef = md;
+        int ctorIdx;
+        var ctorFlags = FunctionFlags.ClassConstructor | FunctionFlags.Method | FunctionFlags.Strict | (superClass != null ? FunctionFlags.Derived : 0);
+        if (ctorDef != null)
+        {
+            ctorIdx = CompileNestedFunction(ctorDef.Value, name, ctorFlags);
+            var t = _fb.Functions[ctorIdx];
+            t.Flags &= ~FunctionFlags.NoPrototype;
+            t.SourceStart = node.Start;
+            t.SourceEnd = node.End;
+        }
+        else ctorIdx = _fb.AddFunction(DefaultConstructor(name, ctorFlags, node));
+        int ctorR = Temp();
+        int protoR = Temp();
+        _fb.Position(node);
+        _fb.Emit(Op.ClassCreate, ctorR, protoR, ctorIdx, superR, superClass != null ? 1 : 0);
+        int stateR = -1;
+        if (decorated)
+        {
+            stateR = Temp();
+            int mm = Mark;
+            int nameR = Temp();
+            _fb.Emit(Op.LoadConst, nameR, _fb.Const(name));
+            EmitIntrinsic(stateR, Jaunt.Runtime.ClassIntrinsic.DecoratorsBegin, ctorR, protoR, classDecsR, superR, nameR);
+            StoreBinding(info.DecState!, stateR, init: true, node);
+            ResetTo(mm);
+        }
+
+        // elements, in document order: decorators, keys, methods and accessors
+        var staticBranded = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var el in body.Body)
+        {
+            if (el is StaticBlock || el is MethodDefinition { Kind: PropertyKind.Constructor }) continue;
+            int mm = Mark;
+            var decs = ElementDecorators(el);
+            int decsR = -1;
+            if (decs.Count > 0)
+            {
+                decsR = Temp();
+                DecoratorList(decs, decsR);
+            }
+            var cp = (ClassProperty)el;
+            int target = cp.Static ? ctorR : protoR;
+            switch (el)
+            {
+                case MethodDefinition md:
+                {
+                    var flags = FunctionFlags.Method | (md.Kind == PropertyKind.Get ? FunctionFlags.IsGetter : md.Kind == PropertyKind.Set ? FunctionFlags.IsSetter : 0);
+                    // 0 method, 1 getter, 2 setter
+                    int mk = md.Kind == PropertyKind.Get ? 1 : md.Kind == PropertyKind.Set ? 2 : 0;
+                    if (md.Key is PrivateIdentifier pid)
+                    {
+                        int fn = Temp();
+                        int idx = CompileNestedFunction(md.Value, "#" + pid.Name, flags, MethodSourceStart(md));
+                        _fb.Emit(Op.Closure, fn, idx);
+                        _fb.Emit(Op.SetHomeObject, fn, target);
+                        int nameR = LoadPrivateName(pid);
+                        if (decsR < 0) _fb.Emit(Op.PrivateMethod, nameR, fn, mk);
+                        else AddDecoratedElement(stateR, 2 + mk, md.Static, nameR, fn, -1, decsR);
+                        if (md.Static && staticBranded.Add(pid.Name)) _fb.Emit(Op.PrivateDefine, ctorR, nameR, fn);
+                    }
+                    else
+                    {
+                        int key = Temp();
+                        LoadKey(md, key);
+                        string? sname = !md.Computed ? PropertyKeyName(md.Key) : null;
+                        int fn = Temp();
+                        int idx = CompileNestedFunction(md.Value, sname ?? "", flags, MethodSourceStart(md));
+                        _fb.Emit(Op.Closure, fn, idx);
+                        _fb.Emit(Op.SetHomeObject, fn, target);
+                        if (decsR < 0)
+                        {
+                            int kind = mk == 1 ? 0 : mk == 2 ? 1 : 2;
+                            _fb.Emit(Op.DefineAccessor, target, key, fn, kind | (md.Computed ? 8 : 0));
+                        }
+                        else AddDecoratedElement(stateR, 2 + mk, md.Static, key, fn, -1, decsR);
+                    }
+                    break;
+                }
+                case PropertyDefinition pd:
+                {
+                    int key = -1;
+                    if (pd.Computed)
+                    {
+                        key = Temp();
+                        LoadKey(pd, key);
+                        StoreBinding(info.KeyBindings[pd], key, init: true, pd);
+                    }
+                    if (decsR >= 0)
+                    {
+                        if (pd.Key is PrivateIdentifier pid) key = LoadPrivateName(pid);
+                        else if (key < 0) { key = Temp(); LoadKey(pd, key); }
+                        info.DecIndex[pd] = info.DecIndex.Count;
+                        AddDecoratedElement(stateR, 0, pd.Static, key, -1, -1, decsR);
+                    }
+                    break;
+                }
+                case AccessorProperty ap:
+                {
+                    int key;
+                    string desc;
+                    if (ap.Key is PrivateIdentifier pid)
+                    {
+                        key = LoadPrivateName(pid);
+                        desc = "#" + pid.Name;
+                    }
+                    else
+                    {
+                        key = Temp();
+                        LoadKey(ap, key);
+                        desc = (ap.Computed ? null : PropertyKeyName(ap.Key)) ?? "accessor";
+                    }
+                    int storage = Temp();
+                    _fb.Emit(Op.NewPrivateName, storage, _fb.Const(desc), 0);
+                    StoreBinding(info.Storage[ap], storage, init: true, ap);
+                    int getter = Temp(), setter = Temp();
+                    EmitIntrinsic(getter, Jaunt.Runtime.ClassIntrinsic.AutoAccessorGetter, storage, key);
+                    EmitIntrinsic(setter, Jaunt.Runtime.ClassIntrinsic.AutoAccessorSetter, storage, key);
+                    if (decsR >= 0)
+                    {
+                        info.DecIndex[ap] = info.DecIndex.Count;
+                        AddDecoratedElement(stateR, 1, ap.Static, key, getter, setter, decsR);
+                    }
+                    else if (ap.Key is PrivateIdentifier)
+                    {
+                        _fb.Emit(Op.PrivateMethod, key, getter, 1);
+                        _fb.Emit(Op.PrivateMethod, key, setter, 2);
+                    }
+                    else
+                    {
+                        _fb.Emit(Op.DefineAccessor, target, key, getter, 0);
+                        _fb.Emit(Op.DefineAccessor, target, key, setter, 1);
+                    }
+                    if (ap.Static && ap.Key is PrivateIdentifier spid && staticBranded.Add(spid.Name)) _fb.Emit(Op.PrivateDefine, ctorR, key, getter);
+                    break;
+                }
+            }
+            ResetTo(mm);
+        }
+        if (decorated)
+        {
+            int u = Temp();
+            EmitIntrinsic(u, Jaunt.Runtime.ClassIntrinsic.DecoratorsApplyElements, stateR);
+            Release(u);
+        }
+        // instance fields & private methods brand
+        bool hasInstanceElements = false;
+        foreach (var el in body.Body)
+        {
+            if (el is PropertyDefinition { Static: false } or AccessorProperty { Static: false }) hasInstanceElements = true;
+            else if (el is MethodDefinition { Static: false, Key: PrivateIdentifier }) hasInstanceElements = true;
+            // decorators of instance methods can add instance initializers
+            else if (el is MethodDefinition { Static: false } md && md.Decorators.Count > 0) hasInstanceElements = true;
+        }
+        if (hasInstanceElements)
+        {
+            int init = Temp();
+            int idx = _fb.AddFunction(FieldInitializer(body, false, info));
+            _fb.Emit(Op.Closure, init, idx);
+            _fb.Emit(Op.SetHomeObject, init, protoR);
+            _fb.Emit(Op.SetFieldInit, ctorR, init);
+            Release(init);
+        }
+        // class decorators may replace the class
+        int classR = ctorR;
+        if (decorated)
+        {
+            classR = Temp();
+            EmitIntrinsic(classR, Jaunt.Runtime.ClassIntrinsic.DecoratorsApplyClass, stateR);
+        }
+        // class inner binding
+        if (id != null)
+        {
+            var inner = classScope.Lookup(id.Name);
+            if (inner != null) StoreBinding(inner, classR, init: true, node);
+        }
+        // static fields and blocks
+        if (decorated)
+        {
+            int u = Temp();
+            EmitIntrinsic(u, Jaunt.Runtime.ClassIntrinsic.DecoratorsStaticExtra, stateR);
+            Release(u);
+        }
+        bool hasStatic = false;
+        foreach (var el in body.Body) if (el is PropertyDefinition { Static: true } or AccessorProperty { Static: true } or StaticBlock) hasStatic = true;
+        if (hasStatic)
+        {
+            int mm = Mark;
+            int init = Temp();
+            int idx = _fb.AddFunction(FieldInitializer(body, true, info));
+            _fb.Emit(Op.Closure, init, idx);
+            _fb.Emit(Op.SetHomeObject, init, ctorR);
+            int res = Temp();
+            _fb.Emit(Op.Call, res, init, ctorR, res, 0);
+            ResetTo(mm);
+        }
+        if (decorated)
+        {
+            int u = Temp();
+            EmitIntrinsic(u, Jaunt.Runtime.ClassIntrinsic.DecoratorsClassExtra, stateR);
+            Release(u);
+        }
+        ExitScope(scope, m);
+        int result = dst >= 0 ? dst : m;
+        if (result != classR) _fb.Emit(Op.Mov, result, classR);
+        ResetTo(Math.Max(m, result + 1));
+        Leave();
+        return result;
+    }
+
+    /// <summary>Records a decorated element: kind 0 field, 1 accessor, 2 method, 3 getter, 4 setter.</summary>
+    private void AddDecoratedElement(int stateR, int kind, bool isStatic, int key, int value, int value2, int decsR)
+    {
+        int mm = Mark;
+        int u = Temp();
+        int kindR = IntReg(kind | (isStatic ? 8 : 0));
+        EmitIntrinsic(u, Jaunt.Runtime.ClassIntrinsic.DecoratorsAddElement, stateR, kindR, key, value, value2, decsR);
+        ResetTo(mm);
+    }
+
+    private FunctionTemplate DefaultConstructor(string name, FunctionFlags flags, Node node)
+    {
+        var saved = (_fb, _func, _scope, _control, _envDepth, _completionReg, _optionalExit, _template, _tryCatchDepth);
+        var t = new FunctionTemplate { Name = name, Script = _script, Flags = flags, SourceStart = node.Start, SourceEnd = node.End };
+        _fb = FunctionBuilder.Rent();
+        if ((flags & FunctionFlags.Derived) != 0)
+        {
+            t.Flags |= FunctionFlags.NeedsArgsArray | FunctionFlags.HasRest;
+            t.RestIndex = 0;
+            int arr = _fb.AllocReg(), d = _fb.AllocReg();
+            _fb.Emit(Op.CreateRestArray, arr, 0);
+            _fb.Emit(Op.SuperCallSpread, d, arr);
+        }
+        _fb.Emit(Op.RetUndef);
+        _fb.Finish(t);
+        _fb.Return();
+        _script.FunctionCount++;
+        (_fb, _func, _scope, _control, _envDepth, _completionReg, _optionalExit, _template, _tryCatchDepth) = saved;
+        return t;
+    }
+
+    /// <summary>Synthesizes the instance (or static) element initializer method of a class.</summary>
+    private FunctionTemplate FieldInitializer(ClassBody body, bool isStatic, ClassCompileInfo info)
+    {
+        var saved = (_fb, _func, _scope, _control, _envDepth, _completionReg, _optionalExit, _template, _tryCatchDepth);
+        var key = _analyzer.GetFieldInitKey(body, isStatic);
+        _functions.TryGetValue(key, out var fi);
+        var t = new FunctionTemplate
+        {
+            Name = isStatic ? "<static_initializer>" : "<instance_members_initializer>",
+            Script = _script,
+            Flags = FunctionFlags.Strict | FunctionFlags.Method | FunctionFlags.FieldInitializer,
+        };
+        var outerScope = _scope;
+        BeginFunction(fi ?? new FunctionInfo { Strict = true, IsSynthetic = true, Scope = new Scope { Kind = ScopeKind.Function, Function = null!, Parent = outerScope } }, t);
+        var scope = fi?.Scope ?? _func.Scope;
+        scope.Parent ??= outerScope;
+        FinalizeEnvLayout(scope);
+        AssignFunctionScopeStorage(scope, true);
+        _scope = scope;
+        if (scope.HasEnv)
+        {
+            EmitPushEnv(scope);
+            _envDepth++;
+            _control.Add(new ControlEntry { Kind = EntryKind.Env });
+        }
+        int thisR = _fb.AllocReg();
+        _fb.Emit(Op.LoadThis, thisR);
+        if (!isStatic)
+        {
+            // private method brands first (one brand per private name: a getter/setter pair shares it)
+            var branded = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var el in body.Body)
+            {
+                if (el is MethodDefinition { Static: false, Key: PrivateIdentifier } or AccessorProperty { Static: false, Key: PrivateIdentifier }
+                    && ((ClassProperty)el).Key is PrivateIdentifier pid && branded.Add(pid.Name))
+                {
+                    int m = Mark;
+                    int nameR = LoadPrivateName(pid);
+                    int u = Temp();
+                    _fb.Emit(Op.LoadUndef, u);
+                    _fb.Emit(Op.PrivateDefine, thisR, nameR, u);
+                    ResetTo(m);
+                }
+            }
+            // initializers added by method decorators (InitializeInstanceElements: after the brands, before the fields)
+            if (info.DecState != null)
+            {
+                int m = Mark;
+                int st = Temp(), u = Temp();
+                LoadBinding(info.DecState, st, false);
+                EmitIntrinsic(u, Jaunt.Runtime.ClassIntrinsic.DecoratorsInstanceExtra, st, thisR);
+                ResetTo(m);
+            }
+        }
+        foreach (var el in body.Body)
+        {
+            int m = Mark;
+            if (el is PropertyDefinition or AccessorProperty && ((ClassProperty)el).Static == isStatic)
+            {
+                var pd = (ClassProperty)el;
+                _fb.Position(pd);
+                int v = Temp();
+                string? sname = !pd.Computed && pd.Key is not PrivateIdentifier ? PropertyKeyName(pd.Key) : null;
+                if (pd.Value != null) Expr(pd.Value, v, sname ?? (pd.Key is PrivateIdentifier pk ? "#" + pk.Name : null));
+                else _fb.Emit(Op.LoadUndef, v);
+                int st = -1, idxR = -1;
+                if (info.DecIndex.TryGetValue(pd, out int decIdx))
+                {
+                    // initializers returned by the decorators transform the initial value
+                    st = Temp();
+                    LoadBinding(info.DecState!, st, false);
+                    idxR = IntReg(decIdx);
+                    EmitIntrinsic(v, Jaunt.Runtime.ClassIntrinsic.DecoratorsFieldInit, st, idxR, thisR, v);
+                }
+                if (pd is AccessorProperty ap)
+                {
+                    int storage = Temp();
+                    LoadBinding(info.Storage[ap], storage, false);
+                    _fb.Emit(Op.PrivateDefine, thisR, storage, v);
+                }
+                else if (pd.Key is PrivateIdentifier pid)
+                {
+                    int nameR = LoadPrivateName(pid);
+                    _fb.Emit(Op.PrivateDefine, thisR, nameR, v);
+                }
+                else
+                {
+                    int k = Temp();
+                    if (pd.Computed) LoadBinding(info.KeyBindings[pd], k, false);
+                    else _fb.Emit(Op.LoadConst, k, _fb.Const(sname!));
+                    _fb.Emit(Op.DefineProp, thisR, k, v);
+                }
+                if (st >= 0)
+                {
+                    int u = Temp();
+                    EmitIntrinsic(u, Jaunt.Runtime.ClassIntrinsic.DecoratorsFieldExtra, st, idxR, thisR);
+                }
+            }
+            else if (el is StaticBlock sb && isStatic)
+            {
+                int fn = Temp();
+                int idx = CompileStaticBlock(sb);
+                _fb.Emit(Op.Closure, fn, idx);
+                _fb.Emit(Op.SetHomeObject, fn, thisR);
+                int r = Temp();
+                _fb.Emit(Op.Call, r, fn, thisR, r, 0);
+            }
+            ResetTo(m);
+        }
+        _fb.Emit(Op.RetUndef);
+        var result = EndFunction(t);
+        (_fb, _func, _scope, _control, _envDepth, _completionReg, _optionalExit, _template, _tryCatchDepth) = saved;
+        return result;
+    }
+
+    private int CompileStaticBlock(StaticBlock sb)
+    {
+        var saved = (_fb, _func, _scope, _control, _envDepth, _completionReg, _optionalExit, _template, _tryCatchDepth);
+        var fi = _functions[sb];
+        var t = new FunctionTemplate { Name = "<static_block>", Script = _script, Flags = FunctionFlags.Strict | FunctionFlags.Method };
+        BeginFunction(fi, t);
+        FinalizeEnvLayout(fi.Scope);
+        AssignFunctionScopeStorage(fi.Scope, true);
+        _scope = fi.Scope;
+        if (fi.Scope.HasEnv)
+        {
+            EmitPushEnv(fi.Scope);
+            _envDepth++;
+            _control.Add(new ControlEntry { Kind = EntryKind.Env });
+        }
+        InstantiateHoisted(fi.Scope);
+        StatementList(sb.Body);
+        _fb.Emit(Op.RetUndef);
+        var result = EndFunction(t);
+        (_fb, _func, _scope, _control, _envDepth, _completionReg, _optionalExit, _template, _tryCatchDepth) = saved;
+        return _fb.AddFunction(result);
+    }
+}

@@ -1,0 +1,395 @@
+using System.Collections.Concurrent;
+using System.Diagnostics;
+using System.Text;
+using System.Text.Json;
+using System.Text.RegularExpressions;
+using Jaunt;
+
+// test262 runner for Jaunt (follows tc39/test262 INTERPRETING.md).
+// Usage: Jaunt.Test262 <test262-root> [--filter <substring>] [--list <file of relative paths>] [--out <dir>] [--threads N]
+// Produces <out>/results.json (per-variant outcomes) and <out>/summary.md (totals, skip reasons, failures).
+
+var root = args.Length > 0 && !args[0].StartsWith("--") ? args[0] : "artifacts/test262";
+string? filter = null;
+HashSet<string>? only = null;
+string outDir = "artifacts/test262-results";
+int threads = Environment.ProcessorCount;
+for (int i = 0; i < args.Length; i++)
+{
+    if (args[i] == "--filter") filter = args[++i];
+    else if (args[i] == "--list") only = new HashSet<string>(File.ReadAllLines(args[++i]).Select(l => l.Trim()).Where(l => l.Length > 0), StringComparer.Ordinal);
+    else if (args[i] == "--out") outDir = args[++i];
+    else if (args[i] == "--threads") threads = int.Parse(args[++i]);
+}
+Directory.CreateDirectory(outDir);
+var revision = TryGitRevision(root);
+var harnessDir = Path.Combine(root, "harness");
+var harnessCache = new ConcurrentDictionary<string, JsScript>(StringComparer.Ordinal);
+JsScript Harness(string name) => harnessCache.GetOrAdd(name, n =>
+    JsCompiler.CompileScript(File.ReadAllText(Path.Combine(harnessDir, n)), new JsCompileOptions { SourceName = n }));
+
+var files = Directory.EnumerateFiles(Path.Combine(root, "test"), "*.js", SearchOption.AllDirectories)
+    .Where(f => !f.Contains("_FIXTURE"))
+    .Where(f => !f.Contains("/staging/"))
+    .Where(f => filter == null || f.Contains(filter))
+    .Where(f => only == null || only.Contains(Path.GetRelativePath(root, f).Replace('\\', '/')))
+    .OrderBy(f => f, StringComparer.Ordinal)
+    .ToList();
+
+var results = new ConcurrentBag<Result>();
+var sw = Stopwatch.StartNew();
+int done = 0;
+bool trace = Environment.GetEnvironmentVariable("JAUNT_T262_TRACE") == "1";
+// multi-agent tests rely on agents parking within short sleeps ($262.agent.tryYield): run them after the main pass,
+// with little parallelism, so CPU contention from other tests cannot starve their agent threads
+var agentFiles = files.Where(f => File.ReadAllText(f).Contains("$262.agent.start", StringComparison.Ordinal)).ToHashSet();
+Parallel.ForEach(files.Where(f => !agentFiles.Contains(f)), new ParallelOptions { MaxDegreeOfParallelism = threads }, RunOne);
+Parallel.ForEach(agentFiles.Order(StringComparer.Ordinal), new ParallelOptions { MaxDegreeOfParallelism = Math.Min(threads, 4) }, RunOne);
+
+void RunOne(string file)
+{
+    if (trace) { lock (results) { File.AppendAllText(Path.Combine(outDir, "trace.log"), "S " + file + "\n"); } }
+    foreach (var r in RunFile(file)) results.Add(r);
+    if (trace) { lock (results) { File.AppendAllText(Path.Combine(outDir, "trace.log"), "E " + file + "\n"); } }
+    int n = Interlocked.Increment(ref done);
+    if (n % 5000 == 0) Console.Error.WriteLine($"  {n}/{files.Count} files ({sw.Elapsed.TotalSeconds:F0}s)");
+}
+
+var all = results.OrderBy(r => r.File, StringComparer.Ordinal).ThenBy(r => r.Mode, StringComparer.Ordinal).ToList();
+File.WriteAllText(Path.Combine(outDir, "results.json"), JsonSerializer.Serialize(all.Select(r => new Dictionary<string, string>
+{
+    ["file"] = r.File, ["mode"] = r.Mode, ["outcome"] = r.Outcome, ["detail"] = r.Detail,
+}).ToList(), new JsonSerializerOptions { WriteIndented = false }));
+WriteSummary(Path.Combine(outDir, "summary.md"), all, files.Count, revision, sw.Elapsed);
+var totals = all.GroupBy(r => r.Outcome).ToDictionary(g => g.Key, g => g.Count());
+Console.WriteLine($"files={files.Count} variants={all.Count} " + string.Join(" ", totals.OrderBy(k => k.Key).Select(k => $"{k.Key}={k.Value}")) + $" time={sw.Elapsed.TotalSeconds:F0}s");
+return 0;
+
+IEnumerable<Result> RunFile(string file)
+{
+    string rel = Path.GetRelativePath(root, file).Replace('\\', '/');
+    string src;
+    try { src = File.ReadAllText(file); }
+    catch (Exception ex) { return new[] { new Result(rel, "-", "harness-error", ex.Message) }; }
+    var meta = Meta.Parse(src);
+    var unsupported = meta.Features.FirstOrDefault(f => Manifest.UnsupportedFeatures.Contains(f));
+    if (unsupported != null) return new[] { new Result(rel, "-", "skip", "feature:" + unsupported) };
+    foreach (var inc in meta.Includes)
+        if (Manifest.UnsupportedIncludes.Contains(inc)) return new[] { new Result(rel, "-", "skip", "include:" + inc) };
+    var modes = new List<string>();
+    if (meta.Flags.Contains("module")) modes.Add("module");
+    else if (meta.Flags.Contains("raw")) modes.Add("raw");
+    else
+    {
+        if (!meta.Flags.Contains("onlyStrict")) modes.Add("sloppy");
+        if (!meta.Flags.Contains("noStrict")) modes.Add("strict");
+    }
+    var list = new List<Result>();
+    foreach (var mode in modes) list.Add(RunVariant(rel, file, src, meta, mode));
+    return list;
+}
+
+Result RunVariant(string rel, string file, string src, Meta meta, string mode)
+{
+    var output = new StringBuilder();
+    using var agents = new AgentHost();
+    using var engine = new JsEngine(new JsEngineOptions
+    {
+        // the main agent can block unless the test requires otherwise (flags CanBlockIsTrue / CanBlockIsFalse)
+        CanBlock = !meta.Flags.Contains("CanBlockIsFalse"),
+        ModuleResolver = new FileResolver(Path.GetDirectoryName(file)!),
+        // atomicsHelper.js polls agent reports with a promise-job busy loop (its setTimeout polyfill), which allocates
+        // far more in total than any other test while waiting
+        Limits = new JsLimits
+        {
+            Timeout = TimeSpan.FromSeconds(10),
+            MaxTrackedBytes = meta.Includes.Contains("atomicsHelper.js") ? 16L << 30 : 512L << 20,
+            MaxStackDepth = 3000,
+        },
+        CompileOptions = new JsCompileOptions { SourceName = rel, Strict = mode == "strict" },
+    });
+    try
+    {
+        engine.SetFunction("print", (string? s) => { lock (output) output.AppendLine(s); });
+        InstallHost(engine, agents);
+        if (mode != "raw")
+        {
+            engine.Evaluate(Harness("assert.js"));
+            engine.Evaluate(Harness("sta.js"));
+            if (meta.Flags.Contains("async")) engine.Evaluate(Harness("doneprintHandle.js"));
+            foreach (var inc in meta.Includes) engine.Evaluate(Harness(inc));
+        }
+    }
+    catch (Exception ex) { return new Result(rel, mode, "harness-error", Short(ex)); }
+
+    Exception? error = null;
+    try
+    {
+        if (mode == "module")
+        {
+            var dir = Path.GetDirectoryName(file)!;
+            var resolver = new FileResolver(dir);
+            var module = FileResolver.Compile(Path.GetFullPath(file));
+            // dependencies may use top-level await even when the root does not
+            engine.LoadModuleAsync(module, resolver, Path.GetFullPath(file)).AsTask().GetAwaiter().GetResult();
+        }
+        else
+        {
+            var script = JsCompiler.CompileScript(src, new JsCompileOptions { SourceName = rel, Strict = mode == "strict" });
+            // async tests signal completion through $DONE; awaiting the script's completion value (as
+            // EvaluateAsync does, like JS `await`) would add observable `then` calls on promise subclasses
+            engine.Evaluate(script);
+        }
+    }
+    catch (Exception ex) { error = ex; }
+
+    if (meta.Negative != null)
+    {
+        if (error == null) return new Result(rel, mode, "fail", $"expected {meta.Negative.Phase} {meta.Negative.Type}");
+        bool phaseOk = meta.Negative.Phase switch
+        {
+            "parse" => error is JsCompileException,
+            "resolution" => error is JsCompileException or JsException,
+            _ => error is JsException,
+        };
+        string actualType = error switch
+        {
+            JsCompileException => "SyntaxError",
+            JsException je => je.Name,
+            _ => error.GetType().Name,
+        };
+        if (phaseOk && actualType == meta.Negative.Type) return new Result(rel, mode, "pass", "");
+        if (error is JsCompileException ce && ce.Code.StartsWith("Unsupported")) return new Result(rel, mode, "fail", "unsupported:" + ce.Code);
+        return new Result(rel, mode, "fail", $"expected {meta.Negative.Phase} {meta.Negative.Type}, got {actualType}: {Short(error)}");
+    }
+    if (error != null)
+    {
+        if (error is JsLimitExceededException { Kind: JsLimitKind.Timeout }) return new Result(rel, mode, "timeout", "");
+        if (error is JsCompileException ce && ce.Code.StartsWith("Unsupported")) return new Result(rel, mode, "fail", "unsupported:" + ce.Code);
+        return new Result(rel, mode, "fail", Short(error));
+    }
+    if (meta.Flags.Contains("async"))
+    {
+        var o = output.ToString();
+        if (o.Contains("Test262:AsyncTestComplete")) return new Result(rel, mode, "pass", "");
+        return new Result(rel, mode, "fail", o.Length == 0 ? "async test did not complete" : o.Trim());
+    }
+    return new Result(rel, mode, "pass", "");
+}
+
+static void InstallHost(JsEngine engine, AgentHost agents)
+{
+    agents.Install(engine);
+    // $262 host object; createRealm makes a new realm in the same agent (JsCallContext.CreateRealm)
+    engine.SetFunction("__jauntEvalScriptIn", static (ref JsCallContext c) => c.EvaluateScript(c[0], c.GetString(1) ?? ""), 2);
+    engine.SetFunction("__jauntCreateRealm", static (ref JsCallContext c) => c.CreateRealm(), 0);
+    engine.SetFunction("__jauntHtmlDda", static (ref JsCallContext c) => c.CreateHtmlDdaObject(), 0);
+    engine.SetFunction("__jauntAbstractModuleSource", static (ref JsCallContext c) => c.GetAbstractModuleSource(), 0);
+    engine.SetFunction("__jauntDetach", static (ref JsCallContext c) => { c.DetachArrayBuffer(c[0]); return JsValue.Null; }, 1);
+    engine.Evaluate("""
+        var $262 = (function (evalIn, newRealm, detach) {
+          function build(g) {
+            var make = evalIn(g, "(function (evalScript, detach, createRealm) { return { global: globalThis, " +
+              "evalScript: evalScript, detachArrayBuffer: detach, createRealm: createRealm, gc: function () {}, " +
+              "IsHTMLDDA: undefined, agent: undefined, AbstractModuleSource: undefined }; })");
+            return make(function (src) { return evalIn(g, src); }, detach, function () {
+              var g2 = newRealm();
+              var r = build(g2);
+              evalIn(g2, "var $262;");
+              g2.$262 = r;
+              return r;
+            });
+          }
+          var main = build(globalThis);
+          main.IsHTMLDDA = __jauntHtmlDda();
+          main.AbstractModuleSource = __jauntAbstractModuleSource();
+          main.agent = {
+            start: function (src) { __jauntAgentStart(String(src)); },
+            broadcast: function (sab, id) { __jauntAgentBroadcast(sab); },
+            getReport: function () { return __jauntAgentGetReport(); },
+            sleep: function (ms) { __jauntAgentSleep(ms); },
+            monotonicNow: function () { return __jauntMonotonicNow(); },
+          };
+          return main;
+        })(__jauntEvalScriptIn, __jauntCreateRealm, __jauntDetach);
+        """);
+}
+
+static string Short(Exception ex)
+{
+    var m = ex.Message.Replace('\n', ' ');
+    return ex.GetType().Name + ": " + (m.Length > 200 ? m[..200] : m);
+}
+
+static string? TryGitRevision(string root)
+{
+    try
+    {
+        var head = File.ReadAllText(Path.Combine(root, ".git", "HEAD")).Trim();
+        return head.StartsWith("ref:") ? File.ReadAllText(Path.Combine(root, ".git", head[5..].Trim())).Trim() : head;
+    }
+    catch { return null; }
+}
+
+static void WriteSummary(string path, List<Result> all, int fileCount, string? revision, TimeSpan elapsed)
+{
+    var sb = new StringBuilder();
+    sb.AppendLine("# Jaunt test262 results");
+    sb.AppendLine();
+    sb.AppendLine($"- test262 revision: `{revision ?? "unknown"}`");
+    sb.AppendLine($"- engine: Jaunt {typeof(JsEngine).Assembly.GetName().Version} / {System.Runtime.InteropServices.RuntimeInformation.FrameworkDescription} / {System.Runtime.InteropServices.RuntimeInformation.RuntimeIdentifier} / profile Standard / interpreter");
+    sb.AppendLine($"- scope: `test/**` excluding `staging/`; {fileCount} files; {all.Count} executed variants (sloppy/strict/module/raw counted separately)");
+    sb.AppendLine($"- run time: {elapsed.TotalSeconds:F0}s");
+    sb.AppendLine();
+    sb.AppendLine("| outcome | variants |");
+    sb.AppendLine("| --- | ---: |");
+    foreach (var g in all.GroupBy(r => r.Outcome).OrderBy(g => g.Key)) sb.AppendLine($"| {g.Key} | {g.Count()} |");
+    sb.AppendLine();
+    var executed = all.Where(r => r.Outcome is "pass" or "fail" or "timeout").ToList();
+    if (executed.Count > 0)
+        sb.AppendLine($"Pass rate over executed (non-skipped) variants: **{100.0 * executed.Count(r => r.Outcome == "pass") / executed.Count:F2}%**. Skips are listed below by reason and are not counted as passes.");
+    sb.AppendLine();
+    sb.AppendLine("## Skips by reason");
+    sb.AppendLine();
+    sb.AppendLine("| reason | files |");
+    sb.AppendLine("| --- | ---: |");
+    foreach (var g in all.Where(r => r.Outcome == "skip").GroupBy(r => r.Detail).OrderByDescending(g => g.Count())) sb.AppendLine($"| `{g.Key}` | {g.Count()} |");
+    sb.AppendLine();
+    sb.AppendLine("## Pass rate by directory");
+    sb.AppendLine();
+    sb.AppendLine("| directory | pass | fail | timeout | skip |");
+    sb.AppendLine("| --- | ---: | ---: | ---: | ---: |");
+    foreach (var g in all.GroupBy(r => string.Join('/', r.File.Split('/').Take(3))).OrderBy(g => g.Key, StringComparer.Ordinal))
+        sb.AppendLine($"| {g.Key} | {g.Count(r => r.Outcome == "pass")} | {g.Count(r => r.Outcome == "fail")} | {g.Count(r => r.Outcome == "timeout")} | {g.Count(r => r.Outcome == "skip")} |");
+    sb.AppendLine();
+    sb.AppendLine("## Most common failure reasons");
+    sb.AppendLine();
+    foreach (var g in all.Where(r => r.Outcome == "fail").GroupBy(r => Normalize(r.Detail)).OrderByDescending(g => g.Count()).Take(40))
+        sb.AppendLine($"- {g.Count()} × `{g.Key}`");
+    File.WriteAllText(path, sb.ToString());
+
+    static string Normalize(string d)
+    {
+        d = Regex.Replace(d, "'[^']*'", "'…'");
+        d = Regex.Replace(d, "\\d+", "N");
+        return d.Length > 140 ? d[..140] : d;
+    }
+}
+
+sealed record Result(string File, string Mode, string Outcome, string Detail);
+
+sealed class Negative
+{
+    public string Phase = "";
+    public string Type = "";
+}
+
+sealed class Meta
+{
+    public List<string> Includes = new();
+    public HashSet<string> Flags = new(StringComparer.Ordinal);
+    public List<string> Features = new();
+    public Negative? Negative;
+
+    public static Meta Parse(string src)
+    {
+        var m = new Meta();
+        int a = src.IndexOf("/*---", StringComparison.Ordinal);
+        int b = a < 0 ? -1 : src.IndexOf("---*/", a, StringComparison.Ordinal);
+        if (a < 0 || b < 0) return m;
+        var lines = src.Substring(a + 5, b - a - 5).Split(new[] { "\r\n", "\n", "\r", "\u2028", "\u2029" }, StringSplitOptions.None);   // any line terminator (some tests use CR only)
+        string? section = null;
+        foreach (var raw in lines)
+        {
+            var line = raw.TrimEnd('\r');
+            var trimmed = line.Trim();
+            if (trimmed.Length == 0) continue;
+            bool indented = line.StartsWith(' ') || line.StartsWith('\t');
+            if (!indented)
+            {
+                int colon = trimmed.IndexOf(':');
+                if (colon < 0) continue;
+                section = trimmed[..colon];
+                var rest = trimmed[(colon + 1)..].Trim();
+                if (rest.StartsWith('['))
+                {
+                    var items = rest.Trim('[', ']').Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+                    Add(m, section, items);
+                }
+                if (section == "negative") m.Negative = new Negative();
+                continue;
+            }
+            if (section == "negative" && m.Negative != null)
+            {
+                if (trimmed.StartsWith("phase:")) m.Negative.Phase = trimmed[6..].Trim();
+                else if (trimmed.StartsWith("type:")) m.Negative.Type = trimmed[5..].Trim();
+            }
+            else if (trimmed.StartsWith("- ")) Add(m, section, new[] { trimmed[2..].Trim() });
+        }
+        return m;
+    }
+
+    private static void Add(Meta m, string? section, string[] items)
+    {
+        switch (section)
+        {
+            case "includes": m.Includes.AddRange(items); break;
+            case "flags": foreach (var i in items) m.Flags.Add(i); break;
+            case "features": m.Features.AddRange(items); break;
+        }
+    }
+}
+
+/// <summary>Resolves module fixtures relative to the test file's directory.</summary>
+sealed class FileResolver : IJsModuleResolver
+{
+    private static readonly ConcurrentDictionary<string, JsModule> s_compiled = new(StringComparer.Ordinal);
+    private readonly string _dir;
+    public FileResolver(string dir) => _dir = dir;
+    // INTERPRETING.md: `<module source>` resolves to a module that provides a Module Source object
+    private static readonly JsModule s_moduleSource = JsCompiler.CreateSourceModule("Test262ModuleSource", new JsCompileOptions { SourceName = "<module source>" });
+
+    public JsModuleSource? Resolve(string specifier, string? referrerId)
+    {
+        if (specifier == "<module source>") return new JsModuleSource(specifier, s_moduleSource);
+        var baseDir = referrerId != null && Path.IsPathRooted(referrerId) ? Path.GetDirectoryName(referrerId)! : _dir;
+        var path = Path.GetFullPath(Path.Combine(baseDir, specifier));
+        if (!File.Exists(path)) return null;
+        // compiled templates are immutable and shared; module *instances* stay per engine
+        return new JsModuleSource(path, Compile(path));
+    }
+
+    private static readonly ConcurrentDictionary<string, JsModule> s_json = new(StringComparer.Ordinal);
+    private static readonly ConcurrentDictionary<string, JsModule> s_text = new(StringComparer.Ordinal);
+
+    public JsModuleSource? Resolve(string specifier, string? referrerId, IReadOnlyDictionary<string, string> attributes)
+    {
+        if (!attributes.TryGetValue("type", out var type) || type is not ("json" or "text")) return Resolve(specifier, referrerId);
+        var baseDir = referrerId != null && Path.IsPathRooted(referrerId) ? Path.GetDirectoryName(referrerId)! : _dir;
+        var path = Path.GetFullPath(Path.Combine(baseDir, specifier));
+        if (!File.Exists(path)) return null;
+        var m = type == "json"
+            ? s_json.GetOrAdd(path, p => JsCompiler.CompileJsonModule(File.ReadAllText(p), new JsCompileOptions { SourceName = Path.GetFileName(p) }))
+            : s_text.GetOrAdd(path, p => JsCompiler.CreateTextModule(File.ReadAllText(p), new JsCompileOptions { SourceName = Path.GetFileName(p) }));
+        return new JsModuleSource(path + "#" + type, m);
+    }
+
+    public static JsModule Compile(string path) =>
+        s_compiled.GetOrAdd(path, p => JsCompiler.CompileModule(File.ReadAllText(p), new JsCompileOptions { SourceName = Path.GetFileName(p) }));
+}
+
+/// <summary>Jaunt feature manifest used to skip test262 tests (see docs/FEATURES.md).</summary>
+static class Manifest
+{
+    public static readonly HashSet<string> UnsupportedFeatures = new(StringComparer.Ordinal)
+    {
+        // ECMA-402 (Intl) and proposals below stage 4
+        "decorators", "source-phase-imports", "source-phase-imports-module-source", "import-defer", "import-text",
+        "import-bytes",
+        "ShadowRealm",
+        // optional host / legacy extensions Jaunt does not provide
+        "host-gc-required",
+    };
+
+    public static readonly HashSet<string> UnsupportedIncludes = new(StringComparer.Ordinal);
+}

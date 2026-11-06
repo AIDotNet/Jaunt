@@ -1,0 +1,282 @@
+# Jaunt test262 results
+
+- test262 revision: `045bf6f9966ce3291b8fbc1e0403cd97b9201b00`
+- engine: Jaunt 0.1.0.0 / .NET 10.0.12 / osx-arm64 / profile Standard / interpreter
+- scope: `test/**` excluding `staging/`; 52112 files; 100169 executed variants (sloppy/strict/module/raw counted separately)
+- platform ICU: 78.1
+- run time: 770s
+
+| outcome | variants |
+| --- | ---: |
+| fail | 6 |
+| pass | 100026 |
+| timeout | 137 |
+
+Pass rate over executed (non-skipped) variants: **99.86%**. Skips are listed below by reason and are not counted as passes.
+
+## Skips by reason
+
+| reason | files |
+| --- | ---: |
+
+## Pass rate by directory
+
+| directory | pass | fail | timeout | skip |
+| --- | ---: | ---: | ---: | ---: |
+| test/annexB/built-ins | 482 | 0 | 0 | 0 |
+| test/annexB/language | 895 | 0 | 0 | 0 |
+| test/built-ins/AbstractModuleSource | 8 | 0 | 0 | 0 |
+| test/built-ins/AggregateError | 50 | 0 | 0 | 0 |
+| test/built-ins/Array | 6117 | 0 | 0 | 0 |
+| test/built-ins/ArrayBuffer | 442 | 0 | 0 | 0 |
+| test/built-ins/ArrayIteratorPrototype | 46 | 0 | 0 | 0 |
+| test/built-ins/AsyncDisposableStack | 208 | 0 | 0 | 0 |
+| test/built-ins/AsyncFromSyncIteratorPrototype | 76 | 0 | 0 | 0 |
+| test/built-ins/AsyncFunction | 36 | 0 | 0 | 0 |
+| test/built-ins/AsyncGeneratorFunction | 46 | 0 | 0 | 0 |
+| test/built-ins/AsyncGeneratorPrototype | 96 | 0 | 0 | 0 |
+| test/built-ins/AsyncIteratorPrototype | 26 | 0 | 0 | 0 |
+| test/built-ins/Atomics | 778 | 0 | 0 | 0 |
+| test/built-ins/BigInt | 154 | 0 | 0 | 0 |
+| test/built-ins/Boolean | 101 | 0 | 0 | 0 |
+| test/built-ins/DataView | 1122 | 0 | 0 | 0 |
+| test/built-ins/Date | 1188 | 0 | 0 | 0 |
+| test/built-ins/DisposableStack | 186 | 0 | 0 | 0 |
+| test/built-ins/Error | 186 | 0 | 0 | 0 |
+| test/built-ins/FinalizationRegistry | 94 | 0 | 0 | 0 |
+| test/built-ins/Function | 893 | 0 | 0 | 0 |
+| test/built-ins/GeneratorFunction | 46 | 0 | 0 | 0 |
+| test/built-ins/GeneratorPrototype | 122 | 0 | 0 | 0 |
+| test/built-ins/Infinity | 10 | 0 | 0 | 0 |
+| test/built-ins/Iterator | 1308 | 0 | 0 | 0 |
+| test/built-ins/JSON | 330 | 0 | 0 | 0 |
+| test/built-ins/Map | 405 | 0 | 0 | 0 |
+| test/built-ins/MapIteratorPrototype | 22 | 0 | 0 | 0 |
+| test/built-ins/Math | 654 | 0 | 0 | 0 |
+| test/built-ins/NaN | 10 | 0 | 0 | 0 |
+| test/built-ins/NativeErrors | 188 | 0 | 0 | 0 |
+| test/built-ins/Number | 680 | 0 | 0 | 0 |
+| test/built-ins/Object | 6802 | 0 | 0 | 0 |
+| test/built-ins/Promise | 1458 | 0 | 0 | 0 |
+| test/built-ins/Proxy | 607 | 0 | 0 | 0 |
+| test/built-ins/Reflect | 306 | 0 | 0 | 0 |
+| test/built-ins/RegExp | 3635 | 0 | 121 | 0 |
+| test/built-ins/RegExpStringIteratorPrototype | 34 | 0 | 0 | 0 |
+| test/built-ins/Set | 764 | 0 | 0 | 0 |
+| test/built-ins/SetIteratorPrototype | 22 | 0 | 0 | 0 |
+| test/built-ins/ShadowRealm | 124 | 0 | 0 | 0 |
+| test/built-ins/SharedArrayBuffer | 208 | 0 | 0 | 0 |
+| test/built-ins/String | 2443 | 0 | 0 | 0 |
+| test/built-ins/StringIteratorPrototype | 14 | 0 | 0 | 0 |
+| test/built-ins/SuppressedError | 44 | 0 | 0 | 0 |
+| test/built-ins/Symbol | 192 | 0 | 0 | 0 |
+| test/built-ins/Temporal | 9210 | 0 | 0 | 0 |
+| test/built-ins/ThrowTypeError | 28 | 0 | 0 | 0 |
+| test/built-ins/TypedArray | 2890 | 0 | 0 | 0 |
+| test/built-ins/TypedArrayConstructors | 1446 | 0 | 0 | 0 |
+| test/built-ins/Uint8Array | 140 | 0 | 0 | 0 |
+| test/built-ins/WeakMap | 281 | 0 | 0 | 0 |
+| test/built-ins/WeakRef | 58 | 0 | 0 | 0 |
+| test/built-ins/WeakSet | 170 | 0 | 0 | 0 |
+| test/built-ins/decodeURI | 104 | 0 | 6 | 0 |
+| test/built-ins/decodeURIComponent | 104 | 0 | 8 | 0 |
+| test/built-ins/encodeURI | 62 | 0 | 0 | 0 |
+| test/built-ins/encodeURIComponent | 62 | 0 | 0 | 0 |
+| test/built-ins/eval | 20 | 0 | 0 | 0 |
+| test/built-ins/global | 56 | 0 | 0 | 0 |
+| test/built-ins/isFinite | 30 | 0 | 0 | 0 |
+| test/built-ins/isNaN | 30 | 0 | 0 | 0 |
+| test/built-ins/parseFloat | 108 | 0 | 0 | 0 |
+| test/built-ins/parseInt | 110 | 0 | 0 | 0 |
+| test/built-ins/undefined | 12 | 0 | 0 | 0 |
+| test/harness/assert-false.js | 2 | 0 | 0 | 0 |
+| test/harness/assert-notsamevalue-nan.js | 2 | 0 | 0 | 0 |
+| test/harness/assert-notsamevalue-notsame.js | 2 | 0 | 0 | 0 |
+| test/harness/assert-notsamevalue-objects.js | 2 | 0 | 0 | 0 |
+| test/harness/assert-notsamevalue-tostring.js | 2 | 0 | 0 | 0 |
+| test/harness/assert-notsamevalue-zeros.js | 2 | 0 | 0 | 0 |
+| test/harness/assert-obj.js | 2 | 0 | 0 | 0 |
+| test/harness/assert-samevalue-nan.js | 2 | 0 | 0 | 0 |
+| test/harness/assert-samevalue-objects.js | 2 | 0 | 0 | 0 |
+| test/harness/assert-samevalue-same.js | 2 | 0 | 0 | 0 |
+| test/harness/assert-samevalue-tostring.js | 2 | 0 | 0 | 0 |
+| test/harness/assert-samevalue-zeros.js | 2 | 0 | 0 | 0 |
+| test/harness/assert-throws-custom-typeerror.js | 2 | 0 | 0 | 0 |
+| test/harness/assert-throws-custom.js | 2 | 0 | 0 | 0 |
+| test/harness/assert-throws-incorrect-ctor.js | 2 | 0 | 0 | 0 |
+| test/harness/assert-throws-native.js | 2 | 0 | 0 | 0 |
+| test/harness/assert-throws-no-arg.js | 2 | 0 | 0 | 0 |
+| test/harness/assert-throws-no-error.js | 2 | 0 | 0 | 0 |
+| test/harness/assert-throws-null-fn.js | 2 | 0 | 0 | 0 |
+| test/harness/assert-throws-null.js | 2 | 0 | 0 | 0 |
+| test/harness/assert-throws-primitive.js | 2 | 0 | 0 | 0 |
+| test/harness/assert-throws-same-realm.js | 2 | 0 | 0 | 0 |
+| test/harness/assert-throws-single-arg.js | 2 | 0 | 0 | 0 |
+| test/harness/assert-tostring.js | 2 | 0 | 0 | 0 |
+| test/harness/assert-true.js | 2 | 0 | 0 | 0 |
+| test/harness/assertRelativeDateMs.js | 2 | 0 | 0 | 0 |
+| test/harness/asyncHelpers-asyncTest-func-throws-sync.js | 2 | 0 | 0 | 0 |
+| test/harness/asyncHelpers-asyncTest-rejects-non-callable.js | 2 | 0 | 0 | 0 |
+| test/harness/asyncHelpers-asyncTest-return-not-thenable.js | 2 | 0 | 0 | 0 |
+| test/harness/asyncHelpers-asyncTest-returns-undefined.js | 2 | 0 | 0 | 0 |
+| test/harness/asyncHelpers-asyncTest-then-rejects.js | 2 | 0 | 0 | 0 |
+| test/harness/asyncHelpers-asyncTest-then-resolves.js | 2 | 0 | 0 | 0 |
+| test/harness/asyncHelpers-asyncTest-without-async-flag.js | 2 | 0 | 0 | 0 |
+| test/harness/asyncHelpers-throwsAsync-custom-typeerror.js | 2 | 0 | 0 | 0 |
+| test/harness/asyncHelpers-throwsAsync-custom.js | 2 | 0 | 0 | 0 |
+| test/harness/asyncHelpers-throwsAsync-func-never-settles.js | 2 | 0 | 0 | 0 |
+| test/harness/asyncHelpers-throwsAsync-func-throws-sync.js | 2 | 0 | 0 | 0 |
+| test/harness/asyncHelpers-throwsAsync-incorrect-ctor.js | 2 | 0 | 0 | 0 |
+| test/harness/asyncHelpers-throwsAsync-invalid-func.js | 2 | 0 | 0 | 0 |
+| test/harness/asyncHelpers-throwsAsync-native.js | 2 | 0 | 0 | 0 |
+| test/harness/asyncHelpers-throwsAsync-no-arg.js | 2 | 0 | 0 | 0 |
+| test/harness/asyncHelpers-throwsAsync-no-error.js | 2 | 0 | 0 | 0 |
+| test/harness/asyncHelpers-throwsAsync-null.js | 2 | 0 | 0 | 0 |
+| test/harness/asyncHelpers-throwsAsync-primitive.js | 2 | 0 | 0 | 0 |
+| test/harness/asyncHelpers-throwsAsync-resolved-error.js | 2 | 0 | 0 | 0 |
+| test/harness/asyncHelpers-throwsAsync-same-realm.js | 2 | 0 | 0 | 0 |
+| test/harness/asyncHelpers-throwsAsync-single-arg.js | 2 | 0 | 0 | 0 |
+| test/harness/byteConversionValues.js | 2 | 0 | 0 | 0 |
+| test/harness/compare-array-arguments.js | 2 | 0 | 0 | 0 |
+| test/harness/compare-array-arraylike.js | 2 | 0 | 0 | 0 |
+| test/harness/compare-array-different-elements.js | 2 | 0 | 0 | 0 |
+| test/harness/compare-array-different-length.js | 2 | 0 | 0 | 0 |
+| test/harness/compare-array-empty.js | 2 | 0 | 0 | 0 |
+| test/harness/compare-array-falsy-arguments.js | 2 | 0 | 0 | 0 |
+| test/harness/compare-array-message.js | 2 | 0 | 0 | 0 |
+| test/harness/compare-array-same-elements-different-order.js | 2 | 0 | 0 | 0 |
+| test/harness/compare-array-same-elements-same-order.js | 2 | 0 | 0 | 0 |
+| test/harness/compare-array-samevalue.js | 2 | 0 | 0 | 0 |
+| test/harness/compare-array-sparse.js | 2 | 0 | 0 | 0 |
+| test/harness/compare-array-symbol.js | 2 | 0 | 0 | 0 |
+| test/harness/dateConstants.js | 2 | 0 | 0 | 0 |
+| test/harness/decimalToHexString.js | 2 | 0 | 0 | 0 |
+| test/harness/deepEqual-array.js | 2 | 0 | 0 | 0 |
+| test/harness/deepEqual-circular.js | 2 | 0 | 0 | 0 |
+| test/harness/deepEqual-deep.js | 2 | 0 | 0 | 0 |
+| test/harness/deepEqual-mapset.js | 2 | 0 | 0 | 0 |
+| test/harness/deepEqual-object.js | 2 | 0 | 0 | 0 |
+| test/harness/deepEqual-primitives-bigint.js | 2 | 0 | 0 | 0 |
+| test/harness/deepEqual-primitives.js | 2 | 0 | 0 | 0 |
+| test/harness/detachArrayBuffer-host-detachArrayBuffer.js | 2 | 0 | 0 | 0 |
+| test/harness/detachArrayBuffer.js | 2 | 0 | 0 | 0 |
+| test/harness/fnGlobalObject.js | 2 | 0 | 0 | 0 |
+| test/harness/isConstructor.js | 2 | 0 | 0 | 0 |
+| test/harness/nans.js | 2 | 0 | 0 | 0 |
+| test/harness/nativeFunctionMatcher.js | 2 | 0 | 0 | 0 |
+| test/harness/promiseHelper.js | 2 | 0 | 0 | 0 |
+| test/harness/propertyhelper-verifyconfigurable-configurable-object.js | 2 | 0 | 0 | 0 |
+| test/harness/propertyhelper-verifyconfigurable-configurable.js | 2 | 0 | 0 | 0 |
+| test/harness/propertyhelper-verifyconfigurable-not-configurable.js | 2 | 0 | 0 | 0 |
+| test/harness/propertyhelper-verifyenumerable-enumerable-symbol.js | 2 | 0 | 0 | 0 |
+| test/harness/propertyhelper-verifyenumerable-enumerable.js | 2 | 0 | 0 | 0 |
+| test/harness/propertyhelper-verifyenumerable-not-enumerable-symbol.js | 2 | 0 | 0 | 0 |
+| test/harness/propertyhelper-verifyenumerable-not-enumerable.js | 2 | 0 | 0 | 0 |
+| test/harness/propertyhelper-verifynotconfigurable-configurable.js | 2 | 0 | 0 | 0 |
+| test/harness/propertyhelper-verifynotconfigurable-not-configurable.js | 2 | 0 | 0 | 0 |
+| test/harness/propertyhelper-verifynotenumerable-enumerable-symbol.js | 2 | 0 | 0 | 0 |
+| test/harness/propertyhelper-verifynotenumerable-enumerable.js | 2 | 0 | 0 | 0 |
+| test/harness/propertyhelper-verifynotenumerable-not-enumerable-symbol.js | 2 | 0 | 0 | 0 |
+| test/harness/propertyhelper-verifynotenumerable-not-enumerable.js | 2 | 0 | 0 | 0 |
+| test/harness/propertyhelper-verifynotwritable-not-writable-strict.js | 2 | 0 | 0 | 0 |
+| test/harness/propertyhelper-verifynotwritable-writable.js | 2 | 0 | 0 | 0 |
+| test/harness/propertyhelper-verifywritable-array-length.js | 2 | 0 | 0 | 0 |
+| test/harness/propertyhelper-verifywritable-not-writable.js | 2 | 0 | 0 | 0 |
+| test/harness/propertyhelper-verifywritable-writable.js | 2 | 0 | 0 | 0 |
+| test/harness/proxytrapshelper-default.js | 2 | 0 | 0 | 0 |
+| test/harness/proxytrapshelper-overrides.js | 2 | 0 | 0 | 0 |
+| test/harness/sta.js | 2 | 0 | 0 | 0 |
+| test/harness/tcoHelper.js | 2 | 0 | 0 | 0 |
+| test/harness/testTypedArray-conversions-call-error.js | 2 | 0 | 0 | 0 |
+| test/harness/testTypedArray-conversions.js | 2 | 0 | 0 | 0 |
+| test/harness/testTypedArray.js | 2 | 0 | 0 | 0 |
+| test/harness/verifyProperty-arguments.js | 2 | 0 | 0 | 0 |
+| test/harness/verifyProperty-configurable-object.js | 2 | 0 | 0 | 0 |
+| test/harness/verifyProperty-desc-is-not-object.js | 2 | 0 | 0 | 0 |
+| test/harness/verifyProperty-noproperty.js | 2 | 0 | 0 | 0 |
+| test/harness/verifyProperty-restore-accessor-symbol.js | 2 | 0 | 0 | 0 |
+| test/harness/verifyProperty-restore-accessor.js | 2 | 0 | 0 | 0 |
+| test/harness/verifyProperty-restore-symbol.js | 2 | 0 | 0 | 0 |
+| test/harness/verifyProperty-restore.js | 2 | 0 | 0 | 0 |
+| test/harness/verifyProperty-same-value.js | 2 | 0 | 0 | 0 |
+| test/harness/verifyProperty-string-prop.js | 2 | 0 | 0 | 0 |
+| test/harness/verifyProperty-symbol-prop.js | 2 | 0 | 0 | 0 |
+| test/harness/verifyProperty-undefined-desc.js | 2 | 0 | 0 | 0 |
+| test/harness/verifyProperty-value-error.js | 2 | 0 | 0 | 0 |
+| test/harness/verifyProperty-value.js | 2 | 0 | 0 | 0 |
+| test/harness/wellKnownIntrinsicObjects.js | 2 | 0 | 0 | 0 |
+| test/intl402/Array | 4 | 0 | 0 | 0 |
+| test/intl402/BigInt | 22 | 0 | 0 | 0 |
+| test/intl402/Collator | 130 | 0 | 0 | 0 |
+| test/intl402/Date | 24 | 0 | 0 | 0 |
+| test/intl402/DateTimeFormat | 486 | 4 | 0 | 0 |
+| test/intl402/DisplayNames | 114 | 0 | 0 | 0 |
+| test/intl402/DurationFormat | 220 | 0 | 0 | 0 |
+| test/intl402/FallbackSymbol | 4 | 0 | 0 | 0 |
+| test/intl402/Intl | 132 | 0 | 0 | 0 |
+| test/intl402/ListFormat | 162 | 0 | 0 | 0 |
+| test/intl402/Locale | 346 | 0 | 0 | 0 |
+| test/intl402/Number | 14 | 0 | 0 | 0 |
+| test/intl402/NumberFormat | 498 | 0 | 0 | 0 |
+| test/intl402/PluralRules | 106 | 0 | 0 | 0 |
+| test/intl402/RelativeTimeFormat | 160 | 0 | 0 | 0 |
+| test/intl402/Segmenter | 158 | 0 | 0 | 0 |
+| test/intl402/String | 38 | 0 | 0 | 0 |
+| test/intl402/Temporal | 4056 | 2 | 0 | 0 |
+| test/intl402/TypedArray | 2 | 0 | 0 | 0 |
+| test/intl402/constructors-string-and-single-element-array.js | 2 | 0 | 0 | 0 |
+| test/intl402/constructors-taint-Object-prototype-2.js | 2 | 0 | 0 | 0 |
+| test/intl402/constructors-taint-Object-prototype.js | 2 | 0 | 0 | 0 |
+| test/intl402/default-locale-is-canonicalized.js | 2 | 0 | 0 | 0 |
+| test/intl402/default-locale-is-supported.js | 2 | 0 | 0 | 0 |
+| test/intl402/fallback-locales-are-supported.js | 2 | 0 | 0 | 0 |
+| test/intl402/language-tags-canonicalized.js | 2 | 0 | 0 | 0 |
+| test/intl402/language-tags-invalid.js | 2 | 0 | 0 | 0 |
+| test/intl402/language-tags-valid.js | 2 | 0 | 0 | 0 |
+| test/intl402/language-tags-with-underscore.js | 2 | 0 | 0 | 0 |
+| test/intl402/supportedLocalesOf-consistent-with-resolvedOptions.js | 2 | 0 | 0 | 0 |
+| test/intl402/supportedLocalesOf-default-locale-and-zxx-locale.js | 2 | 0 | 0 | 0 |
+| test/intl402/supportedLocalesOf-duplicate-elements-removed.js | 2 | 0 | 0 | 0 |
+| test/intl402/supportedLocalesOf-empty-and-undefined.js | 2 | 0 | 0 | 0 |
+| test/intl402/supportedLocalesOf-locales-arg-coered-to-object.js | 2 | 0 | 0 | 0 |
+| test/intl402/supportedLocalesOf-locales-arg-empty-array.js | 2 | 0 | 0 | 0 |
+| test/intl402/supportedLocalesOf-returned-array-elements-are-not-frozen.js | 2 | 0 | 0 | 0 |
+| test/intl402/supportedLocalesOf-taint-Array-2.js | 2 | 0 | 0 | 0 |
+| test/intl402/supportedLocalesOf-taint-Array.js | 2 | 0 | 0 | 0 |
+| test/intl402/supportedLocalesOf-test-option-localeMatcher.js | 2 | 0 | 0 | 0 |
+| test/intl402/supportedLocalesOf-throws-if-element-not-string-or-object.js | 2 | 0 | 0 | 0 |
+| test/intl402/supportedLocalesOf-unicode-extensions-ignored.js | 2 | 0 | 0 | 0 |
+| test/language/arguments-object | 460 | 0 | 0 | 0 |
+| test/language/asi | 204 | 0 | 0 | 0 |
+| test/language/block-scope | 287 | 0 | 0 | 0 |
+| test/language/comments | 81 | 0 | 0 | 0 |
+| test/language/computed-property-names | 96 | 0 | 0 | 0 |
+| test/language/destructuring | 37 | 0 | 0 | 0 |
+| test/language/directive-prologue | 62 | 0 | 0 | 0 |
+| test/language/eval-code | 454 | 0 | 0 | 0 |
+| test/language/export | 3 | 0 | 0 | 0 |
+| test/language/expressions | 21286 | 0 | 0 | 0 |
+| test/language/function-code | 281 | 0 | 0 | 0 |
+| test/language/future-reserved-words | 85 | 0 | 0 | 0 |
+| test/language/global-code | 75 | 0 | 0 | 0 |
+| test/language/identifier-resolution | 22 | 0 | 0 | 0 |
+| test/language/identifiers | 535 | 0 | 0 | 0 |
+| test/language/import | 135 | 0 | 0 | 0 |
+| test/language/keywords | 50 | 0 | 0 | 0 |
+| test/language/line-terminators | 82 | 0 | 0 | 0 |
+| test/language/literals | 1039 | 0 | 2 | 0 |
+| test/language/module-code | 602 | 0 | 0 | 0 |
+| test/language/punctuators | 22 | 0 | 0 | 0 |
+| test/language/reserved-words | 53 | 0 | 0 | 0 |
+| test/language/rest-parameters | 22 | 0 | 0 | 0 |
+| test/language/source-text | 2 | 0 | 0 | 0 |
+| test/language/statementList | 160 | 0 | 0 | 0 |
+| test/language/statements | 18015 | 0 | 0 | 0 |
+| test/language/types | 211 | 0 | 0 | 0 |
+| test/language/white-space | 134 | 0 | 0 | 0 |
+
+## Most common failure reasons
+
+- 2 × `JsException: TestNError: German weekday without year Expected SameValue(«false», «true») to be true`
+- 2 × `JsException: TestNError: islamic-civil eras (Anno Hegirae,Anno Hegirae) should be unique Expected SameValue(«N», «N») to be true`
+- 2 × `JsException: TestNError: Expected SameValue(«N», «N») to be true`
