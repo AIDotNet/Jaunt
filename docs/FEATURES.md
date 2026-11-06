@@ -66,8 +66,9 @@ by test262 and may change with the proposals. Decorator details beyond test262 w
 (`addInitializer` timing per element kind, nearest decorator first, decorator expressions evaluated interleaved with
 computed keys in source order, decorators called without a receiver, context object shape); `Symbol.metadata` matches the
 decorator-metadata proposal README (one metadata object shared by all decorators of a class, whose prototype is the
-superclass's metadata, assigned to `Symbol.metadata` once the class is defined); property attributes are not specified
-there.
+superclass's metadata, assigned to `Symbol.metadata` once the class is defined). The proposal does not specify the property attributes or the
+target when a class decorator replaces the class; Jaunt follows the shipped transpilers (TypeScript 5.x, Babel
+`applyDecs2311`): an enumerable, configurable, writable property on the class returned by the class decorators.
 
 ### Legacy and host extensions
 
@@ -121,7 +122,7 @@ capturing groups inside quantifiers, or `u`+`i` case folding run on Jaunt's nati
 | --- | --- |
 | `Atomics.wait` | by default throws `TypeError` (`[[CanBlock]]` is false so an embedded script cannot park the host thread); set `JsEngineOptions.CanBlock` for worker engines. A finite `Atomics.waitAsync` timeout uses a host timer in async executions and otherwise resolves `"timed-out"` when the job queue is next processed |
 | `Date` | local time = `JsEngineOptions.TimeZone` (default UTC); without ICU, locale formatting uses the invariant culture |
-| Intl output | exact strings follow the platform ICU/CLDR version (ICU 78 / CLDR 48 on the reference machine); three intl402 tests encode data or ICU behaviour that differs (German `MMMMEd` punctuation, a separate pre-Hijra era, Hebrew year-0 month lengths) |
+| Intl output | exact strings follow the platform ICU/CLDR version (ICU 78 / CLDR 48 on the reference machine); one intl402 test encodes upstream CLDR data that Apple's ICU changes (German `MMMMEd` punctuation); Jaunt computes the Hebrew calendar arithmetically and maps ICU's pre-epoch Islamic/Coptic eras to ECMA-402's. `formatRange` uses ICU's interval formatter, which still shows ICU's own era for such pre-epoch Islamic/Coptic dates |
 | Default locale | `en-US` (`Realm.DefaultLocale`) |
 | error messages / `stack` | V8-like text, not guaranteed identical to any engine |
 

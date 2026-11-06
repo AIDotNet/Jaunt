@@ -1,10 +1,10 @@
 # test262 files whose failures come from the platform's locale data / ICU behaviour, not engine semantics
 # (see docs/test262.md, "Remaining failures"). CI subtracts these; anything else failing fails the build.
+# Apple's ICU (macOS libicucore) ships `EEE d. MMMM` for German MMMMEd; upstream CLDR 44-48 has `E, d. MMMM` and
+# the test passes with upstream ICU (Linux, Windows).
 test/intl402/DateTimeFormat/prototype/format/german-weekday-no-year.js
-test/intl402/DateTimeFormat/prototype/formatToParts/era.js
-test/intl402/Temporal/PlainDate/from/calc-epoch-year-hebrew.js
 
-# Older platform ICU (Ubuntu 24.04 ships ICU 74 / CLDR 44): locale data, tzdata links and Chinese/Hebrew
+# Older platform ICU (Ubuntu 24.04 ships ICU 74 / CLDR 44): locale data, tzdata links and Chinese
 # calendar computations that changed by ICU 78 / CLDR 48, which these tests encode.
 icu<78 test/intl402/Intl/supportedValuesOf/numberingSystems-with-simple-digit-mappings.js
 icu<78 test/intl402/NumberFormat/prototype/format/numbering-systems.js
@@ -15,21 +15,13 @@ icu<78 test/intl402/RelativeTimeFormat/prototype/format/pl-pl-style-short.js
 icu<78 test/intl402/RelativeTimeFormat/prototype/formatToParts/pl-pl-style-long.js
 icu<78 test/intl402/RelativeTimeFormat/prototype/formatToParts/pl-pl-style-narrow.js
 icu<78 test/intl402/RelativeTimeFormat/prototype/formatToParts/pl-pl-style-short.js
-icu<78 test/intl402/Temporal/PlainDate/from/hebrew-keviah.js
-icu<78 test/intl402/Temporal/PlainDate/from/roundtrip-from-string.js
 icu<78 test/intl402/Temporal/PlainDate/prototype/daysInYear/basic-chinese.js
-icu<78 test/intl402/Temporal/PlainDate/prototype/daysInYear/basic-hebrew.js
 icu<78 test/intl402/Temporal/PlainDate/prototype/monthCode/chinese-calendar-dates.js
-icu<78 test/intl402/Temporal/PlainDateTime/from/roundtrip-from-string.js
 icu<78 test/intl402/Temporal/PlainDateTime/prototype/daysInYear/basic-chinese.js
-icu<78 test/intl402/Temporal/PlainDateTime/prototype/daysInYear/basic-hebrew.js
 icu<78 test/intl402/Temporal/PlainDateTime/prototype/monthCode/chinese-calendar-dates.js
 icu<78 test/intl402/Temporal/PlainMonthDay/prototype/monthCode/chinese-calendar-dates.js
 icu<78 test/intl402/Temporal/PlainYearMonth/prototype/daysInYear/basic-chinese.js
-icu<78 test/intl402/Temporal/PlainYearMonth/prototype/daysInYear/basic-hebrew.js
 icu<78 test/intl402/Temporal/PlainYearMonth/prototype/monthCode/chinese-calendar-dates.js
-icu<78 test/intl402/Temporal/ZonedDateTime/from/roundtrip-from-string.js
 icu<78 test/intl402/Temporal/ZonedDateTime/links.js
 icu<78 test/intl402/Temporal/ZonedDateTime/prototype/daysInYear/basic-chinese.js
-icu<78 test/intl402/Temporal/ZonedDateTime/prototype/daysInYear/basic-hebrew.js
 icu<78 test/intl402/Temporal/ZonedDateTime/prototype/monthCode/chinese-calendar-dates.js

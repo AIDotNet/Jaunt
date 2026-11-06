@@ -167,8 +167,10 @@ internal sealed partial class Vm
                         classDef = res;
                     }
                 }
-                st.F.DefinePropertyOrThrow(JsSymbol.Metadata, PropertyDescriptor.Data(JsValue.FromObject(st.Metadata), PropFlags.Writable | PropFlags.Configurable));
+                // The metadata proposal leaves the attributes open; follow the shipped transpilers (TypeScript 5.x, Babel
+                // applyDecs2311): an enumerable, configurable property on the class the class decorators returned.
                 st.NewF = classDef.AsObjectUnchecked;
+                st.NewF.DefinePropertyOrThrow(JsSymbol.Metadata, PropertyDescriptor.Data(JsValue.FromObject(st.Metadata), PropFlags.Default));
                 return classDef;
             }
             case ClassIntrinsic.DecoratorsStaticExtra:

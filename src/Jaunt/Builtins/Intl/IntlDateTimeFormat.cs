@@ -43,6 +43,52 @@ internal sealed unsafe class DtfFormat
 
     public bool HasHour => Fields[IntlDateTimeFormat.FHour] != null;
 
+    /// <summary>
+    /// Calendars whose ICU eras differ from ECMA-402's for years before the epoch (see IntlDateTimeFormat.ApplyEraOverride):
+    /// 1 = Islamic (ICU numbers them 0, -1, … in AH; CLDR's era 1 "BH" applies), 2 = Coptic (ICU switches to an unnamed
+    /// era; ECMA-402 keeps "am" with negative years); 0 = none, or the pattern has no era.
+    /// </summary>
+    public int EraOverride => _eraOverride ??= Fields[IntlDateTimeFormat.FEra] == null ? 0
+        : _icuLocale.Contains("calendar=islamic", StringComparison.Ordinal) ? 1
+        : _icuLocale.Contains("calendar=coptic", StringComparison.Ordinal) ? 2 : 0;
+    private int? _eraOverride;
+
+    private DtfFormat? _gregorianYear, _eraTemplate;
+
+    /// <summary>A UTC format of just this pattern's year field in the Gregorian calendar (same locale and numbering).</summary>
+    public DtfFormat GregorianYear => _gregorianYear ??= new DtfFormat(
+        System.Text.RegularExpressions.Regex.Replace(_icuLocale, "calendar=[a-z-]+", "calendar=gregorian"), "UTC",
+        Fields[IntlDateTimeFormat.FYear] == "2-digit" ? "yy" : "y", true);
+
+    public const char EraMark = '\uE000', YearMark = '\uE001';
+
+    /// <summary>This format with its era and year fields replaced by the literal marks <see cref="EraMark"/> / <see cref="YearMark"/>.</summary>
+    public DtfFormat EraTemplate => _eraTemplate ??= new DtfFormat(_icuLocale, _tz, MarkEraAndYear(Pattern), Plain);
+
+    private static string MarkEraAndYear(string pattern)
+    {
+        var sb = new System.Text.StringBuilder();
+        for (int i = 0; i < pattern.Length;)
+        {
+            char c = pattern[i];
+            if (c == '\'')
+            {
+                int j = pattern.IndexOf('\'', i + 1);
+                j = j < 0 ? pattern.Length : j + 1;
+                sb.Append(pattern, i, j - i);
+                i = j;
+                continue;
+            }
+            int n = 1;
+            while (i + n < pattern.Length && pattern[i + n] == c) n++;
+            if (c == 'G') sb.Append('\'').Append(EraMark).Append('\'');
+            else if (c == 'y') sb.Append('\'').Append(YearMark).Append('\'');
+            else sb.Append(pattern, i, n);
+            i += n;
+        }
+        return sb.ToString();
+    }
+
     private DtfFormat? _hourOnly;
 
     /// <summary>
@@ -999,6 +1045,12 @@ internal static unsafe partial class IntlDateTimeFormat
 
     private static string FormatMsCore(JsDateTimeFormat dtf, DtfFormat fmt, double ms)
     {
+        if (fmt.EraOverride != 0 && IcuYear(fmt, ms) < 1)
+        {
+            var sb = new System.Text.StringBuilder();
+            foreach (var (_, v) in FormatMsToParts(fmt, ms)) sb.Append(v);
+            return sb.ToString();
+        }
         var f = fmt.Udat();
         char* stack = stackalloc char[256];
         int err = 0;
@@ -1068,9 +1120,69 @@ internal static unsafe partial class IntlDateTimeFormat
                 pos = end;
             }
             if (pos < s.Length) parts.Add(("literal", s.Substring(pos)));
+            if (fmt.EraOverride != 0) parts = ApplyEraOverride(fmt, ms, parts);
             return parts;
         }
         finally { IcuDtf.ufieldpositer_close(iter); GC.KeepAlive(fmt); }
+    }
+
+    private const int UCAL_EXTENDED_YEAR = 19;
+
+    /// <summary>The (extended) year ICU's calendar of the format assigns to an instant.</summary>
+    private static int IcuYear(DtfFormat fmt, double ms)
+    {
+        int err = 0;
+        var cal = IcuDtf.ucal_clone(IcuDtf.udat_getCalendar(fmt.Udat()), &err);
+        if (Icu.Failure(err) || cal == 0) return 1;
+        try
+        {
+            IcuDtf.ucal_setMillis(cal, ms, &err);
+            int y = IcuDtf.ucal_get(cal, UCAL_EXTENDED_YEAR, &err);
+            return Icu.Failure(err) ? 1 : y;
+        }
+        finally { IcuDtf.ucal_close(cal); GC.KeepAlive(fmt); }
+    }
+
+    /// <summary>
+    /// Before the epoch ICU's eras differ from ECMA-402/Temporal's: its Islamic calendars keep "AH" with years 0, -1, …
+    /// although CLDR names the "Before Hijrah" era (era 1; Temporal "bh", year 1 - y), and its Coptic calendar switches
+    /// to an era without a name where ECMA-402 keeps "am" with negative years. Such dates are formatted from the pattern
+    /// with era/year replaced by marks, filling in the locale's era name (of the pattern's width) and year digits.
+    /// </summary>
+    private static List<(string Type, string Value)> ApplyEraOverride(DtfFormat fmt, double ms, List<(string Type, string Value)> parts)
+    {
+        int y = IcuYear(fmt, ms);
+        if (y >= 1 || !Icu.Has("udat_getSymbols") || !Icu.Has("udat_countSymbols")) return parts;
+        var f = fmt.Udat();
+        int type = fmt.Fields[FEra] == "long" ? IcuDtf.UDAT_ERA_NAMES : IcuDtf.UDAT_ERAS;
+        if (IcuDtf.udat_countSymbols(f, type) < 2) return parts;
+        var era = Icu.CallUChars((buf, cap, err) => IcuDtf.udat_getSymbols(f, type, 1, buf, cap, err));
+        GC.KeepAlive(fmt);
+        if (string.IsNullOrEmpty(era)) return parts;
+        long shown = fmt.EraOverride == 1 ? 1L - y : y;   // Islamic: BH year; Coptic: negative AM year
+        string year = FormatMsCore(null!, fmt.GregorianYear, TemporalMath.EpochDays(Math.Abs(shown), 7, 1) * 86_400_000.0 + 43_200_000.0);
+        if (shown < 0) year = "-" + year;
+        var result = new List<(string Type, string Value)>();
+        foreach (var (t, v) in FormatMsToParts(fmt.EraTemplate, ms))
+        {
+            if (t != "literal" || v.IndexOfAny([DtfFormat.EraMark, DtfFormat.YearMark]) < 0) { result.Add((t, v)); continue; }
+            int pos = 0;
+            for (int i = 0; i < v.Length; i++)
+            {
+                if (v[i] != DtfFormat.EraMark && v[i] != DtfFormat.YearMark) continue;
+                if (i > pos) AddLiteral(result, v.Substring(pos, i - pos));
+                result.Add(v[i] == DtfFormat.EraMark ? ("era", era) : ("year", year));
+                pos = i + 1;
+            }
+            if (pos < v.Length) AddLiteral(result, v.Substring(pos));
+        }
+        return result;
+
+        static void AddLiteral(List<(string Type, string Value)> list, string text)
+        {
+            if (list.Count > 0 && list[^1].Type == "literal") list[^1] = ("literal", list[^1].Value + text);
+            else list.Add(("literal", text));
+        }
     }
 
     /// <summary>Maps a UDateFormatField to a part type.</summary>

@@ -9,9 +9,9 @@ variants, `onlyStrict`/`noStrict`/`raw`/`module`/`async` flags, `negative` phase
 | test262 revision | `045bf6f9966ce3291b8fbc1e0403cd97b9201b00` (the revision MoeJS reports against, for comparability) |
 | Engine | Jaunt `0.1.0-alpha.1`, profile Standard, interpreter, CoreCLR .NET 10.0.12, osx-arm64 |
 | Scope | `test/**` except `staging/` (ECMA-262, Annex B, Temporal and ECMA-402 `intl402/`) — 52,112 files |
-| Variants | 100,169 total, all executed: pass 100,163 · fail 6 · skipped 0 |
+| Variants | 100,169 total, all executed: pass 100,167 · fail 2 · skipped 0 |
 | Skipped variants | none — every feature tested at this revision is implemented (`host-gc-required` tests exist only in `staging/`) |
-| **Pass rate** | **99.994 %** (ECMA-262, Annex B, Temporal and all stage-3 proposals: 100 %; `intl402/`: 6,720 / 6,726 on ICU 78) |
+| **Pass rate** | **99.998 %** (ECMA-262, Annex B, Temporal and all stage-3 proposals: 100 %; `intl402/`: 6,724 / 6,726 on macOS ICU 78) |
 | Wall time | ~210 s on 10 cores on an idle machine (one fresh `JsEngine` per variant; harness scripts compiled once and shared; multi-agent Atomics tests run after the main pass with at most 4 in parallel). On a heavily loaded machine some heavy RegExp property-escape / `decodeURI` tests exceed the 10 s per-test limit; they pass when rerun |
 
 How to read this (research doc §3.6): a pass rate is only meaningful together with its scope. Skipped
@@ -33,20 +33,22 @@ they are not filtered out. `intl402/` runs against the platform ICU (ICU 78 / CL
 | + multiple realms (`$262.createRealm`), multi-agent `Atomics` (`$262.agent`, blocking `Atomics.wait`, `CanBlockIsTrue`), Temporal (ISO 8601 calendar; UTC, offset and IANA time zones) | 91,853 | 91,853 | 100.00 % |
 | + ECMA-402 on the platform ICU (all Intl services), Temporal non-ISO calendars, `intl402/` added to the scope | 98,579 | 98,573 | 99.99 % |
 | + all stage-3 proposals tested at this revision, `IsHTMLDDA`, legacy `caller`; nothing skipped | 100,169 | 100,163 | 99.994 % |
+| + arithmetic Hebrew calendar (all years), ECMA-402 eras before the epoch (Islamic "BH", single Coptic era) | 100,169 | 100,167 | 99.998 % |
 
 ## Remaining failures
 
-Six variants (three files) in `intl402/`, all caused by locale data or ICU behaviour rather than engine semantics:
+Two variants (one file) in `intl402/`, caused by the platform's locale data:
 
-- `DateTimeFormat/prototype/format/german-weekday-no-year.js` — CLDR 48 formats `de` `MMMMEd` as `Sa. 24. Dezember`;
-  the test expects `Sa., 24. Dezember`.
-- `DateTimeFormat/prototype/formatToParts/era.js` — ICU's Islamic calendars have a single era (AH); the test expects a
-  distinct era name before the Hijra.
-- `Temporal/PlainDate/from/calc-epoch-year-hebrew.js` — ICU's Hebrew calendar gives different Cheshvan/Kislev lengths
-  for years 0–10 than the test's reference values.
+- `DateTimeFormat/prototype/format/german-weekday-no-year.js` — Apple's ICU (macOS `libicucore`) ships `EEE d. MMMM` for
+  German `MMMMEd`; upstream CLDR 44–48 has `E, d. MMMM`, and the test passes with upstream ICU (Linux, Windows CI).
 
-Nothing is skipped. With an older platform ICU (e.g. Ubuntu 24.04's ICU 74 / CLDR 44) about 27 more `intl402/` files
-fail because they encode newer locale data, tzdata links or ICU 76+ Chinese/Hebrew calendar results; they are listed
+Two former data-related failures are now fixed in the engine: the Hebrew calendar is computed arithmetically (molad and
+postponement rules) instead of through ICU, whose Hebrew calendar is wrong for years ≤ 0 (`calc-epoch-year-hebrew.js`);
+and `Intl.DateTimeFormat` shows ECMA-402's eras before a calendar's epoch, where ICU's differ — CLDR's "Before Hijrah"
+era for the Islamic calendars and the single "am" era with negative years for Coptic (`formatToParts/era.js`).
+
+Nothing is skipped. With an older platform ICU (e.g. Ubuntu 24.04's ICU 74 / CLDR 44) about 19 more `intl402/` files
+fail because they encode newer locale data, tzdata links or ICU 76+ Chinese calendar results; they are listed
 with an `icu<78` prefix in `tools/Jaunt.Test262/known-failures.txt`, which `tools/Jaunt.Test262/check-results.py`
 (used by CI) applies according to the ICU version the run reports.
 

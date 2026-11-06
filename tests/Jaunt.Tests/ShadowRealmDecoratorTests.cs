@@ -110,5 +110,7 @@ public class ShadowRealmDecoratorTests
     [InlineData("try { class C { @(() => 1) m() {} } } catch (e) { e.constructor.name }", "TypeError")]
     [InlineData("var add; class C { @((v, ctx) => { add = ctx.addInitializer; }) m() {} } try { add(() => {}) } catch (e) { e.constructor.name }", "TypeError")]
     [InlineData("class C {} C[Symbol.metadata] === undefined && typeof Symbol.metadata", "symbol")]
+    [InlineData("class C { @((v, c) => { c.metadata.k = 1; }) m() {} } var d = Object.getOwnPropertyDescriptor(C, Symbol.metadata); [d.writable, d.enumerable, d.configurable, d.value.k].join()", "true,true,true,1")]
+    [InlineData("var D = class {}; @(() => D) class C { @((v, c) => { c.metadata.k = 2; }) m() {} } [Object.hasOwn(D, Symbol.metadata), D[Symbol.metadata].k].join()", "true,2")]
     public void Decorators(string src, string expected) => Assert.Equal(expected, Eval(src));
 }

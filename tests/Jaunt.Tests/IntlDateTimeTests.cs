@@ -32,6 +32,13 @@ public class IntlDateTimeTests
     [InlineData("try { new Intl.DateTimeFormat('en', { timeZone: 'PST' }) } catch (e) { e.name }", "RangeError")]
     [InlineData("try { new Intl.DateTimeFormat('en', { dateStyle: 'short', hour: 'numeric' }) } catch (e) { e.name }", "TypeError")]
     [InlineData("new Intl.DateTimeFormat('en', { timeZone: 'UTC', year: 'numeric', era: 'short' }).format(-8.64e15)", "271822 BC")]
+    // Islamic calendars: years before 1 AH use CLDR's "Before Hijrah" era, like Temporal's "bh"
+    [InlineData("var f = new Intl.DateTimeFormat('en', { calendar: 'islamic-civil', era: 'short', year: 'numeric', timeZone: 'UTC' }); f.format(Date.UTC(600, 5, 15)) + '|' + f.format(Date.UTC(2025, 5, 15)) + '|' + f.formatToParts(Date.UTC(600, 5, 15)).map(p => p.type).join()", "23 BH|1446 AH|year,literal,era")]
+    // Coptic keeps the single "am" era with negative years (ICU switches to an unnamed era)
+    [InlineData("var f = new Intl.DateTimeFormat('en', { calendar: 'coptic', era: 'long', year: 'numeric', timeZone: 'UTC' }); f.format(Date.UTC(250, 5, 15)) + '|' + f.format(Date.UTC(2025, 5, 15))", "-34 Anno Martyrum|1741 Anno Martyrum")]
+    // Hebrew calendar is computed arithmetically for every year, including years <= 0 (ICU gets those wrong)
+    [InlineData("[-2, -1, 0, 1, 5785].map(y => Temporal.PlainDate.from({ calendar: 'hebrew', year: y, monthCode: 'M01', day: 1 }).daysInYear).join()", "385,353,384,355,355")]
+    [InlineData("Temporal.PlainDate.from({ calendar: 'hebrew', year: 5785, monthCode: 'M01', day: 1 }).toString() + ' ' + Temporal.PlainDate.from('2024-03-11[u-ca=hebrew]').monthCode", "2024-10-03[u-ca=hebrew] M06")]
     [InlineData("Object.prototype.toString.call(new Intl.DateTimeFormat())", "[object Intl.DateTimeFormat]")]
     public void DateTimeFormat(string src, string expected) => Check(src, expected);
 

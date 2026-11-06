@@ -35,6 +35,13 @@ internal static unsafe class IcuDtf
     public static nint udat_getCalendar(nint f) => ((delegate* unmanaged<nint, nint>)P(ref s_udatGetCalendar, "udat_getCalendar"))(f);
     public static void udat_setCalendar(nint f, nint cal) => ((delegate* unmanaged<nint, nint, void>)P(ref s_udatSetCalendar, "udat_setCalendar"))(f, cal);
 
+    private static nint s_udatGetSymbols, s_udatCountSymbols, s_ucalGet;
+    public const int UDAT_ERAS = 0, UDAT_ERA_NAMES = 7;
+    public static int udat_countSymbols(nint f, int type) => ((delegate* unmanaged<nint, int, int>)P(ref s_udatCountSymbols, "udat_countSymbols"))(f, type);
+    public static int udat_getSymbols(nint f, int type, int index, char* buf, int cap, int* err) =>
+        ((delegate* unmanaged<nint, int, int, char*, int, int*, int>)P(ref s_udatGetSymbols, "udat_getSymbols"))(f, type, index, buf, cap, err);
+    public static int ucal_get(nint cal, int field, int* err) => ((delegate* unmanaged<nint, int, int*, int>)P(ref s_ucalGet, "ucal_get"))(cal, field, err);
+
     public static nint ucal_clone(nint cal, int* err) => ((delegate* unmanaged<nint, int*, nint>)P(ref s_ucalClone, "ucal_clone"))(cal, err);
     public static void ucal_close(nint cal) => ((delegate* unmanaged<nint, void>)P(ref s_ucalClose, "ucal_close"))(cal);
     public static nint ucal_open(char* zone, int len, byte* locale, int type, int* err) =>

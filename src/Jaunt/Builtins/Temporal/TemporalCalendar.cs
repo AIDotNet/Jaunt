@@ -236,9 +236,70 @@ internal static unsafe class TemporalCalendars
         return ext;
     }
 
+    // ------------------------------------------------------------------ Hebrew: exact arithmetic
+    // The Hebrew calendar is fully arithmetic (molad of Tishri plus the four postponement rules), so it is computed
+    // directly instead of through ICU, whose HebrewCalendar is wrong for years <= 0 (negative-division rounding).
+
+    private const long HebrewEpochDay = -1373427 - 719163;   // 1 Tishri AM 1 (R.D. -1373427) as days since 1970-01-01
+
+    private static long FloorDiv(long a, long b) => a / b - ((a % b != 0) && ((a < 0) != (b < 0)) ? 1 : 0);
+
+    private static long HebrewElapsedDays(long year)
+    {
+        long months = FloorDiv(235 * year - 234, 19);
+        long parts = 12084 + 13753 * months;
+        long days = 29 * months + FloorDiv(parts, 25920);
+        return ((3 * (days + 1)) % 7 + 7) % 7 < 3 ? days + 1 : days;
+    }
+
+    private static long HebrewNewYear(long year)
+    {
+        long prev = HebrewElapsedDays(year - 1), cur = HebrewElapsedDays(year), next = HebrewElapsedDays(year + 1);
+        long correction = next - cur == 356 ? 2 : cur - prev == 382 ? 1 : 0;
+        return HebrewEpochDay + cur + correction;
+    }
+
+    private static bool HebrewLeap(long year) => ((7 * year + 1) % 19 + 19) % 19 < 7;
+
+    private static YearInfo HebrewYear(int year)
+    {
+        long start = HebrewNewYear(year), next = HebrewNewYear(year + 1);
+        int length = (int)(next - start);
+        bool leap = HebrewLeap(year);
+        int cheshvan = length % 10 == 5 ? 30 : 29, kislev = length % 10 == 3 ? 29 : 30;
+        int[] lengths = leap
+            ? [30, cheshvan, kislev, 29, 30, 30, 29, 30, 29, 30, 29, 30, 29]
+            : [30, cheshvan, kislev, 29, 30, 29, 30, 29, 30, 29, 30, 29];
+        var starts = new long[lengths.Length];
+        var codes = new string[lengths.Length];
+        long day = start;
+        for (int i = 0; i < lengths.Length; i++)
+        {
+            starts[i] = day;
+            day += lengths[i];
+            codes[i] = !leap || i < 5 ? CreateMonthCode(i + 1, false) : i == 5 ? "M05L" : CreateMonthCode(i, false);
+        }
+        return new YearInfo { MonthStart = starts, NextYearStart = next, MonthCodes = codes };
+    }
+
+    private static int HebrewYearOfEpochDay(long epochDay)
+    {
+        long year = (long)Math.Floor((epochDay - HebrewEpochDay) / 365.2468) + 1;
+        while (HebrewNewYear(year + 1) <= epochDay) year++;
+        while (HebrewNewYear(year) > epochDay) year--;
+        return checked((int)year);
+    }
+
     private static YearInfo GetYear(string cal, int year)
     {
         if (s_years.TryGetValue((cal, year), out var info)) return info;
+        if (cal == "hebrew")
+        {
+            info = HebrewYear(year);
+            if (s_years.Count > 20_000) s_years.Clear();
+            s_years[(cal, year)] = info;
+            return info;
+        }
         lock (s_locks.GetOrAdd(cal, _ => new object()))
         {
             if (s_years.TryGetValue((cal, year), out info)) return info;
@@ -289,6 +350,7 @@ internal static unsafe class TemporalCalendars
     private static int YearOfEpochDay(string cal, long epochDay, IsoDate iso)
     {
         _ = iso;
+        if (cal == "hebrew") return HebrewYearOfEpochDay(epochDay);
         lock (s_locks.GetOrAdd(cal, _ => new object()))
         {
             var c = Cal(cal);
