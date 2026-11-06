@@ -303,13 +303,12 @@ internal static class Operations
         if (len > realm.MaxStringLength) throw JsErrors.RangeError(realm, "Invalid string length");
         if (la == 0) return FromPart(b);
         if (lb == 0) return FromPart(a);
+        // Charged at the full result size either way: that is what flattening may allocate, so budgets (and the
+        // `s += s` doubling bomb) behave exactly as they did before ropes.
+        realm.ChargeBytes(len * 2 + 24);
         if (len < JsRope.MinLength)
-        {
-            realm.ChargeBytes(len * 2 + 24);
             return new JsValue(string.Concat(a as string ?? ((JsRope)a).Flatten(), b as string ?? ((JsRope)b).Flatten()));
-        }
-        realm.ChargeBytes(48);
-        return new JsValue(new JsRope(realm, a, b, (int)len));
+        return new JsValue(new JsRope(a, b, (int)len));
     }
 
     /// <summary>IsLessThan (ECMA-262 7.2.13). Returns null for undefined (NaN involved).</summary>

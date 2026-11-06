@@ -52,8 +52,9 @@ with an `icu<78` prefix in `tools/Jaunt.Test262/known-failures.txt`, which `tool
 
 Other runtimes: on CoreCLR .NET 8.0.33 (self-contained) the same suite passes all 82,028 executed variants with
 `--threads 4` (139 s). With 10 threads on a loaded machine one throw-heavy test (`decodeURI/S15.1.3.1_A1.11_T1`,
-~65k `URIError`s) can exceed the 10 s per-test limit, because CLR exceptions are several times slower on .NET 8. `.github/workflows/verify.yml` runs the suite on Linux x64,
-Windows x64 and macOS ARM64 for both runtimes.
+~65k `URIError`s) can exceed the 10 s per-test limit, because CLR exceptions are several times slower on .NET 8. `.github/workflows/verify.yml` runs the suite on Linux x64 (ICU 74),
+Windows x64 (system ICU 77) and macOS ARM64 (ICU 76) for both runtimes; all three pass, judged by
+`tools/Jaunt.Test262/check-results.py` against the reviewed `known-failures.txt`.
 
 Harness notes: async tests run through `JsEngine.Evaluate` and complete via `$DONE` (awaiting the completion value
 would add observable `then` calls); module tests load through `LoadModuleAsync` because any dependency may use

@@ -22,12 +22,10 @@ internal sealed class JsRope
     private object? _left;   // string or JsRope
     private object? _right;  // string or JsRope
     private string? _flat;
-    private Realm? _realm;   // charged for the characters when they are materialized
     public readonly int Length;
 
-    public JsRope(Realm realm, object left, object right, int length)
+    public JsRope(object left, object right, int length)
     {
-        _realm = realm;
         _left = left;
         _right = right;
         Length = length;
@@ -39,12 +37,10 @@ internal sealed class JsRope
     {
         var flat = _flat;
         if (flat != null) return flat;
-        _realm!.ChargeBytes((long)Length * 2 + 24);
         flat = string.Create(Length, this, static (span, root) => Fill(span, root));
         _flat = flat;
         _left = null;
         _right = null;
-        _realm = null;
         return flat;
     }
 
