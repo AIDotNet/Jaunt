@@ -27,3 +27,5 @@ icu<78 test/intl402/Temporal/ZonedDateTime/prototype/daysInYear/basic-chinese.js
 icu<78 test/intl402/Temporal/ZonedDateTime/prototype/monthCode/chinese-calendar-dates.js
 # CLDR < 48 has no name for the Islamic "Before Hijrah" era (Jaunt substitutes it when the data has it)
 icu<78 test/intl402/DateTimeFormat/prototype/formatToParts/era.js
+# ICU < 78 Hebrew calendar (used by Intl formatting) disagrees with the exact arithmetic one Temporal uses for some years
+icu<78 test/intl402/DateTimeFormat/prototype/formatToParts/compare-to-temporal-lunisolar.js
