@@ -51,7 +51,7 @@ public ref struct JsCallContext
     {
         ArgumentNullException.ThrowIfNull(source);
         Jaunt.Compiler.ScriptTemplate t;
-        try { t = JsCompiler.Compile(source, JsCompileOptions.Default, isModule: false, Realm.Vm.Token, vm: Realm.Vm); }
+        try { t = JsCompiler.Compile(source, JsCompiler.RuntimeOptions(Realm.Vm, "script"), isModule: false, Realm.Vm.Token, vm: Realm.Vm); }
         catch (JsCompileException ce) { throw JsErrors.SyntaxError(Realm, ce.Description); }
         return Realm.Engine!.RunScriptTemplate(t, oneShot: true, Realm);
     }
@@ -76,7 +76,7 @@ public ref struct JsCallContext
             throw JsErrors.TypeError(Realm, "EvaluateScript: not the global object of a realm of this engine");
         var target = g.Realm;
         Jaunt.Compiler.ScriptTemplate t;
-        try { t = JsCompiler.Compile(source, JsCompileOptions.Default, isModule: false, Realm.Vm.Token, vm: Realm.Vm); }
+        try { t = JsCompiler.Compile(source, JsCompiler.RuntimeOptions(Realm.Vm, "script"), isModule: false, Realm.Vm.Token, vm: Realm.Vm); }
         catch (JsCompileException ce) { throw JsErrors.SyntaxError(target, ce.Description); }
         return Realm.Engine!.RunScriptTemplate(t, oneShot: true, target);
     }
@@ -367,12 +367,12 @@ public sealed partial class JsEngine
         {
             var (fn, nm, engine, ai, ri) = ((Func<TArg, TResult>, string, JsEngine, JsTypeInfo<TArg>, JsTypeInfo<TResult>))a.Callee.State!;
             TArg arg;
-            try { arg = ai.Read(new JsConversionContext(a.Realm, long.MaxValue), a[0]); }
+            try { arg = ai.Read(JsConversionContext.ForHost(a.Realm), a[0]); }
             catch (JsConversionException ce) { throw JsErrors.TypeError(a.Realm, $"Argument 1 of '{nm}': {ce.Message}"); }
             TResult r;
             try { r = fn(arg); }
             catch (Exception ex) when (IsHostException(ex)) { throw engine.HostError(a.Realm, nm, ex); }
-            return ri.Write(new JsConversionContext(a.Realm, long.MaxValue), r);
+            return ri.Write(JsConversionContext.ForHost(a.Realm), r);
         }, (function, name, this, argumentInfo, resultInfo));
     }
 

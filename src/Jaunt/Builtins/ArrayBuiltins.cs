@@ -349,6 +349,7 @@ internal static class ArrayBuiltins
             var realm = a.Realm;
             // ECMA-402 19.5.1 / 23.2.3.32: element toLocaleString receives (locales, options) when Intl is present
             ReadOnlySpan<JsValue> localeArgs = realm.Intl != null ? new[] { a[0], a[1] } : ReadOnlySpan<JsValue>.Empty;
+            realm.Vm.EnsureNativeStack();   // recursive for nested arrays
             var o = Operations.ToObject(realm, a.This);
             long len = Operations.LengthOfArrayLike(realm, o);
             var sb = new StringBuilder();
@@ -721,10 +722,12 @@ internal static class ArrayBuiltins
     public static string Join(Realm realm, JsObject o, string sep, long len = -1)
     {
         if (!realm.JoinStack.Add(o)) return "";
+        realm.Vm.EnsureNativeStack();
         try
         {
             if (len < 0) len = Operations.LengthOfArrayLike(realm, o);
             var sb = new StringBuilder();
+            int charged = 0;
             for (long i = 0; i < len; i++)
             {
                 if (i > 0) sb.Append(sep);
@@ -732,8 +735,10 @@ internal static class ArrayBuiltins
                 if (!v.IsNullOrUndefined) sb.Append(v.IsString ? v.AsStringUnchecked : Operations.ToString(realm, v));
                 if (sb.Length > realm.MaxStringLength) throw JsErrors.RangeError(realm, "Invalid string length");
                 realm.Vm.Tick();
+                // charge as the result grows (not once at the end), so a huge join stops at MaxTrackedBytes
+                if (sb.Length - charged >= 4096) { realm.ChargeOutput(sb.Length - charged); charged = sb.Length; }
             }
-            realm.ChargeBytes(sb.Length * 2L);
+            realm.ChargeOutput(sb.Length - charged);
             return sb.ToString();
         }
         finally { realm.JoinStack.Remove(o); }

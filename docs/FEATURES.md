@@ -138,11 +138,25 @@ semantics, captures mapped to the same groups), where `Timeout`, cancellation an
   execution (JS cannot catch it) and faults the engine. The timeout, cancellation and `Interrupt()` also cover
   compiling code during an execution (`Evaluate(string)`, `eval`, `Function`, `ShadowRealm`). Tracked bytes are one
   budget for all realms of an engine (`ShadowRealm`, `JsCallContext.CreateRealm`; creating a realm is charged too).
-  `MaxOutputBytes` counts UTF-8 bytes of JSON output and values created/read by DTO conversions.
+  It is cumulative over the engine's lifetime: garbage that has since become unreachable still counts, so it bounds
+  total allocation, not live memory. Builtins that produce large strings (`repeat`, `padStart`/`padEnd`, `concat`,
+  `replace`/`replaceAll`, `Array.prototype.join`, `JSON.stringify`) charge their output (and VM work) before or while
+  allocating it. Compile limits of `JsEngineOptions.CompileOptions` also apply to code compiled at run time (`eval`,
+  `Function`, `ShadowRealm`, `JsCallContext.EvaluateScript`).
+  `MaxOutputBytes` counts UTF-8 bytes of JSON output; for DTO conversions (including typed host-function arguments and
+  results) it counts approximate bytes: 16 per value plus 2 per string character, and an array's whole length before
+  it is read.
   `JsPluginOptions.Execution` covers the whole invocation, module initialization included.
+* Native recursion (nested-array `join`/`toString`, `yield*` chains, Proxy/bind chains, re-entrant builtins, deeply
+  nested regular expressions) is guarded: it ends in a `StackDepth` limit or a JS error, never a process crash, also
+  on small thread stacks and under NativeAOT.
 * Host APIs reject objects of another engine wherever a value can enter the engine's object graph (arguments,
   `SetValue`, host-function results, `JsCallContext.SetProperty`/`CreateArray`/`Call`, DTO conversion contexts).
-  `Interrupt()` only ever stops the execution that is active when it is called.
+  `Interrupt()` stops the execution that is active when it is called (at the latest when it completes, even if it was
+  requested during a host callback); `Interrupt(executionId)` with `CurrentExecutionId` stops only that execution, so a
+  late request cannot hit a later one. `Dispose()` may be called from any thread: a running execution ends with
+  `ObjectDisposedException` and the engine is released by the executing thread. Read APIs (`GetGlobal`, module
+  exports) are rejected from other threads while an execution runs; host callbacks may use them.
 * Module resolvers receive import attributes (`IJsModuleResolver.Resolve(specifier, referrer, attributes)`);
   `JsCompiler.CompileJsonModule` / `JsDictionaryModuleResolver.AddJson` create JSON modules,
   `JsCompiler.CreateTextModule` / `JsDictionaryModuleResolver.AddText` text modules, and `JsCompiler.CreateSourceModule`

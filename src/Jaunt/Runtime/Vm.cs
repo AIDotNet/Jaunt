@@ -169,6 +169,14 @@ internal sealed partial class Vm
 
     public CancellationToken Token => _token;
 
+    /// <summary>Whether the active execution has a wall-clock deadline.</summary>
+    public bool HasDeadline => _budgetActive && _deadline != long.MaxValue;
+
+    public void ThrowIfInterruptPending()
+    {
+        if (_interrupt != 0) throw new JsTerminationException(TerminationKind.Interrupted, "Execution was interrupted.");
+    }
+
     /// <summary>The time-like limits of the active execution (cancellation, Interrupt, deadline) without charging work; used while compiling.</summary>
     public void CheckTimeLimits()
     {

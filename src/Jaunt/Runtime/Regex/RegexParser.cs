@@ -111,7 +111,22 @@ internal sealed class RegexParser
         return c;
     }
 
+    /// <summary>
+    /// Group nesting limit: parsing, compiling and analysing the pattern recurse once per level on the native stack, so a
+    /// deeply nested pattern (e.g. 30,000 nested groups) is rejected as a SyntaxError instead of overflowing the stack.
+    /// </summary>
+    private const int MaxNesting = 1000;
+    private int _nesting;
+
     private RNode ParseDisjunction()
+    {
+        if (++_nesting > MaxNesting || !System.Runtime.CompilerServices.RuntimeHelpers.TryEnsureSufficientExecutionStack())
+            throw new RegexSyntaxException("Regular expression is nested too deeply");
+        try { return ParseDisjunctionCore(); }
+        finally { _nesting--; }
+    }
+
+    private RNode ParseDisjunctionCore()
     {
         var first = ParseAlternative();
         if (!(More && Peek() == '|')) return first;

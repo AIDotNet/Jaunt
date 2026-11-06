@@ -64,15 +64,21 @@ internal static class Coroutines
         gen.State = GeneratorState.Executing;
         vm.AttachFrame(frame);
         JsValue r;
+        // try/finally rather than catch + rethrow: with .NET's exception model a catch block runs on top of the
+        // unwinding stack, so a rethrow at every level of a deep `yield*` chain stacks up until the process overflows
+        bool completed = false;
         try
         {
             r = vm.Run(frame);
+            completed = true;
         }
-        catch
+        finally
         {
-            gen.State = GeneratorState.Completed;
-            gen.Frame = null;
-            throw;
+            if (!completed)
+            {
+                gen.State = GeneratorState.Completed;
+                gen.Frame = null;
+            }
         }
         switch (frame.Suspend)
         {

@@ -14,6 +14,7 @@ public class ApiTests
         var script = JsCompiler.CompileScript("var o = { a: 1 }; function f(x) { return x.a + [1, 2].length; } f(o) + f(o)");
         var script2 = JsCompiler.CompileScript("f(o) + [3].concat([4]).length");
         var refs = new List<WeakReference>();
+        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
         void Run()
         {
             for (int i = 0; i < 20; i++)
@@ -22,6 +23,8 @@ public class ApiTests
                 engine.Evaluate(script);
                 engine.Evaluate(script2);
                 engine.Evaluate(script);
+                // source compiled at run time goes through the per-thread parser cache, which must not keep the engine
+                engine.Evaluate("eval('1 + 1') + new Function('return 1')()");
                 refs.Add(new WeakReference(engine));
                 engine.Dispose();
             }
@@ -30,7 +33,7 @@ public class ApiTests
         for (int i = 0; i < 3; i++) { GC.Collect(); GC.WaitForPendingFinalizers(); }
         GC.KeepAlive(script);
         GC.KeepAlive(script2);
-        Assert.True(refs.Count(r => r.IsAlive) <= 1, $"{refs.Count(r => r.IsAlive)} of {refs.Count} engines are still alive");
+        Assert.True(refs.Count(r => r.IsAlive) == 0, $"{refs.Count(r => r.IsAlive)} of {refs.Count} engines are still alive");
     }
 
     [Fact]

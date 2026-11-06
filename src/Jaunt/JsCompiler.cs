@@ -29,6 +29,25 @@ public sealed class JsCompileOptions
     public TimeSpan? Timeout { get; init; }
     /// <summary>Keep the source text for <c>Function.prototype.toString</c>. Default true.</summary>
     public bool RetainSource { get; init; } = true;
+
+    private JsCompileOptions? _eval, _function, _script;
+
+    /// <summary>
+    /// Options for code compiled at run time (<c>eval</c>, <c>Function</c>, ShadowRealm, host EvaluateScript): the same
+    /// budgets as the host's options, with the runtime source name; a host that lowers its limits is not bypassed by eval.
+    /// </summary>
+    internal JsCompileOptions ForRuntime(string kind) => kind switch
+    {
+        "eval" => _eval ??= Derive("eval"),
+        "anonymous" => _function ??= Derive("anonymous"),
+        _ => _script ??= Derive(SourceName),
+    };
+
+    private JsCompileOptions Derive(string name) => new()
+    {
+        SourceName = name, MaxSourceLength = MaxSourceLength, MaxNestingDepth = MaxNestingDepth, MaxNodes = MaxNodes,
+        Timeout = Timeout, RetainSource = RetainSource,
+    };
 }
 
 /// <summary>Raised for syntax errors, early errors and unsupported language features.</summary>
@@ -126,9 +145,11 @@ public static class JsCompiler
 
     /// <summary>Compiles eval code (19.2.1.1 PerformEval steps 4-11); scope analysis runs in eval mode.</summary>
     internal static ScriptTemplate CompileEval(string source, bool strictCaller, bool allowNewTarget, bool allowSuper, CancellationToken ct, bool inFieldInit = false, bool allowSuperCall = false, Jaunt.Runtime.Vm? vm = null)
-        => Compile(source, s_evalOptions, isModule: false, ct, forceStrict: strictCaller, eval: (allowNewTarget, allowSuper, inFieldInit, allowSuperCall), vm: vm);
+        => Compile(source, RuntimeOptions(vm, "eval"), isModule: false, ct, forceStrict: strictCaller, eval: (allowNewTarget, allowSuper, inFieldInit, allowSuperCall), vm: vm);
 
-    private static readonly JsCompileOptions s_evalOptions = new() { SourceName = "eval" };
+    /// <summary>Compile options for runtime-compiled code of <paramref name="vm"/>'s engine (defaults without an engine).</summary>
+    internal static JsCompileOptions RuntimeOptions(Jaunt.Runtime.Vm? vm, string kind)
+        => (vm?.Realm.Engine?.Options.CompileOptions ?? JsCompileOptions.Default).ForRuntime(kind);
 
     /// <summary>
     /// Compiles a JSON module (the target of <c>import x from "..." with { type: "json" }</c>): a synthetic module
@@ -347,6 +368,7 @@ public static class JsCompiler
         {
             _inUse = false;
             _ct = default;
+            _vm = null;   // the session is cached per thread: it must not keep the last engine's VM (and realm) alive
             _name = "";
             // a parser that just handled a huge source keeps a large string pool: let it go instead of caching it
             if (Nodes > 100_000) return;

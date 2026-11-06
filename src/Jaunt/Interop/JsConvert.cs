@@ -73,8 +73,11 @@ internal static class JsConvert<T>
 
     private static JsValue ToJsValue(Realm realm, JsValue v)
     {
-        if (v.IsObject && !ReferenceEquals(((JsObject)v.Ref!).Realm, realm))
+        // another realm of the same engine (ShadowRealm, CreateRealm) is fine; another engine is not
+        if (v.IsObject && !ReferenceEquals(((JsObject)v.Ref!).Realm.Vm, realm.Vm))
             throw JsErrors.TypeError(realm, "Host function returned a value owned by another engine");
+        if (v.Ref is JsSymbol { RegistryKey: { } key } sym && (!realm.SymbolRegistry.TryGetValue(key, out var own) || !ReferenceEquals(own, sym)))
+            throw JsErrors.TypeError(realm, "Host function returned a registered symbol of another engine");
         return v;
     }
 }

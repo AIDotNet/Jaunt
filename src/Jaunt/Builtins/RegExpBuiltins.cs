@@ -479,7 +479,13 @@ internal static class RegExpBuiltins
         {
             realm.Vm.CheckTimeLimits();
             if (re.SliceFallback is not { } fb)
-                throw new JsTerminationException(TerminationKind.Timeout, "Regular expression evaluation exceeded its time budget.");
+            {
+                // a pattern only .NET can run (the native engine rejected it, e.g. nesting too deep) and no fallback: with
+                // an execution timeout this is that timeout; without one it is a catchable error, not an engine fault
+                if (realm.Vm.HasDeadline)
+                    throw new JsTerminationException(TerminationKind.Timeout, "Regular expression evaluation exceeded its time budget.");
+                throw JsErrors.RangeError(realm, $"Regular expression evaluation exceeded {s_longMatchTimeout.TotalSeconds:0} s");
+            }
             return FallbackMatch(realm, re, fb, s, start);
         }
         if (!dm.Success) return s_noMatch;

@@ -87,6 +87,16 @@ public sealed partial class JsEngine : IDisposable
     internal RootState BeginRoot(JsExecutionOptions? execOptions, CancellationToken token, JsExecutionMode mode)
     {
         int prev = Interlocked.CompareExchange(ref _state, StateExecuting, StateReady);
+        if (prev == StateReady)
+        {
+            if (Volatile.Read(ref _disposeRequested) != 0)
+            {
+                Interlocked.CompareExchange(ref _state, StateReady, StateExecuting);
+                CompleteDispose();
+                throw new ObjectDisposedException(nameof(JsEngine));
+            }
+            _executingThread = Environment.CurrentManagedThreadId;
+        }
         if (prev != StateReady)
         {
             throw prev switch
@@ -123,6 +133,8 @@ public sealed partial class JsEngine : IDisposable
         ProcessCompletions(root);
         Vm.RunJobs();
         ReportRejections();
+        // an Interrupt() that arrived after the last checkpoint (e.g. during a host callback) still stops this execution
+        Vm.ThrowIfInterruptPending();
     }
 
     internal void CloseRoot(RootState root, bool requireNoPendingWork)
@@ -161,6 +173,7 @@ public sealed partial class JsEngine : IDisposable
         _executions++;
         if (Vm.Depth != 0 || Vm.Current != null) Vm.ResetStack();
         Interlocked.CompareExchange(ref _state, StateReady, StateExecuting);
+        if (Volatile.Read(ref _disposeRequested) != 0) CompleteDispose();
     }
 
     private static void CancelPendingOps(RootState root)
@@ -207,7 +220,11 @@ public sealed partial class JsEngine : IDisposable
                 catch (JsThrowException) { }
                 catch (JsTerminationException te) { return Fault(te); }
                 if (Vm.Depth != 0) Vm.ResetStack();
-                return JsException.From(Realm, jt.Value);
+                // reading message/stack/cause may run JS (getters, Proxy traps) under the root's budget: a limit hit
+                // there terminates the root like any other
+                try { return JsException.From(Realm, jt.Value); }
+                catch (JsTerminationException te) { return Fault(te); }
+                catch (InsufficientExecutionStackException) { return Fault(new JsTerminationException(TerminationKind.StackDepth, "Native recursion is too deep to continue safely.")); }
             }
             case JsTerminationException te when te.Kind == TerminationKind.AsyncRequired:
                 Vm.ResetStack();
@@ -245,6 +262,7 @@ public sealed partial class JsEngine : IDisposable
         {
             return te.Kind switch
             {
+                TerminationKind.Interrupted when DisposeRequested => new ObjectDisposedException(nameof(JsEngine), "The engine was disposed while this execution was running."),
                 TerminationKind.Cancelled or TerminationKind.Interrupted => new OperationCanceledException(te.Message, te, root?.Token ?? default),
                 TerminationKind.Timeout => new JsLimitExceededException(JsLimitKind.Timeout, te.Message, te.Observed, te.Limit),
                 TerminationKind.Instructions => new JsLimitExceededException(JsLimitKind.Instructions, te.Message, te.Observed, te.Limit),
@@ -261,14 +279,30 @@ public sealed partial class JsEngine : IDisposable
     }
 
     /// <summary>
-    /// Requests that the currently active execution stops at its next checkpoint. Has no effect (and leaves no
-    /// sticky state) when the engine is idle.
+    /// Requests that the currently active execution stops at its next checkpoint (at the latest when it completes). Has
+    /// no effect (and leaves no sticky state) when the engine is idle. Whatever execution is active when this is called is
+    /// the one stopped; to stop only a particular execution, use <see cref="Interrupt(long)"/> with its
+    /// <see cref="CurrentExecutionId"/>.
     /// </summary>
     public void Interrupt()
     {
         // the state check and the request are atomic with respect to the end of the execution (which clears requests)
         Vm.RequestInterrupt(() => Volatile.Read(ref _state) == StateExecuting);
     }
+
+    /// <summary>
+    /// Stops the execution identified by <paramref name="executionId"/> (from <see cref="CurrentExecutionId"/>) if it is
+    /// still the active one; a request for an execution that has already ended does nothing, so it can never stop a later one.
+    /// </summary>
+    public bool Interrupt(long executionId)
+    {
+        bool hit = false;
+        Vm.RequestInterrupt(() => hit = Volatile.Read(ref _state) == StateExecuting && _root is { } r && r.Id == executionId);
+        return hit;
+    }
+
+    /// <summary>Identifier of the active execution (0 when idle); see <see cref="Interrupt(long)"/>.</summary>
+    public long CurrentExecutionId => Volatile.Read(ref _state) == StateExecuting && _root is { } r ? r.Id : 0;
 
     // ------------------------------------------------------------------ ownership
 
@@ -289,6 +323,9 @@ public sealed partial class JsEngine : IDisposable
         if (v.IsEmpty) throw new ArgumentException("Invalid JS value.", paramName);
         if (v.IsObject && !ReferenceEquals(((JsObject)v.Ref!).Realm.Vm, realm.Vm))
             throw new ArgumentException("The value belongs to another engine (or a disposed one).", paramName);
+        // Symbol.for symbols live in an engine's registry: another engine's would break Symbol.for/keyFor identity
+        if (v.Ref is JsSymbol { RegistryKey: { } key } sym && (!realm.SymbolRegistry.TryGetValue(key, out var own) || !ReferenceEquals(own, sym)))
+            throw new ArgumentException("The registered symbol belongs to another engine.", paramName);
     }
 
     internal void EnsureOwned(in JsValue v, string paramName)
@@ -298,6 +335,8 @@ public sealed partial class JsEngine : IDisposable
             throw new ArgumentException("The value belongs to another engine (or a disposed one).", paramName);
         if (v.IsObject && Volatile.Read(ref _state) == StateDisposed)
             throw new ObjectDisposedException(nameof(JsEngine));
+        if (v.Ref is JsSymbol { RegistryKey: { } key } sym && (!Realm.SymbolRegistry.TryGetValue(key, out var own) || !ReferenceEquals(own, sym)))
+            throw new ArgumentException("The registered symbol belongs to another engine.", paramName);
     }
 
     // ------------------------------------------------------------------ script execution
@@ -399,7 +438,7 @@ public sealed partial class JsEngine : IDisposable
     /// <summary>Reads a global property without invoking getters (returns undefined for accessors).</summary>
     public JsValue GetGlobal(string name)
     {
-        EnsureUsable();
+        EnsureReadable();
         Realm.EnsureGlobal(name);
         if (Realm.GlobalLex.TryGetValue(name, out var cell)) return cell.Value.IsEmpty ? JsValue.Undefined : cell.Value;
         int idx = Realm.GlobalObject.FindOwn(name, out var flags);
@@ -531,17 +570,54 @@ public sealed partial class JsEngine : IDisposable
     /// Releases the engine. Never executes JS. Disposing while an asynchronous execution is in flight is not
     /// allowed; cancel it first.
     /// </summary>
+    /// <summary>
+    /// Disposes the engine. Safe to call from any thread: while an execution is running, the execution is interrupted
+    /// (it ends with <see cref="ObjectDisposedException"/> at its next checkpoint) and the engine's state is released by
+    /// the executing thread when the execution ends, never underneath it.
+    /// </summary>
     public void Dispose()
     {
-        int prev = Interlocked.Exchange(ref _state, StateDisposed);
-        if (prev == StateDisposed) return;
-        if (prev == StateExecuting && _root != null)
+        Volatile.Write(ref _disposeRequested, 1);
+        if (Volatile.Read(ref _state) == StateExecuting)
         {
-            CancelPendingOps(_root);
+            var root = _root;
+            if (root != null) CancelPendingOps(root);
+            Vm.RequestInterrupt(() => Volatile.Read(ref _state) == StateExecuting);
+            // the execution may have ended between the checks: then nobody else completes the disposal
+            if (Volatile.Read(ref _state) == StateExecuting) return;
         }
+        CompleteDispose();
+    }
+
+    private int _disposeRequested, _disposeDone;
+    private int _executingThread;
+
+    private void CompleteDispose()
+    {
+        // only from a non-executing state (Ready/Faulted), exactly once
+        while (true)
+        {
+            int s = Volatile.Read(ref _state);
+            if (s == StateExecuting) return;   // the executing thread completes the disposal when the execution ends
+            if (s == StateDisposed || Interlocked.CompareExchange(ref _state, StateDisposed, s) == s) break;
+        }
+        if (Interlocked.Exchange(ref _disposeDone, 1) != 0) return;
         Vm.ClearJobs();
         Vm.ResetStack();
         _modules.Clear();
         Realm.GlobalLex.Clear();
+    }
+
+    internal bool DisposeRequested => Volatile.Read(ref _disposeRequested) != 0;
+
+    /// <summary>
+    /// Read APIs (globals, module exports) are allowed while idle and from the executing thread (host callbacks), but not
+    /// from another thread while an execution runs: they can materialize realm state the execution is using.
+    /// </summary>
+    internal void EnsureReadable()
+    {
+        EnsureUsable();
+        if (Volatile.Read(ref _state) == StateExecuting && Environment.CurrentManagedThreadId != Volatile.Read(ref _executingThread))
+            throw new InvalidOperationException("The engine is executing on another thread; it cannot be read concurrently.");
     }
 }

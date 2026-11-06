@@ -4,14 +4,14 @@
 - engine: Jaunt 0.1.0.0 / .NET 10.0.12 / osx-arm64 / profile Standard / interpreter
 - scope: `test/**` excluding `staging/`; 52112 files; 100169 executed variants (sloppy/strict/module/raw counted separately)
 - platform ICU: 78.1
-- run time: 235s
+- run time: 283s
 
 | outcome | variants |
 | --- | ---: |
-| fail | 6 |
-| pass | 100163 |
+| fail | 2 |
+| pass | 100167 |
 
-Pass rate over executed (non-skipped) variants: **99.99%**. Skips are listed below by reason and are not counted as passes.
+Pass rate over executed (non-skipped) variants: **99.998%**. Skips are listed below by reason and are not counted as passes.
 
 ## Skips by reason
 
@@ -208,7 +208,7 @@ Pass rate over executed (non-skipped) variants: **99.99%**. Skips are listed bel
 | test/intl402/BigInt | 22 | 0 | 0 | 0 |
 | test/intl402/Collator | 130 | 0 | 0 | 0 |
 | test/intl402/Date | 24 | 0 | 0 | 0 |
-| test/intl402/DateTimeFormat | 486 | 4 | 0 | 0 |
+| test/intl402/DateTimeFormat | 488 | 2 | 0 | 0 |
 | test/intl402/DisplayNames | 114 | 0 | 0 | 0 |
 | test/intl402/DurationFormat | 220 | 0 | 0 | 0 |
 | test/intl402/FallbackSymbol | 4 | 0 | 0 | 0 |
@@ -221,7 +221,7 @@ Pass rate over executed (non-skipped) variants: **99.99%**. Skips are listed bel
 | test/intl402/RelativeTimeFormat | 160 | 0 | 0 | 0 |
 | test/intl402/Segmenter | 158 | 0 | 0 | 0 |
 | test/intl402/String | 38 | 0 | 0 | 0 |
-| test/intl402/Temporal | 4056 | 2 | 0 | 0 |
+| test/intl402/Temporal | 4058 | 0 | 0 | 0 |
 | test/intl402/TypedArray | 2 | 0 | 0 | 0 |
 | test/intl402/constructors-string-and-single-element-array.js | 2 | 0 | 0 | 0 |
 | test/intl402/constructors-taint-Object-prototype-2.js | 2 | 0 | 0 | 0 |
@@ -277,5 +277,3 @@ Pass rate over executed (non-skipped) variants: **99.99%**. Skips are listed bel
 ## Most common failure reasons
 
 - 2 × `JsException: TestNError: German weekday without year Expected SameValue(«false», «true») to be true`
-- 2 × `JsException: TestNError: islamic-civil eras (Anno Hegirae,Anno Hegirae) should be unique Expected SameValue(«N», «N») to be true`
-- 2 × `JsException: TestNError: Expected SameValue(«N», «N») to be true`

@@ -273,7 +273,7 @@ static void WriteSummary(string path, List<Result> all, int fileCount, string? r
     sb.AppendLine();
     var executed = all.Where(r => r.Outcome is "pass" or "fail" or "timeout").ToList();
     if (executed.Count > 0)
-        sb.AppendLine($"Pass rate over executed (non-skipped) variants: **{100.0 * executed.Count(r => r.Outcome == "pass") / executed.Count:F2}%**. Skips are listed below by reason and are not counted as passes.");
+        sb.AppendLine($"Pass rate over executed (non-skipped) variants: **{100.0 * executed.Count(r => r.Outcome == "pass") / executed.Count:F3}%**. Skips are listed below by reason and are not counted as passes.");
     sb.AppendLine();
     sb.AppendLine("## Skips by reason");
     sb.AppendLine();

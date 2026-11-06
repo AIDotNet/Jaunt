@@ -184,17 +184,31 @@ internal static class StringBuiltins
             if (n < 0 || double.IsInfinity(n)) throw JsErrors.RangeError(a.Realm, "Invalid count value: " + NumberFormatting.ToString(n));
             if (s.Length == 0 || n == 0) return JsValue.EmptyString;
             if (s.Length * n > a.Realm.MaxStringLength) throw JsErrors.RangeError(a.Realm, "Invalid string length");
-            a.Realm.ChargeBytes((long)(s.Length * n * 2));
+            a.Realm.ChargeOutput((long)(s.Length * n));
             var sb = new StringBuilder((int)(s.Length * n));
             for (int i = 0; i < n; i++) sb.Append(s);
             return new JsValue(sb.ToString());
         });
         r.Method(proto, "concat", 1, static (in NativeArgs a) =>
         {
-            var sb = new StringBuilder(Str(a));
-            foreach (var v in a.Args) sb.Append(Operations.ToString(a.Realm, v));
-            if (sb.Length > a.Realm.MaxStringLength) throw JsErrors.RangeError(a.Realm, "Invalid string length");
-            return new JsValue(sb.ToString());
+            var first = Str(a);
+            int n = a.Args.Length;
+            if (n == 0) return new JsValue(first);
+            if (n == 1)
+            {
+                var second = Operations.ToString(a.Realm, a.Args[0]);
+                long len = (long)first.Length + second.Length;
+                if (len > a.Realm.MaxStringLength) throw JsErrors.RangeError(a.Realm, "Invalid string length");
+                a.Realm.ChargeOutput(len);   // charged before allocating
+                return new JsValue(string.Concat(first, second));
+            }
+            var parts = new string[n + 1];
+            parts[0] = first;
+            long total = first.Length;
+            for (int i = 0; i < n; i++) { parts[i + 1] = Operations.ToString(a.Realm, a.Args[i]); total += parts[i + 1].Length; }
+            if (total > a.Realm.MaxStringLength) throw JsErrors.RangeError(a.Realm, "Invalid string length");
+            a.Realm.ChargeOutput(total);   // charged before allocating
+            return new JsValue(string.Concat(parts));
         });
         r.Method(proto, "split", 2, static (in NativeArgs a) =>
         {
@@ -337,6 +351,7 @@ internal static class StringBuiltins
         string filler = a[1].IsUndefined ? " " : Operations.ToString(a.Realm, a[1]);
         if (filler.Length == 0) return s;
         if (max > a.Realm.MaxStringLength) throw JsErrors.RangeError(a.Realm, "Invalid string length");
+        a.Realm.ChargeOutput((long)max);   // charged before allocating
         int fill = (int)max - s.Length;
         var sb = new StringBuilder((int)max);
         if (!start) sb.Append(s);
@@ -407,6 +422,7 @@ internal static class StringBuiltins
                 ? Operations.ToString(realm, realm.Vm.Call(replaceValue, JsValue.Undefined, new[] { new JsValue(search), new JsValue(idx), new JsValue(s) }))
                 : RegExpBuiltins.GetSubstitution(search, s, idx, Array.Empty<JsValue>(), JsValue.Undefined, replaceStr, realm);
             sb.Append(rep);
+            realm.ChargeOutput(idx - end + rep.Length);
             end = idx + search.Length;
             if (sb.Length > realm.MaxStringLength) throw JsErrors.RangeError(realm, "Invalid string length");
         }

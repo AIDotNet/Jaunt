@@ -78,15 +78,15 @@ public sealed class JsModuleInstance
     public string Id => Module.Id;
 
     /// <summary>Names exported by the module.</summary>
-    public IEnumerable<string> ExportNames => Modules.GetNamespace(Engine.Realm, Module).ExportNames;
+    public IEnumerable<string> ExportNames { get { Engine.EnsureReadable(); return Modules.GetNamespace(Engine.Realm, Module).ExportNames; } }
 
     /// <summary>The module namespace object.</summary>
-    public JsValue Namespace => JsValue.FromObject(Modules.GetNamespace(Engine.Realm, Module));
+    public JsValue Namespace { get { Engine.EnsureReadable(); return JsValue.FromObject(Modules.GetNamespace(Engine.Realm, Module)); } }
 
     /// <summary>Returns a live binding handle for an export.</summary>
     public JsExport GetExport(string name)
     {
-        Engine.EnsureUsable();
+        Engine.EnsureReadable();
         var ns = Modules.GetNamespace(Engine.Realm, Module);
         var binding = ns.GetBinding(name) ?? throw new KeyNotFoundException($"Module '{Id}' has no export named '{name}'.");
         return new JsExport(Engine, binding, name);

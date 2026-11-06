@@ -18,7 +18,7 @@ public sealed class JsExecution : IDisposable, IAsyncDisposable
     private readonly JsEngine.RootState _root;
     private bool _completed;
     private bool _disposed;
-    private bool _busy;
+    private int _busy;
 
     internal JsExecution(JsEngine engine, JsEngine.RootState root)
     {
@@ -34,11 +34,10 @@ public sealed class JsExecution : IDisposable, IAsyncDisposable
         if (_disposed) throw new ObjectDisposedException(nameof(JsExecution));
         if (_completed) throw new InvalidOperationException("The execution scope has already been completed.");
         if (_engine.IsFaulted) throw new JsEngineFaultedException("Faulted", "The engine is faulted.");
-        if (_busy) throw new InvalidOperationException("Operations of one JsExecution scope must not run concurrently.");
-        _busy = true;
+        if (Interlocked.Exchange(ref _busy, 1) != 0) throw new InvalidOperationException("Operations of one JsExecution scope must not run concurrently.");
     }
 
-    private void Exit() => _busy = false;
+    private void Exit() => Volatile.Write(ref _busy, 0);
 
     private Exception Map(Exception ex) => _engine.MapException(ex, _root);
 
@@ -48,7 +47,7 @@ public sealed class JsExecution : IDisposable, IAsyncDisposable
         Enter();
         try
         {
-            var t = JsCompiler.Compile(source, _engine.Options.CompileOptions, isModule: false, _root.Token);
+            var t = JsCompiler.Compile(source, _engine.Options.CompileOptions, isModule: false, _root.Token, vm: _engine.Vm);
             return _engine.RunScriptTemplate(t, oneShot: true);
         }
         catch (Exception ex) when (ex is not JsCompileException) { throw Map(ex); }

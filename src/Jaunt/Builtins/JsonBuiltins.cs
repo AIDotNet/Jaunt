@@ -477,8 +477,12 @@ internal static class JsonBuiltins
             return o.Get("toJSON", value);
         }
 
+        private int _charged;
+
         private void CheckSize()
         {
+            // output is charged to the tracked-bytes budget (and VM work) as it grows
+            if (Sb.Length - _charged >= 4096) { Realm.ChargeOutput(Sb.Length - _charged); _charged = Sb.Length; }
             if (Sb.Length > _maxOutput)
                 throw new JsTerminationException(TerminationKind.OutputBytes, $"JSON output exceeded its limit of {_maxOutput}.", Sb.Length, _maxOutput);
             if (Sb.Length > Realm.MaxStringLength) throw JsErrors.RangeError(Realm, "Invalid string length");

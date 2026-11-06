@@ -509,7 +509,7 @@ internal static class FunctionBuiltins
         ScriptTemplate t;
         try
         {
-            t = JsCompiler.Compile(sb.ToString(), new JsCompileOptions { SourceName = "anonymous" }, isModule: false, realm.Vm.Token, vm: realm.Vm);
+            t = JsCompiler.Compile(sb.ToString(), JsCompiler.RuntimeOptions(realm.Vm, "anonymous"), isModule: false, realm.Vm.Token, vm: realm.Vm);
         }
         catch (JsCompileException ce)
         {

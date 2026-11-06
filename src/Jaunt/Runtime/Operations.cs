@@ -97,6 +97,9 @@ internal static class Operations
     public static JsValue ToPrimitive(Realm realm, in JsValue v, PreferredType hint = PreferredType.Default)
     {
         if (v.IsNotObject) return v;
+        // object → primitive can recurse through builtins on the native stack (e.g. join of a 5,000-deep nested array:
+        // join → ToString → toString → join …), so it is a native-stack guard point
+        realm.Vm.EnsureNativeStack();
         var obj = v.AsObjectUnchecked;
         var exotic = obj.Get(JsSymbol.ToPrimitive, v);
         if (!exotic.IsNullOrUndefined)

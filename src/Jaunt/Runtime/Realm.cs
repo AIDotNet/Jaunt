@@ -426,6 +426,18 @@ internal sealed partial class Realm
         if (b.Used > b.Max && _accounting) OverBudget();
     }
 
+    /// <summary>
+    /// Charges a builtin's output of <paramref name="chars"/> UTF-16 units before (or while) producing it: tracked bytes
+    /// (2 per unit) and VM work (1 unit per 256 chars), so one large string operation is bounded by MaxTrackedBytes and
+    /// reaches a Timeout/Interrupt checkpoint like a loop of small ones.
+    /// </summary>
+    public void ChargeOutput(long chars)
+    {
+        if (chars <= 0) return;
+        ChargeBytes(chars * 2);
+        if (chars >= 256) Vm.Tick((int)Math.Min(int.MaxValue, chars / 256));
+    }
+
     [MethodImpl(MethodImplOptions.NoInlining)]
     private void OverBudget() =>
         throw new JsTerminationException(TerminationKind.TrackedBytes, $"Tracked allocation budget of {MaxTrackedBytes} bytes exceeded.", TrackedBytes, MaxTrackedBytes);

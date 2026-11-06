@@ -37,11 +37,28 @@ public sealed class JsConversionContext
     /// <summary>Fails the conversion at the current member path.</summary>
     public JsConversionException Fail(string message) => new(Path, message);
 
-    private void Count()
+    /// <summary>Approximate size charged per value created or read (strings add 2 bytes per UTF-16 unit).</summary>
+    internal const int ValueBytes = 16;
+
+    /// <summary>
+    /// Charges <paramref name="bytes"/> against the conversion's output budget (<c>MaxOutputBytes</c>: approximate bytes,
+    /// <see cref="ValueBytes"/> per value plus string payloads), and VM work.
+    /// </summary>
+    private void Count(long bytes = ValueBytes)
     {
-        if (++_nodes > _maxNodes) throw new JsTerminationException(TerminationKind.OutputBytes, "Conversion exceeded its node budget.", _nodes, _maxNodes);
-        if ((_nodes & 255) == 0) Realm.Vm.Tick();
+        long before = _nodes;
+        _nodes += bytes;
+        if (_nodes > _maxNodes || _nodes < before)
+            throw new JsTerminationException(TerminationKind.OutputBytes, $"Conversion exceeded its output budget of {_maxNodes} bytes.", _nodes, _maxNodes);
+        if ((before >> 12) != (_nodes >> 12)) Realm.Vm.Tick((int)Math.Min(int.MaxValue, Math.Max(1, (_nodes - before) >> 12)));
     }
+
+    /// <summary>Charges a string read from or written to JS.</summary>
+    internal void CountString(int length) => Count(ValueBytes + 2L * length);
+
+    /// <summary>A context for host-function argument/result conversion: the active execution's output budget.</summary>
+    internal static JsConversionContext ForHost(Realm realm)
+        => new(realm, realm.Engine?.CurrentRoot?.MaxOutputBytes ?? realm.Engine?.Options.Limits.MaxOutputBytes ?? JsEngineOptions.Default.Limits.MaxOutputBytes);
 
     internal void Push(string segment)
     {
@@ -76,7 +93,7 @@ public sealed class JsConversionContext
         a.Push(value);
     }
     /// <summary>Creates a string value.</summary>
-    public JsValue String(string? s) { Count(); return JsValue.From(s); }
+    public JsValue String(string? s) { CountString(s?.Length ?? 0); return JsValue.From(s); }
 
     // ---- reading (JS → CLR), data-only
 
@@ -118,6 +135,9 @@ public sealed class JsConversionContext
     {
         var o = RequireDataObject(v, allowArray: true);
         if (o is not JsArray a) throw Fail($"Expected an array but found {o.ClassName}");
+        // the whole result is charged before it is allocated (a sparse array's length is not bounded by its content)
+        if (a.Length > Realm.MaxArrayLength || a.Length > Array.MaxLength) throw Fail($"Array of length {a.Length} is too large to convert");
+        Count((long)a.Length * ValueBytes);
         var list = new JsValue[a.Length];
         for (uint i = 0; i < a.Length; i++)
         {
@@ -175,7 +195,9 @@ public static class JsTypeInfo
     /// <summary>JS boolean ↔ bool.</summary>
     public static JsTypeInfo<bool> Boolean { get; } = new Prim<bool>(static (c, v) => v.IsBoolean ? v.IsTrue : throw c.Fail($"Expected a boolean but found {v.TypeName}"), static (c, v) => JsValue.FromBool(v));
     /// <summary>JS string ↔ string (null ↔ null; undefined reads as null).</summary>
-    public static JsTypeInfo<string?> String { get; } = new Prim<string?>(static (c, v) => v.IsString ? v.AsStringUnchecked : v.IsNullOrUndefined ? null : throw c.Fail($"Expected a string but found {v.TypeName}"), static (c, v) => JsValue.From(v));
+    public static JsTypeInfo<string?> String { get; } = new Prim<string?>(static (c, v) => v.IsString ? ReadString(c, v.AsStringUnchecked) : v.IsNullOrUndefined ? null : throw c.Fail($"Expected a string but found {v.TypeName}"), static (c, v) => c.String(v));
+
+    private static string ReadString(JsConversionContext c, string s) { c.CountString(s.Length); return s; }
     /// <summary>ISO-8601 string ↔ DateTimeOffset (explicit; no culture guessing).</summary>
     public static JsTypeInfo<DateTimeOffset> IsoDateTime { get; } = new Prim<DateTimeOffset>(
         static (c, v) => v.IsString && DateTimeOffset.TryParse(v.AsStringUnchecked, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.RoundtripKind, out var d) ? d : throw c.Fail("Expected an ISO-8601 date string"),

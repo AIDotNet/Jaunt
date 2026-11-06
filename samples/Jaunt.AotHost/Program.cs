@@ -138,6 +138,34 @@ static async Task<int> Verify(string dir)
     }
     catch (Exception ex) { Check("limits & cancellation", false, ex.ToString()); }
 
+    // 4b. deep native recursion ends in a catchable limit, never a process crash (join/toString of nested arrays,
+    //     yield* delegation, deeply nested regex groups, JSON); run on a 1 MB thread to make it tight
+    try
+    {
+        string[] attacks =
+        {
+            "let a=[];for(let i=0;i<20000;i++)a=[a];String(a)",
+            "let a=[];for(let i=0;i<20000;i++)a=[a];a.toLocaleString()",
+            "function* g(n){if(n>0)yield* g(n-1);else yield 1};[...g(100000)].length",
+            "new RegExp('['.repeat(30000)+']'.repeat(30000),'v').test('')",
+            "let o={};for(let i=0;i<200000;i++)o={o};JSON.stringify(o).length",
+        };
+        var outcomes = new List<string>();
+        var t = new Thread(() =>
+        {
+            foreach (var src in attacks)
+            {
+                try { using var e = new JsEngine(); e.Evaluate(src); outcomes.Add("completed"); }
+                catch (JsLimitExceededException lx) { outcomes.Add(lx.Kind.ToString()); }
+                catch (JsException jx) { outcomes.Add(jx.Name); }
+            }
+        }, 1024 * 1024);
+        t.Start();
+        t.Join();
+        Check("deep recursion is a catchable limit", outcomes.Count == attacks.Length && outcomes.All(o => o is "StackDepth" or "SyntaxError" or "RangeError"), string.Join(",", outcomes));
+    }
+    catch (Exception ex) { Check("deep recursion is a catchable limit", false, ex.ToString()); }
+
     // 5. async: host async function, promise pump, top-level await module, AsyncRequired
     try
     {

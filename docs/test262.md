@@ -15,8 +15,9 @@ variants, `onlyStrict`/`noStrict`/`raw`/`module`/`async` flags, `negative` phase
 | Wall time | ~210 s on 10 cores on an idle machine (one fresh `JsEngine` per variant; harness scripts compiled once and shared; multi-agent Atomics tests run after the main pass with at most 4 in parallel). On a heavily loaded machine some heavy RegExp property-escape / `decodeURI` tests exceed the 10 s per-test limit; they pass when rerun |
 
 How to read this (research doc §3.6): a pass rate is only meaningful together with its scope. Skipped
-tests are **not** passes; every skip reason is listed as unsupported in [`FEATURES.md`](FEATURES.md): proposals
-that have not reached stage 4 at the pinned revision, `IsHTMLDDA`, legacy `caller`. Known failures remain failures;
+tests would **not** count as passes, and any skip reason would have to be listed as unsupported in
+[`FEATURES.md`](FEATURES.md); at this revision nothing is skipped (earlier milestones skipped proposals, `IsHTMLDDA`
+and legacy `caller`, all implemented since). Known failures remain failures;
 they are not filtered out. `intl402/` runs against the platform ICU (ICU 78 / CLDR 48 on the reference machine).
 
 ## Progress during implementation
@@ -53,9 +54,9 @@ or ICU 76+ Chinese calendar results (and one test comparing Intl's ICU Hebrew ca
 with an `icu<78` prefix in `tools/Jaunt.Test262/known-failures.txt`, which `tools/Jaunt.Test262/check-results.py`
 (used by CI) applies according to the ICU version the run reports.
 
-Other runtimes: on CoreCLR .NET 8.0.33 (self-contained) the same suite passes all 82,028 executed variants with
-`--threads 4` (139 s). With 10 threads on a loaded machine one throw-heavy test (`decodeURI/S15.1.3.1_A1.11_T1`,
-~65k `URIError`s) can exceed the 10 s per-test limit, because CLR exceptions are several times slower on .NET 8. `.github/workflows/verify.yml` runs the suite on Linux x64 (ICU 74),
+Other runtimes: CI runs the full scope on CoreCLR .NET 8 as well (see below). With 10 threads on a loaded machine one
+throw-heavy test (`decodeURI/S15.1.3.1_A1.11_T1`, ~65k `URIError`s) can exceed the 10 s per-test limit, because CLR
+exceptions are several times slower on .NET 8; `--retry-timeouts` reruns such files alone. `.github/workflows/verify.yml` runs the suite on Linux x64 (ICU 74),
 Windows x64 (system ICU 77) and macOS ARM64 (ICU 76) for both runtimes; all three pass, judged by
 `tools/Jaunt.Test262/check-results.py` against the reviewed `known-failures.txt`.
 
