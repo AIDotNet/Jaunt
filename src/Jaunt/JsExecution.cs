@@ -183,8 +183,13 @@ public sealed class JsExecution : IDisposable, IAsyncDisposable
         Enter();
         try
         {
+            // the serializer stops early once the output has more UTF-16 units than the budget (a lower bound of its
+            // UTF-8 size); the exact UTF-8 size is checked on the result
             var s = JsonBuiltins.Stringify(_engine.Realm, value, JsValue.Undefined, JsValue.Undefined, _root.MaxOutputBytes);
             if (s == null) throw new JsConversionException("$", "Value has no JSON representation");
+            long bytes = s.Length > _root.MaxOutputBytes / 3 ? Encoding.UTF8.GetByteCount(s) : s.Length;
+            if (bytes > _root.MaxOutputBytes)
+                throw new JsTerminationException(TerminationKind.OutputBytes, $"JSON output exceeded its limit of {_root.MaxOutputBytes} UTF-8 bytes.", bytes, _root.MaxOutputBytes);
             return s;
         }
         catch (Exception ex) when (ex is not JsConversionException) { throw Map(ex); }

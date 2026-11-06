@@ -77,6 +77,11 @@ internal sealed partial class Vm
     private long _deadline = long.MaxValue;
     private CancellationToken _token;
     private volatile int _interrupt;
+    /// <summary>
+    /// Orders <see cref="RequestInterrupt"/> against the start and end of executions, so that a request made for one
+    /// execution is cleared when it ends and can never stop the next one.
+    /// </summary>
+    private readonly object _interruptLock = new();
     private bool _budgetActive;
     private TimeSpan _timeout;
 
@@ -98,7 +103,7 @@ internal sealed partial class Vm
         _deadline = timeout is { } t && t != Timeout.InfiniteTimeSpan ? Stopwatch.GetTimestamp() + (long)(t.TotalSeconds * Stopwatch.Frequency) : long.MaxValue;
         _timeout = timeout ?? TimeSpan.Zero;
         _token = token;
-        _interrupt = 0;
+        lock (_interruptLock) _interrupt = 0;
         MaxDepth = maxDepth;
         _budgetActive = true;
         ResetTicks();
@@ -110,7 +115,7 @@ internal sealed partial class Vm
         _token = default;
         _maxWork = long.MaxValue;
         _deadline = long.MaxValue;
-        _interrupt = 0;
+        lock (_interruptLock) _interrupt = 0;
         _ticks = int.MaxValue;
     }
 
@@ -124,7 +129,14 @@ internal sealed partial class Vm
         _ticks = chunk;
     }
 
-    public void RequestInterrupt() => _interrupt = 1;
+    /// <summary>Interrupts the active execution if <paramref name="isActive"/> holds at the time of the request.</summary>
+    public void RequestInterrupt(Func<bool> isActive)
+    {
+        lock (_interruptLock)
+        {
+            if (isActive()) _interrupt = 1;
+        }
+    }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public void Tick()
@@ -156,6 +168,18 @@ internal sealed partial class Vm
     }
 
     public CancellationToken Token => _token;
+
+    /// <summary>The time-like limits of the active execution (cancellation, Interrupt, deadline) without charging work; used while compiling.</summary>
+    public void CheckTimeLimits()
+    {
+        if (!_budgetActive) return;
+        if (_token.IsCancellationRequested)
+            throw new JsTerminationException(TerminationKind.Cancelled, "Execution was cancelled.");
+        if (_interrupt != 0)
+            throw new JsTerminationException(TerminationKind.Interrupted, "Execution was interrupted.");
+        if (_deadline != long.MaxValue && Stopwatch.GetTimestamp() > _deadline)
+            throw new JsTerminationException(TerminationKind.Timeout, $"Execution exceeded its timeout of {_timeout}.");
+    }
 
     // ------------------------------------------------------------------ native boundary
 

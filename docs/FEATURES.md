@@ -107,7 +107,9 @@ data (second-precision historical offsets).
 Patterns are executed by .NET `Regex` (after Acornima's adaptation) when that reproduces ECMAScript semantics
 exactly; patterns using property escapes, the `v` flag, modifiers, duplicate or non-ASCII group names,
 capturing groups inside quantifiers, or `u`+`i` case folding run on Jaunt's native backtracking engine
-(`src/Jaunt/Runtime/Regex`), whose steps are charged to the execution budget.
+(`src/Jaunt/Runtime/Regex`), whose steps are charged to the execution budget. .NET matching cannot observe that
+budget, so each .NET match gets a 100 ms time slice; a match that runs longer is redone on the native engine (same
+semantics, captures mapped to the same groups), where `Timeout`, cancellation and `Interrupt()` apply.
 
 ## Not supported
 
@@ -133,7 +135,14 @@ capturing groups inside quantifiers, or `u`+`i` case folding run on Jaunt's nati
   all their aliases throw `EvalError`.
 * Limits (`JsLimits`): timeout, VM work units (also charged by the native RegExp engine), call depth, tracked
   allocation bytes, pending jobs, output bytes, module count, string length. Exceeding a limit terminates the root
-  execution (JS cannot catch it) and faults the engine.
+  execution (JS cannot catch it) and faults the engine. The timeout, cancellation and `Interrupt()` also cover
+  compiling code during an execution (`Evaluate(string)`, `eval`, `Function`, `ShadowRealm`). Tracked bytes are one
+  budget for all realms of an engine (`ShadowRealm`, `JsCallContext.CreateRealm`; creating a realm is charged too).
+  `MaxOutputBytes` counts UTF-8 bytes of JSON output and values created/read by DTO conversions.
+  `JsPluginOptions.Execution` covers the whole invocation, module initialization included.
+* Host APIs reject objects of another engine wherever a value can enter the engine's object graph (arguments,
+  `SetValue`, host-function results, `JsCallContext.SetProperty`/`CreateArray`/`Call`, DTO conversion contexts).
+  `Interrupt()` only ever stops the execution that is active when it is called.
 * Module resolvers receive import attributes (`IJsModuleResolver.Resolve(specifier, referrer, attributes)`);
   `JsCompiler.CompileJsonModule` / `JsDictionaryModuleResolver.AddJson` create JSON modules,
   `JsCompiler.CreateTextModule` / `JsDictionaryModuleResolver.AddText` text modules, and `JsCompiler.CreateSourceModule`

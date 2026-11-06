@@ -62,14 +62,12 @@ public sealed class JsPlugin<TInput, TOutput> : IAsyncDisposable, IDisposable
         {
             using var engine = new JsEngine(_options.EngineOptions);
             _options.ConfigureEngine?.Invoke(engine);
+            var budget = new InvocationBudget(_options.Execution);
             var instance = _module.Template.Module!.HasTopLevelAwait
-                ? await engine.LoadModuleAsync(_module, _options.Resolver, cancellationToken: cancellationToken).ConfigureAwait(false)
-                : engine.LoadModule(_module, _options.Resolver, cancellationToken: cancellationToken);
+                ? await engine.LoadModuleAsyncBudgeted(_module, _options.Resolver, budget.Next(engine, JsExecutionMode.Async), cancellationToken).ConfigureAwait(false)
+                : engine.LoadModuleBudgeted(_module, _options.Resolver, null, budget.Next(engine, JsExecutionMode.Sync), cancellationToken);
             var export = instance.GetExport(_exportName);
-            var execOptions = _options.Execution is { } e
-                ? new JsExecutionOptions { Timeout = e.Timeout, MaxInstructions = e.MaxInstructions, MaxOutputBytes = e.MaxOutputBytes, Mode = JsExecutionMode.Async }
-                : new JsExecutionOptions { Mode = JsExecutionMode.Async };
-            await using var execution = engine.BeginExecution(execOptions, cancellationToken);
+            await using var execution = engine.BeginExecution(budget.Next(engine, JsExecutionMode.Async), cancellationToken);
             var arg = execution.FromObject(input, _input);
             var result = await execution.InvokeAsync(export, arg).ConfigureAwait(false);
             var output = execution.ToObject(result, _output);
@@ -91,10 +89,10 @@ public sealed class JsPlugin<TInput, TOutput> : IAsyncDisposable, IDisposable
         {
             using var engine = new JsEngine(_options.EngineOptions);
             _options.ConfigureEngine?.Invoke(engine);
-            var instance = engine.LoadModule(_module, _options.Resolver, cancellationToken: cancellationToken);
+            var budget = new InvocationBudget(_options.Execution);
+            var instance = engine.LoadModuleBudgeted(_module, _options.Resolver, null, budget.Next(engine, JsExecutionMode.Sync), cancellationToken);
             var export = instance.GetExport(_exportName);
-            var e = _options.Execution;
-            using var execution = engine.BeginExecution(e == null ? null : new JsExecutionOptions { Timeout = e.Timeout, MaxInstructions = e.MaxInstructions, MaxOutputBytes = e.MaxOutputBytes }, cancellationToken);
+            using var execution = engine.BeginExecution(budget.Next(engine, JsExecutionMode.Sync), cancellationToken);
             var arg = execution.FromObject(input, _input);
             var result = execution.Invoke(export, arg);
             var output = execution.ToObject(result, _output);
@@ -105,6 +103,36 @@ public sealed class JsPlugin<TInput, TOutput> : IAsyncDisposable, IDisposable
         {
             _gate.Release();
         }
+    }
+
+    /// <summary>
+    /// One invocation's budget (<see cref="JsPluginOptions.Execution"/>) spread over its two engine roots, module
+    /// initialization and the call: the call gets what initialization left of the time and work budgets.
+    /// </summary>
+    private struct InvocationBudget
+    {
+        private readonly JsExecutionOptions? _options;
+        private readonly long _start;
+        private long _workUsed;
+
+        public InvocationBudget(JsExecutionOptions? options)
+        {
+            _options = options;
+            _start = System.Diagnostics.Stopwatch.GetTimestamp();
+            _workUsed = 0;
+        }
+
+        public JsExecutionOptions Next(JsEngine engine, JsExecutionMode mode)
+        {
+            var e = _options;
+            if (e == null) return new JsExecutionOptions { Mode = mode };
+            _workUsed += engine.GetStatistics().LastWorkUnits;
+            TimeSpan? timeout = e.Timeout is { } t ? Max(t - System.Diagnostics.Stopwatch.GetElapsedTime(_start), TimeSpan.FromTicks(1)) : null;
+            long work = e.MaxInstructions > 0 ? Math.Max(e.MaxInstructions - _workUsed, 1) : 0;
+            return new JsExecutionOptions { Timeout = timeout, MaxInstructions = work, MaxOutputBytes = e.MaxOutputBytes, Mode = mode };
+        }
+
+        private static TimeSpan Max(TimeSpan a, TimeSpan b) => a > b ? a : b;
     }
 
     /// <inheritdoc />

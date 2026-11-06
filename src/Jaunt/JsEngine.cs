@@ -266,7 +266,8 @@ public sealed partial class JsEngine : IDisposable
     /// </summary>
     public void Interrupt()
     {
-        if (Volatile.Read(ref _state) == StateExecuting) Vm.RequestInterrupt();
+        // the state check and the request are atomic with respect to the end of the execution (which clears requests)
+        Vm.RequestInterrupt(() => Volatile.Read(ref _state) == StateExecuting);
     }
 
     // ------------------------------------------------------------------ ownership
@@ -276,6 +277,18 @@ public sealed partial class JsEngine : IDisposable
         int s = Volatile.Read(ref _state);
         if (s == StateDisposed) throw new ObjectDisposedException(nameof(JsEngine));
         if (s == StateFaulted) throw new JsEngineFaultedException("Faulted", "The engine is faulted and must be disposed.", _faultCause);
+    }
+
+    /// <summary>
+    /// Rejects an object of another engine passed to a host API of <paramref name="realm"/>'s engine. Every host entry
+    /// point that can put a value into this engine's object graph checks it (research doc §3.3: a partial foreign check is
+    /// not one the host can rely on).
+    /// </summary>
+    internal static void CheckOwned(Realm realm, in JsValue v, string paramName)
+    {
+        if (v.IsEmpty) throw new ArgumentException("Invalid JS value.", paramName);
+        if (v.IsObject && !ReferenceEquals(((JsObject)v.Ref!).Realm.Vm, realm.Vm))
+            throw new ArgumentException("The value belongs to another engine (or a disposed one).", paramName);
     }
 
     internal void EnsureOwned(in JsValue v, string paramName)
@@ -313,7 +326,7 @@ public sealed partial class JsEngine : IDisposable
         var root = BeginRoot(null, cancellationToken, JsExecutionMode.Sync);
         try
         {
-            ScriptTemplate t = JsCompiler.Compile(source, _options.CompileOptions, isModule: false, cancellationToken);
+            ScriptTemplate t = JsCompiler.Compile(source, _options.CompileOptions, isModule: false, cancellationToken, vm: Vm);
             var r = RunScriptTemplate(t, oneShot: true);
             CheckpointRoot(root);
             CloseRoot(root, true);

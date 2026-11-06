@@ -151,7 +151,8 @@ internal sealed class Shape
         if (table != null && table.TryGetValue((key, flags), out var found)) return found;
         bool cacheable = key.Value is string || IsWellKnownSymbol(key.Value);
         if (!cacheable || Volatile.Read(ref s_sharedShapes) >= MaxSharedShapes) return Derive(key, flags);
-        lock (_lock ??= new object())
+        // allocated once even when two threads race here (a plain `??=` could hand them different lock objects)
+        lock (_lock ?? Interlocked.CompareExchange(ref _lock, new object(), null) ?? _lock)
         {
             t1 = _t1;
             if (t1 != null && t1.Flags[Count] == flags && t1.Keys[Count].Equals(key)) return t1;

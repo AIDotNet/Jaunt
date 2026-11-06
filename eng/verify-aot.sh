@@ -11,16 +11,26 @@ OUT="$ROOT/artifacts/aot"
 HOST="$ROOT/samples/Jaunt.AotHost/Jaunt.AotHost.csproj"
 mkdir -p "$OUT"
 
-publish() { # tfm workdir(for global.json selection)
-  local tfm="$1" wd="$2"
+publish() { # tfm workdir(for global.json selection) required(1|0)
+  local tfm="$1" wd="$2" required="$3" log
+  # never run a stale binary from an earlier publish: the output directory is recreated every time
+  rm -rf "${OUT:?}/$tfm"
   echo "=== publish $tfm ($RID) via SDK $(cd "$wd" && dotnet --version)"
-  (cd "$wd" && dotnet publish "$HOST" -f "$tfm" -r "$RID" -c Release -o "$OUT/$tfm" -nologo -v:q) \
-    | grep -Ei "warn|error|->" || true
+  log="$(mktemp)"
+  if (cd "$wd" && dotnet publish "$HOST" -f "$tfm" -r "$RID" -c Release -o "$OUT/$tfm" -nologo -v:q) >"$log" 2>&1; then
+    grep -Ei "warn|error|->" "$log" || true
+  else
+    cat "$log"
+    rm -rf "${OUT:?}/$tfm"
+    if [ "$required" = 1 ]; then echo "FAIL: publish $tfm"; rm -f "$log"; exit 1; fi
+    echo "SKIP: publish $tfm failed (optional channel)"
+  fi
+  rm -f "$log"
 }
 
-publish net8.0 "$ROOT"
-publish net10.0 "$ROOT"
-if [ -f "$ROOT/eng/sdk11/global.json" ]; then publish net11.0 "$ROOT/eng/sdk11"; fi
+publish net8.0 "$ROOT" 1
+publish net10.0 "$ROOT" 1
+if [ -f "$ROOT/eng/sdk11/global.json" ]; then publish net11.0 "$ROOT/eng/sdk11" "${REQUIRE_NET11:-0}"; fi
 
 # ---- scripts created only now, after the binaries exist
 WORK="$(mktemp -d)"

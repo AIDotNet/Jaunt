@@ -62,9 +62,19 @@ public sealed class JsConversionContext
     /// <summary>Creates an array.</summary>
     public JsValue CreateArray(int capacity = 0) { Count(); return JsValue.FromObject(new JsArray(Realm, capacity)); }
     /// <summary>Defines a data property.</summary>
-    public void SetProperty(JsValue obj, string name, JsValue value) => ((JsObject)obj.Ref!).CreateDataPropertyOrThrow(name, value);
+    public void SetProperty(JsValue obj, string name, JsValue value)
+    {
+        if (obj.Ref is not JsObject o || !ReferenceEquals(o.Realm.Vm, Realm.Vm)) throw new ArgumentException("Not an object of this engine.", nameof(obj));
+        JsEngine.CheckOwned(Realm, value, nameof(value));
+        o.CreateDataPropertyOrThrow(name, value);
+    }
     /// <summary>Appends to an array created by <see cref="CreateArray"/>.</summary>
-    public void Append(JsValue array, JsValue value) => ((JsArray)array.Ref!).Push(value);
+    public void Append(JsValue array, JsValue value)
+    {
+        if (array.Ref is not JsArray a || !ReferenceEquals(a.Realm.Vm, Realm.Vm)) throw new ArgumentException("Not an array of this engine.", nameof(array));
+        JsEngine.CheckOwned(Realm, value, nameof(value));
+        a.Push(value);
+    }
     /// <summary>Creates a string value.</summary>
     public JsValue String(string? s) { Count(); return JsValue.From(s); }
 

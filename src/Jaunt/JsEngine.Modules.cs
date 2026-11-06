@@ -213,10 +213,14 @@ public sealed partial class JsEngine
     /// evaluation (top-level await) are rejected before any module code runs; use <c>LoadModuleAsync</c>.
     /// </summary>
     public JsModuleInstance LoadModule(JsModule module, IJsModuleResolver? resolver = null, string? id = null, CancellationToken cancellationToken = default)
+        => LoadModuleBudgeted(module, resolver, id, null, cancellationToken);
+
+    /// <summary>LoadModule under an execution budget (e.g. a plugin invocation's, which covers module initialization).</summary>
+    internal JsModuleInstance LoadModuleBudgeted(JsModule module, IJsModuleResolver? resolver, string? id, JsExecutionOptions? budget, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(module);
         resolver ??= _options.ModuleResolver;
-        var root = BeginRoot(null, cancellationToken, JsExecutionMode.Sync);
+        var root = BeginRoot(budget, cancellationToken, JsExecutionMode.Sync);
         try
         {
             var m = LoadGraphSync(id ?? module.SourceName, module, resolver);
@@ -237,6 +241,12 @@ public sealed partial class JsEngine
     {
         resolver ??= _options.ModuleResolver;
         return LoadModuleAsyncCore(module, resolver == null ? null : new SyncResolverAdapter(resolver), id, cancellationToken);
+    }
+
+    internal ValueTask<JsModuleInstance> LoadModuleAsyncBudgeted(JsModule module, IJsModuleResolver? resolver, JsExecutionOptions? budget, CancellationToken cancellationToken)
+    {
+        resolver ??= _options.ModuleResolver;
+        return LoadModuleAsyncCore(module, resolver == null ? null : new SyncResolverAdapter(resolver), null, cancellationToken, budget);
     }
 
     /// <summary>Loads a module graph with an asynchronous resolver, allowing top-level await.</summary>
@@ -262,10 +272,10 @@ public sealed partial class JsEngine
         public ValueTask<JsModuleSource?> ResolveAsync(string specifier, string? referrerId, CancellationToken cancellationToken) => new((JsModuleSource?)null);
     }
 
-    private async ValueTask<JsModuleInstance> LoadModuleAsyncCore(JsModule module, IJsAsyncModuleResolver? resolver, string? id, CancellationToken ct)
+    private async ValueTask<JsModuleInstance> LoadModuleAsyncCore(JsModule module, IJsAsyncModuleResolver? resolver, string? id, CancellationToken ct, JsExecutionOptions? budget = null)
     {
         ArgumentNullException.ThrowIfNull(module);
-        var root = BeginRoot(new JsExecutionOptions { Mode = JsExecutionMode.Async }, ct, JsExecutionMode.Async);
+        var root = BeginRoot(budget ?? new JsExecutionOptions { Mode = JsExecutionMode.Async }, ct, JsExecutionMode.Async);
         try
         {
             var m = await LoadGraphAsync(id ?? module.SourceName, module, resolver ?? DenyResolver.Instance, ct).ConfigureAwait(false);

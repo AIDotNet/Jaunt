@@ -18,13 +18,88 @@ YantraJS, goja, Sobek) is copied into this repository; they were studied only as
   Redistributions of Jaunt binaries must carry Acornima's copyright notice, the BSD-3-Clause conditions and
   disclaimer, and the attributions listed in that `NOTICE` file.
 
-BSD-3-Clause conditions (summary of the license text, which must accompany redistributions in full):
+Acornima `LICENSE` (<https://github.com/adams85/acornima/blob/master/LICENSE>), reproduced in full:
 
-1. Redistributions of source code must retain the copyright notice, this list of conditions and the disclaimer.
-2. Redistributions in binary form must reproduce the copyright notice, this list of conditions and the
-   disclaimer in the documentation and/or other materials provided with the distribution.
-3. Neither the name of the copyright holder nor the names of its contributors may be used to endorse or promote
-   products derived from this software without specific prior written permission.
+```text
+Copyright (c) Adam Simon. All rights reserved.
+BSD 3-Clause License - https://opensource.org/licenses/BSD-3-Clause
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+* Redistributions of source code must retain the above copyright notice, this
+  list of conditions and the following disclaimer.
+
+* Redistributions in binary form must reproduce the above copyright notice,
+  this list of conditions and the following disclaimer in the documentation
+  and/or other materials provided with the distribution.
+
+* Neither the name of Acornima nor the names of its
+  contributors may be used to endorse or promote products derived from
+  this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+```
+
+Acornima `NOTICE` (<https://github.com/adams85/acornima/blob/master/NOTICE>), reproduced in full:
+
+```text
+This software is a fork of the following software, originally licensed under the
+BSD 3-Clause License:
+
+Esprima.NET - https://github.com/sebastienros/esprima-dotnet
+
+Copyright (c) Sebastien Ros. All rights reserved.
+BSD 3-Clause License - https://opensource.org/licenses/BSD-3-Clause
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+* Redistributions of source code must retain the above copyright notice, this
+  list of conditions and the following disclaimer.
+
+* Redistributions in binary form must reproduce the above copyright notice,
+  this list of conditions and the following disclaimer in the documentation
+  and/or other materials provided with the distribution.
+
+* Neither the name of Esprima-Dotnet nor the names of its
+  contributors may be used to endorse or promote products derived from
+  this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+A copy of the BSD-3 license can be found here:
+https://github.com/sebastienros/esprima-dotnet/blob/main/LICENSE.txt
+
+---
+
+This software also adopts ideas and solutions invented by other free and open
+source software projects, including but not limited to:
+* acorn (MIT License) - https://github.com/acornjs/acorn
+* AcornSharp (MIT License) - https://github.com/MatthewSmit/AcornSharp
+* Test262-Harness-dotnet (MIT License) - https://github.com/lahma/test262-harness-dotnet
+```
+
+This file is packed into the `Jaunt` NuGet package (root of the package) so that it accompanies binary
+redistributions; applications that redistribute Jaunt should ship it alongside their binaries.
 
 ### Platform ICU (loaded at run time, not redistributed)
 
@@ -41,6 +116,7 @@ license (Unicode License V3) applies to the copy provided by the platform.
 | xunit, Microsoft.NET.Test.Sdk | Apache-2.0 / MIT | unit tests |
 | BenchmarkDotNet | MIT | benchmarks |
 | Jint 4.17.0 | BSD-2-Clause | comparison baseline in `bench/` only |
+| MoeJS (`github.com/MoeForge/moejs`) | Apache-2.0 | Go dependency of the cross-engine benchmark runner `bench/cross/moejs-runner` only (fetched by `go mod`, not committed or redistributed) |
 | tc39/test262 @ `045bf6f9966ce3291b8fbc1e0403cd97b9201b00` | BSD-3-Clause | conformance tests, fetched into `artifacts/` (not committed) |
 
 ## Unicode Character Database and CLDR (data files)

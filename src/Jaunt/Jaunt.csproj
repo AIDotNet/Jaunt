@@ -17,6 +17,8 @@
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="Acornima" Version="1.9.1" />
+    <!-- third-party license texts (Acornima BSD-3-Clause + NOTICE, Unicode V3) travel with the package -->
+    <None Include="../../THIRD_PARTY_NOTICES.md" Pack="true" PackagePath="/" Visible="false" />
   </ItemGroup>
   <ItemGroup>
     <InternalsVisibleTo Include="Jaunt.Tests" />

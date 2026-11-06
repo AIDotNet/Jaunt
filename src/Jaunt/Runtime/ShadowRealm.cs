@@ -197,7 +197,7 @@ internal sealed partial class Vm
     internal JsValue ShadowRealmEval(string source, Realm callerRealm, Realm evalRealm)
     {
         ScriptTemplate t;
-        try { t = JsCompiler.CompileEval(source, strictCaller: false, allowNewTarget: false, allowSuper: false, Token); }
+        try { t = JsCompiler.CompileEval(source, strictCaller: false, allowNewTarget: false, allowSuper: false, Token, vm: this); }
         catch (JsCompileException ce) { throw JsErrors.SyntaxError(callerRealm, ce.Description); }
         if (t.EvalPrivateNames != null)
             throw JsErrors.SyntaxError(callerRealm, "Private fields must be declared in an enclosing class");

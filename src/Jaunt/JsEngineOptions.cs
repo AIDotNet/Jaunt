@@ -33,7 +33,10 @@ public sealed class JsLimits
     public long MaxTrackedBytes { get; init; }
     /// <summary>Maximum ready jobs in the microtask queue.</summary>
     public int MaxPendingJobs { get; init; } = 1_000_000;
-    /// <summary>Maximum size of JSON/DTO output produced through the engine APIs.</summary>
+    /// <summary>
+    /// Maximum size of output produced through the engine APIs: UTF-8 bytes for JSON (<c>ToJsonString</c>,
+    /// <c>ToJsonUtf8</c>, <c>WriteJson</c>), and the number of values created or read for DTO conversions.
+    /// </summary>
     public long MaxOutputBytes { get; init; } = 64L * 1024 * 1024;
     /// <summary>Maximum number of modules loaded into one engine.</summary>
     public int MaxModules { get; init; } = 1000;
@@ -104,7 +107,7 @@ public sealed class JsExecutionOptions
     public TimeSpan? Timeout { get; init; }
     /// <summary>Work budget for the whole scope (0 = engine default).</summary>
     public long MaxInstructions { get; init; }
-    /// <summary>Output budget for conversions inside the scope (0 = engine default).</summary>
+    /// <summary>Output budget for conversions inside the scope (0 = engine default; see <see cref="JsLimits.MaxOutputBytes"/>).</summary>
     public long MaxOutputBytes { get; init; }
     /// <summary>Sync or async scope.</summary>
     public JsExecutionMode Mode { get; init; } = JsExecutionMode.Sync;

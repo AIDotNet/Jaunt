@@ -51,7 +51,7 @@ public ref struct JsCallContext
     {
         ArgumentNullException.ThrowIfNull(source);
         Jaunt.Compiler.ScriptTemplate t;
-        try { t = JsCompiler.Compile(source, JsCompileOptions.Default, isModule: false, Realm.Vm.Token); }
+        try { t = JsCompiler.Compile(source, JsCompileOptions.Default, isModule: false, Realm.Vm.Token, vm: Realm.Vm); }
         catch (JsCompileException ce) { throw JsErrors.SyntaxError(Realm, ce.Description); }
         return Realm.Engine!.RunScriptTemplate(t, oneShot: true, Realm);
     }
@@ -76,7 +76,7 @@ public ref struct JsCallContext
             throw JsErrors.TypeError(Realm, "EvaluateScript: not the global object of a realm of this engine");
         var target = g.Realm;
         Jaunt.Compiler.ScriptTemplate t;
-        try { t = JsCompiler.Compile(source, JsCompileOptions.Default, isModule: false, Realm.Vm.Token); }
+        try { t = JsCompiler.Compile(source, JsCompileOptions.Default, isModule: false, Realm.Vm.Token, vm: Realm.Vm); }
         catch (JsCompileException ce) { throw JsErrors.SyntaxError(target, ce.Description); }
         return Realm.Engine!.RunScriptTemplate(t, oneShot: true, target);
     }
@@ -88,6 +88,7 @@ public ref struct JsCallContext
     /// </summary>
     public readonly JsSharedMemory GetSharedMemory(JsValue sharedArrayBuffer)
     {
+        JsEngine.CheckOwned(Realm, sharedArrayBuffer, nameof(sharedArrayBuffer));
         if (sharedArrayBuffer.Ref is not JsArrayBuffer { Block: { } block }) throw JsErrors.TypeError(Realm, "GetSharedMemory: not a SharedArrayBuffer");
         return new JsSharedMemory(block, Realm.Vm);
     }
@@ -119,6 +120,7 @@ public ref struct JsCallContext
     /// <summary>Detaches an <c>ArrayBuffer</c> (DetachArrayBuffer), e.g. after transferring its contents to the host.</summary>
     public readonly void DetachArrayBuffer(JsValue buffer)
     {
+        JsEngine.CheckOwned(Realm, buffer, nameof(buffer));
         if (buffer.Ref is not JsArrayBuffer { Shared: false } b) throw JsErrors.TypeError(Realm, "DetachArrayBuffer: not an ArrayBuffer");
         if (b.Immutable) throw JsErrors.TypeError(Realm, "DetachArrayBuffer: an immutable ArrayBuffer cannot be detached");
         b.Detach();
@@ -149,12 +151,17 @@ public ref struct JsCallContext
     public readonly JsValue CreateObject() => JsValue.FromObject(Realm.NewObject());
 
     /// <summary>Creates an array from values.</summary>
-    public readonly JsValue CreateArray(ReadOnlySpan<JsValue> items) => JsValue.FromObject(Operations.CreateArrayFromList(Realm, items));
+    public readonly JsValue CreateArray(ReadOnlySpan<JsValue> items)
+    {
+        foreach (var v in items) JsEngine.CheckOwned(Realm, v, nameof(items));
+        return JsValue.FromObject(Operations.CreateArrayFromList(Realm, items));
+    }
 
     /// <summary>Defines a data property on an object created in this realm.</summary>
     public readonly void SetProperty(JsValue target, string name, JsValue value)
     {
         if (target.IsNotObject || !ReferenceEquals(((JsObject)target.Ref!).Realm, Realm)) throw new ArgumentException("Target is not an object of this engine.", nameof(target));
+        JsEngine.CheckOwned(Realm, value, nameof(value));
         ((JsObject)target.Ref!).CreateDataPropertyOrThrow(name, value);
     }
 
@@ -162,6 +169,7 @@ public ref struct JsCallContext
     public readonly JsValue GetOwnDataProperty(JsValue target, string name)
     {
         if (target.IsNotObject) return default;
+        JsEngine.CheckOwned(Realm, target, nameof(target));
         var o = (JsObject)target.Ref!;
         if (o.IsExotic) return o.GetOwnProperty(name, out var d) && d.IsData ? d.Value : default;
         int i = o.FindOwn(name, out var f);
@@ -169,7 +177,13 @@ public ref struct JsCallContext
     }
 
     /// <summary>Calls a JS function within the current execution (same budget; no new root).</summary>
-    public readonly JsValue Call(JsValue function, JsValue thisValue, ReadOnlySpan<JsValue> args) => Realm.Vm.Call(function, thisValue, args);
+    public readonly JsValue Call(JsValue function, JsValue thisValue, ReadOnlySpan<JsValue> args)
+    {
+        JsEngine.CheckOwned(Realm, function, nameof(function));
+        JsEngine.CheckOwned(Realm, thisValue, nameof(thisValue));
+        foreach (var v in args) JsEngine.CheckOwned(Realm, v, nameof(args));
+        return Realm.Vm.Call(function, thisValue, args);
+    }
 }
 
 public sealed partial class JsEngine
@@ -546,7 +560,7 @@ public sealed partial class JsEngine
         var root = BeginRoot(options, cancellationToken, JsExecutionMode.Async);
         try
         {
-            var t = JsCompiler.Compile(source, _options.CompileOptions, isModule: false, cancellationToken);
+            var t = JsCompiler.Compile(source, _options.CompileOptions, isModule: false, cancellationToken, vm: Vm);
             var r = RunScriptTemplate(t, oneShot: true);
             r = await AwaitInRootAsync(r, root).ConfigureAwait(false);
             CheckpointRoot(root);

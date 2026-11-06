@@ -153,8 +153,19 @@ internal sealed partial class Realm
     public readonly Dictionary<string, JsSymbol> SymbolRegistry;
 
     // ---- accounting
-    public long TrackedBytes;
-    public long MaxTrackedBytes = long.MaxValue;
+    /// <summary>
+    /// The tracked-bytes budget, shared by every realm of an engine (ShadowRealm, CreateRealm): a script cannot escape
+    /// <c>MaxTrackedBytes</c> by allocating in new realms.
+    /// </summary>
+    internal sealed class ByteBudget
+    {
+        public long Used;
+        public long Max = long.MaxValue;
+    }
+
+    internal readonly ByteBudget Budget;
+    public long TrackedBytes { get => Budget.Used; set => Budget.Used = value; }
+    public long MaxTrackedBytes { get => Budget.Max; set => Budget.Max = value; }
     public int MaxStringLength = (1 << 29) - 24;
     public uint MaxArrayLength = 100_000_000;
     private bool _accounting;
@@ -291,6 +302,7 @@ internal sealed partial class Realm
     public Realm(bool hardened, Realm? parent)
     {
         Hardened = hardened;
+        Budget = parent?.Budget ?? new ByteBudget();
         if (parent == null)
         {
             Vm = new Vm(this);
@@ -301,7 +313,6 @@ internal sealed partial class Realm
             Vm = parent.Vm;
             SymbolRegistry = parent.SymbolRegistry;
             Engine = parent.Engine;
-            MaxTrackedBytes = parent.MaxTrackedBytes;
             MaxStringLength = parent.MaxStringLength;
             TimeZone = parent.TimeZone;
             Clock = parent.Clock;
@@ -312,9 +323,11 @@ internal sealed partial class Realm
         Intrinsics.Setup(this);
         EndBulk();
         if (hardened) Intrinsics.Harden(this);
-        TrackedBytes = 0;
         _accounting = true;
         Vm.Realm = savedRealm;
+        // a root realm's setup is the engine's own baseline; a further realm's setup is charged to the shared budget
+        if (parent == null) TrackedBytes = 0;
+        else if (TrackedBytes > MaxTrackedBytes) OverBudget();
     }
 
     // ------------------------------------------------------------------ lazy intrinsic groups
@@ -393,21 +406,24 @@ internal sealed partial class Realm
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public void ChargeObject()
     {
-        TrackedBytes += 56;
-        if (TrackedBytes > MaxTrackedBytes && _accounting) OverBudget();
+        var b = Budget;
+        b.Used += 56;
+        if (b.Used > b.Max && _accounting) OverBudget();
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public void ChargeProperty()
     {
-        TrackedBytes += 24;
-        if (TrackedBytes > MaxTrackedBytes && _accounting) OverBudget();
+        var b = Budget;
+        b.Used += 24;
+        if (b.Used > b.Max && _accounting) OverBudget();
     }
 
     public void ChargeBytes(long bytes)
     {
-        TrackedBytes += bytes;
-        if (TrackedBytes > MaxTrackedBytes && _accounting) OverBudget();
+        var b = Budget;
+        b.Used += bytes;
+        if (b.Used > b.Max && _accounting) OverBudget();
     }
 
     [MethodImpl(MethodImplOptions.NoInlining)]

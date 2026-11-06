@@ -125,8 +125,8 @@ public static class JsCompiler
         => new(Compile(source, options ?? JsCompileOptions.Default, isModule: true, cancellationToken));
 
     /// <summary>Compiles eval code (19.2.1.1 PerformEval steps 4-11); scope analysis runs in eval mode.</summary>
-    internal static ScriptTemplate CompileEval(string source, bool strictCaller, bool allowNewTarget, bool allowSuper, CancellationToken ct, bool inFieldInit = false, bool allowSuperCall = false)
-        => Compile(source, s_evalOptions, isModule: false, ct, forceStrict: strictCaller, eval: (allowNewTarget, allowSuper, inFieldInit, allowSuperCall));
+    internal static ScriptTemplate CompileEval(string source, bool strictCaller, bool allowNewTarget, bool allowSuper, CancellationToken ct, bool inFieldInit = false, bool allowSuperCall = false, Jaunt.Runtime.Vm? vm = null)
+        => Compile(source, s_evalOptions, isModule: false, ct, forceStrict: strictCaller, eval: (allowNewTarget, allowSuper, inFieldInit, allowSuperCall), vm: vm);
 
     private static readonly JsCompileOptions s_evalOptions = new() { SourceName = "eval" };
 
@@ -290,6 +290,7 @@ public static class JsCompiler
         private int _maxNodes;
         private long _deadline;
         private CancellationToken _ct;
+        private Jaunt.Runtime.Vm? _vm;
 
         private ParseSession(int slot, (bool NewTarget, bool Super, bool SuperCall, bool CheckPrivate) o)
         {
@@ -305,7 +306,7 @@ public static class JsCompiler
                 CheckPrivateFields = o.CheckPrivate,
                 RegExpParseMode = RegExpParseMode.Validate,
                 // Acornima guards its own recursion (StackGuard → InsufficientExecutionStackException)
-                OnToken = (in Token _) => { if ((++Tokens & 1023) == 0) CheckBudget(_name, _deadline, _ct); },
+                OnToken = (in Token _) => { if ((++Tokens & 1023) == 0) CheckBudget(_name, _deadline, _ct, _vm); },
                 OnNode = (Node n, in OnNodeContext _) =>
                 {
                     // counts used to pre-size the analysis maps (avoids repeated dictionary growth)
@@ -336,9 +337,9 @@ public static class JsCompiler
             return s;
         }
 
-        public void Begin(string name, int maxNodes, long deadline, CancellationToken ct)
+        public void Begin(string name, int maxNodes, long deadline, CancellationToken ct, Jaunt.Runtime.Vm? vm)
         {
-            _name = name; _maxNodes = maxNodes; _deadline = deadline; _ct = ct;
+            _name = name; _maxNodes = maxNodes; _deadline = deadline; _ct = ct; _vm = vm;
             Tokens = Nodes = Idents = Funcs = ScopeNodes = 0;
         }
 
@@ -353,16 +354,21 @@ public static class JsCompiler
             cache[_slot] ??= this;
         }
 
-        public static void CheckBudget(string name, long deadline, CancellationToken ct)
+        /// <summary>
+        /// Compile budget: cancellation, the compile timeout, and — for code compiled during an execution (Evaluate,
+        /// eval, Function, ShadowRealm) — that execution's own deadline and Interrupt().
+        /// </summary>
+        public static void CheckBudget(string name, long deadline, CancellationToken ct, Jaunt.Runtime.Vm? vm)
         {
             ct.ThrowIfCancellationRequested();
+            vm?.CheckTimeLimits();
             if (deadline != long.MaxValue && Stopwatch.GetTimestamp() > deadline)
                 throw new JsCompileException("CompileTimeout", "Compilation exceeded its time budget.", name, 0, 0);
         }
     }
 
     internal static ScriptTemplate Compile(string source, JsCompileOptions options, bool isModule, CancellationToken ct, bool forceStrict = false,
-        (bool AllowNewTarget, bool AllowSuper, bool InFieldInit, bool AllowSuperCall)? eval = null)
+        (bool AllowNewTarget, bool AllowSuper, bool InFieldInit, bool AllowSuperCall)? eval = null, Jaunt.Runtime.Vm? vm = null)
     {
         ArgumentNullException.ThrowIfNull(source);
         string name = options.SourceName;
@@ -371,7 +377,7 @@ public static class JsCompiler
 
         long deadline = options.Timeout is { } to ? Stopwatch.GetTimestamp() + (long)(to.TotalSeconds * Stopwatch.Frequency) : long.MaxValue;
         var session = ParseSession.Rent(eval is { } e0 ? (e0.AllowNewTarget, e0.AllowSuper, e0.AllowSuperCall, false) : (false, false, false, true));
-        session.Begin(name, options.MaxNodes, deadline, ct);
+        session.Begin(name, options.MaxNodes, deadline, ct, vm);
         var parser = session.Parser;
         Program program;
         try
@@ -413,7 +419,7 @@ public static class JsCompiler
         var functions = new Dictionary<Node, FunctionInfo>(funcs + 1);
         var refs = new Dictionary<Identifier, ResolvedRef>(idents);
         int counter = 0;
-        Action checkpoint = () => { if ((++counter & 255) == 0) ParseSession.CheckBudget(name, deadline, ct); };
+        Action checkpoint = () => { if ((++counter & 255) == 0) ParseSession.CheckBudget(name, deadline, ct, vm); };
         try
         {
             var analyzer = new ScopeAnalyzer(scopes, functions, refs, module, options.MaxNestingDepth, checkpoint)

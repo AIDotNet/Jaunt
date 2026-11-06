@@ -23,6 +23,14 @@ internal sealed class JsRegExp : JsObject
     public int[][] NameGroups = Array.Empty<int[]>();
     /// <summary>.NET backend: highest group number (named groups are numbered after the numbered ones).</summary>
     public int DotnetMaxGroup;
+    /// <summary>
+    /// .NET backend: the same pattern on the native engine, used when a .NET match exceeds its time slice (the native
+    /// engine charges the execution budget, so Timeout / cancellation / Interrupt apply). <see cref="SliceFallbackGroups"/>
+    /// gives, per native group, the extra .NET number of a named group (0 for unnamed). Null when the native engine
+    /// cannot compile the pattern.
+    /// </summary>
+    public JsRegex? SliceFallback;
+    public int[]? SliceFallbackGroups;
     public string Source = "";
     public string Flags = "";
     public int GroupCount;
@@ -41,10 +49,16 @@ internal sealed class JsRegExp : JsObject
 
 internal static class RegExpBuiltins
 {
-    private sealed class CacheEntry { public SysRegex? Regex; public JsRegex? Native; public JsRegex? NativeIgnoreCase; public int Groups; public string[] Names = Array.Empty<string>(); public int[][] NameGroups = Array.Empty<int[]>(); public int DotnetMaxGroup; }
+    private sealed class CacheEntry { public SysRegex? Regex; public JsRegex? Native; public JsRegex? NativeIgnoreCase; public int Groups; public string[] Names = Array.Empty<string>(); public int[][] NameGroups = Array.Empty<int[]>(); public int DotnetMaxGroup; public JsRegex? SliceFallback; public int[]? SliceFallbackGroups; }
     private static readonly Dictionary<(string, string), CacheEntry> s_cache = new();
     private const int CacheLimit = 512;
-    public static TimeSpan MatchTimeout = TimeSpan.FromSeconds(5);
+    /// <summary>
+    /// Time slice of a .NET-backend match. .NET matching cannot observe the execution budget, so a match that runs longer
+    /// is redone on the native engine, which does (see <see cref="JsRegExp.SliceFallback"/>).
+    /// </summary>
+    public static TimeSpan MatchTimeout = TimeSpan.FromMilliseconds(100);
+    /// <summary>Timeout of the rare .NET-only patterns the native engine cannot compile (no fallback exists).</summary>
+    private static readonly TimeSpan s_longMatchTimeout = TimeSpan.FromSeconds(5);
 
     public static void Setup(Realm r)
     {
@@ -127,7 +141,7 @@ internal static class RegExpBuiltins
                 f = a[1].IsUndefined ? "" : Operations.ToString(realm, a[1]);
             }
             var fresh = Create(realm, p, f);
-            re.Regex = fresh.Regex; re.Native = fresh.Native; re.NativeIgnoreCase = fresh.NativeIgnoreCase; re.Source = fresh.Source; re.Flags = fresh.Flags; re.GroupCount = fresh.GroupCount; re.GroupNames = fresh.GroupNames; re.NameGroups = fresh.NameGroups; re.DotnetMaxGroup = fresh.DotnetMaxGroup;
+            re.Regex = fresh.Regex; re.Native = fresh.Native; re.NativeIgnoreCase = fresh.NativeIgnoreCase; re.Source = fresh.Source; re.Flags = fresh.Flags; re.GroupCount = fresh.GroupCount; re.GroupNames = fresh.GroupNames; re.NameGroups = fresh.NameGroups; re.DotnetMaxGroup = fresh.DotnetMaxGroup; re.SliceFallback = fresh.SliceFallback; re.SliceFallbackGroups = fresh.SliceFallbackGroups;
             re.SetOrThrow("lastIndex", JsValue.Zero);
             return a.This;
         });
@@ -358,6 +372,23 @@ internal static class RegExpBuiltins
                 int maxNum = 0;
                 foreach (var gn in regex.GetGroupNumbers()) if (gn > maxNum) maxNum = gn;
                 entry = new CacheEntry { Regex = regex, Groups = Math.Max(0, result.ActualRegexGroupCount - 1), Names = names.ToArray(), NameGroups = nameGroups.ToArray(), DotnetMaxGroup = maxNum };
+                if (preparsed != null && preparsed.CaptureCount - 1 == entry.Groups)
+                {
+                    // Acornima's adaptation wraps every named group in an unnamed one, so .NET group g is JS group g
+                    // (source order, like the native engine); the named group itself gets a further .NET number
+                    var map = new int[preparsed.CaptureCount];
+                    bool ok = true;
+                    for (int g = 1; g < map.Length && ok; g++)
+                    {
+                        var n = preparsed.GroupNames[g];
+                        if (n == null) continue;
+                        map[g] = regex.GroupNumberFromName(n);
+                        ok = map[g] > 0;
+                    }
+                    if (ok) { entry.SliceFallback = preparsed; entry.SliceFallbackGroups = map; }
+                }
+                if (entry.SliceFallback == null)
+                    entry.Regex = new SysRegex(regex.ToString(), regex.Options, s_longMatchTimeout);
                 if (flags.Contains('i') && !flags.Contains('u') && !flags.Contains('v') && preparsed != null && names.Count == 0)
                     entry.NativeIgnoreCase = preparsed;
             }
@@ -392,6 +423,8 @@ internal static class RegExpBuiltins
             NativeIgnoreCase = entry.NativeIgnoreCase,
             NameGroups = entry.NameGroups,
             DotnetMaxGroup = entry.DotnetMaxGroup,
+            SliceFallback = entry.SliceFallback,
+            SliceFallbackGroups = entry.SliceFallbackGroups,
             Source = pattern,
             Flags = flags,
             GroupCount = entry.Groups,
@@ -444,7 +477,10 @@ internal static class RegExpBuiltins
         try { dm = re.Regex!.Match(s, start); }
         catch (System.Text.RegularExpressions.RegexMatchTimeoutException)
         {
-            throw new JsTerminationException(TerminationKind.Timeout, "Regular expression evaluation exceeded its time budget.");
+            realm.Vm.CheckTimeLimits();
+            if (re.SliceFallback is not { } fb)
+                throw new JsTerminationException(TerminationKind.Timeout, "Regular expression evaluation exceeded its time budget.");
+            return FallbackMatch(realm, re, fb, s, start);
         }
         if (!dm.Success) return s_noMatch;
         int top = Math.Max(re.GroupCount, re.DotnetMaxGroup);
@@ -454,6 +490,30 @@ internal static class RegExpBuiltins
             var grp = dm.Groups[g];
             if (grp.Success) { caps[2 * g] = grp.Index; caps[2 * g + 1] = grp.Index + grp.Length; }
             else { caps[2 * g] = -1; caps[2 * g + 1] = -1; }
+        }
+        return new RegexMatch { Success = true, Caps = caps, Input = s };
+    }
+
+    /// <summary>A .NET-backend match redone on the native engine (budgeted), captures in the .NET group numbering.</summary>
+    private static RegexMatch FallbackMatch(Realm realm, JsRegExp re, JsRegex native, string s, int start)
+    {
+        var m = new JsRegex.Matcher(native, s, () => realm.Vm.Tick(64));
+        if (!m.Search(start, sticky: false)) return s_noMatch;
+        int top = Math.Max(re.GroupCount, re.DotnetMaxGroup);
+        var caps = new int[(top + 1) * 2];
+        Array.Fill(caps, -1);
+        caps[0] = m.Caps[0];
+        caps[1] = m.Caps[1];
+        var map = re.SliceFallbackGroups!;
+        for (int g = 1; g < map.Length; g++)
+        {
+            caps[2 * g] = m.Caps[2 * g];
+            caps[2 * g + 1] = m.Caps[2 * g + 1];
+            if (map[g] > 0)
+            {
+                caps[2 * map[g]] = m.Caps[2 * g];
+                caps[2 * map[g] + 1] = m.Caps[2 * g + 1];
+            }
         }
         return new RegexMatch { Success = true, Caps = caps, Input = s };
     }

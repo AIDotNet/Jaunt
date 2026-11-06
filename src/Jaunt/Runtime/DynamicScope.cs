@@ -359,7 +359,7 @@ internal sealed partial class Vm
         try
         {
             bool inDerivedCtor = caller != null && (caller.ThisBox != null || (caller.Callee.IsDerived && (caller.Flags & FrameFlags.Construct) != 0));
-            t = JsCompiler.CompileEval(x.AsStringUnchecked, strictCaller, allowNewTarget, allowSuper: home != null, Token, inFieldInit: (flags & 8) != 0, allowSuperCall: inDerivedCtor);
+            t = JsCompiler.CompileEval(x.AsStringUnchecked, strictCaller, allowNewTarget, allowSuper: home != null, Token, inFieldInit: (flags & 8) != 0, allowSuperCall: inDerivedCtor, vm: this);
         }
         catch (JsCompileException ce)
         {
