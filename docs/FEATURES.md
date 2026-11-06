@@ -122,7 +122,7 @@ capturing groups inside quantifiers, or `u`+`i` case folding run on Jaunt's nati
 | --- | --- |
 | `Atomics.wait` | by default throws `TypeError` (`[[CanBlock]]` is false so an embedded script cannot park the host thread); set `JsEngineOptions.CanBlock` for worker engines. A finite `Atomics.waitAsync` timeout uses a host timer in async executions and otherwise resolves `"timed-out"` when the job queue is next processed |
 | `Date` | local time = `JsEngineOptions.TimeZone` (default UTC); without ICU, locale formatting uses the invariant culture |
-| Intl output | exact strings follow the platform ICU/CLDR version (ICU 78 / CLDR 48 on the reference machine); one intl402 test encodes upstream CLDR data that Apple's ICU changes (German `MMMMEd` punctuation); Jaunt computes the Hebrew calendar arithmetically and maps ICU's pre-epoch Islamic/Coptic eras to ECMA-402's. `formatRange` uses ICU's interval formatter, which still shows ICU's own era for such pre-epoch Islamic/Coptic dates |
+| Intl output | exact strings follow the platform ICU/CLDR version (ICU 78 / CLDR 48 on the reference machine); one intl402 test encodes upstream CLDR data that Apple's ICU changes (German `MMMMEd` punctuation); Jaunt computes the Hebrew calendar arithmetically and maps ICU's pre-epoch Islamic/Coptic eras to ECMA-402's. (`format`, `formatToParts`, `formatRange` and `formatRangeToParts` alike) |
 | Default locale | `en-US` (`Realm.DefaultLocale`) |
 | error messages / `stack` | V8-like text, not guaranteed identical to any engine |
 

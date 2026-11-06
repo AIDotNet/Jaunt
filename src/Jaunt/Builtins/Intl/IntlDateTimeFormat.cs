@@ -1299,6 +1299,21 @@ internal static unsafe partial class IntlDateTimeFormat
                 pos = end;
             }
             if (pos < s.Length) AddLiteral(pos, s.Length);
+            if (fmt.EraOverride != 0 && (IcuYear(fmt, xms) < 1 || IcuYear(fmt, yms) < 1))
+            {
+                // ICU's interval formatter shows its own eras (see ApplyEraOverride): use the corrected single-date
+                // formats of both ends, joined by the locale's separator taken from ICU's interval result
+                var sep = new StringBuilder();
+                if (span0End >= 0 && span1Start >= span0End) sep.Append(s, span0End, span1Start - span0End);
+                if (sep.Length == 0) sep.Append(" – ");
+                // ICU's start span can leave out the space before an era it did not name (Coptic): one space per run
+                var separator = System.Text.RegularExpressions.Regex.Replace(sep.ToString(), @"(\s)\s+", "$1");
+                var composed = new List<RangePart>();
+                foreach (var (type, val) in FormatMsToParts(fmt, xms)) composed.Add(new RangePart(type, val, "startRange"));
+                composed.Add(new RangePart("literal", separator, "shared"));
+                foreach (var (type, val) in FormatMsToParts(fmt, yms)) composed.Add(new RangePart(type, val, "endRange"));
+                return composed;
+            }
             return parts;
         }
         finally
