@@ -62,7 +62,8 @@ Fixed-arity call of a cached JS function with two numbers, returning a number.
 
 These are single `ShortRun` measurements of CoreCLR .NET 10 on one busy developer workstation; they describe these
 workloads on this machine, not Jaunt's performance in general (research doc §3.5/§7: no fixed multiples, no
-"necessarily faster"). NativeAOT performance is not measured here (the AOT gate checks behaviour, not speed).
+"necessarily faster"). NativeAOT throughput is not measured here (the AOT gate checks behaviour, not speed); NativeAOT start-up is, in
+"Cold start and shared costs" below.
 
 * In these runs the interpreter-bound workloads (calls, numeric loops, classes, objects) took 0.35–0.44× of Jint's
   time; the register VM keeps numbers unboxed in 16-byte values and JS→JS calls don't recurse on the CLR stack.
@@ -77,6 +78,38 @@ workloads on this machine, not Jaunt's performance in general (research doc §3.
 * History: the first implementation took 224 µs to create an engine and 840 µs per plugin request; lazy
   intrinsics, realm-independent shapes, predicted builtin layouts and removing per-realm dictionaries brought
   that to the numbers above.
+
+## Cold start and shared costs
+
+Research doc §3.5: a "new engine" figure is not a cold start, and process-wide shared costs must not vanish from the
+denominator. Measured 2026-11-07 on the same machine (load average 12–24 during these runs; medians).
+
+Whole process, start to printed result (`samples/Jaunt.AotHost run <file>`; 20 runs each; the NativeAOT binary is
+6.4 MB, osx-arm64, net10.0; CoreCLR is the same host as a framework-dependent `dotnet Jaunt.AotHost.dll`):
+
+| Script | NativeAOT | CoreCLR (JIT) |
+| --- | ---: | ---: |
+| `1 + 1` | 7.9 ms | 98.5 ms |
+| `classes` workload + `main(1)` | 11.7 ms | 192.8 ms |
+
+Inside one CoreCLR process (`--cold 15`: 15 fresh child processes; each creates 50 engines that evaluate `1` and
+then the `classes` workload):
+
+| | Time | Allocated |
+| --- | ---: | ---: |
+| process start → `Main` | 42.9 ms | — |
+| engine #1 (type loading, JIT, process-wide shared state) | 155.7 ms | 2,129 KB |
+| engines #2…#50, mean | 9.4 ms | 2,050 KB |
+| managed memory still held once every engine is disposed (process-wide shared state: realm-independent shapes, predicted builtin layouts, tables) | — | 197 KB |
+
+So on CoreCLR the first engine in a process costs ~17× a later one, almost all of it JIT and type loading;
+NativeAOT removes that (the whole native process finishes in under 12 ms). The process-wide state Jaunt shares
+between engines is about 0.2 MB. Reproduce:
+
+```bash
+dotnet run -c Release --project bench/Jaunt.Benchmarks -- --cold 15
+dotnet publish samples/Jaunt.AotHost -f net10.0 -r osx-arm64 -c Release -o out && out/Jaunt.AotHost run file.js
+```
 
 ## Other engines: Okojo and ClearScript/V8 (`EngineWarmInvocation`, `EngineHostCalls`, `EngineCreation`)
 

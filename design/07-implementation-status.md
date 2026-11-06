@@ -23,7 +23,7 @@
 | Jint 是成熟托管对照，比较要锁定**稳定发布包**并使用其优化用法 | 基准对 Jint **4.17.0**（NuGet 稳定版）使用 `PrepareScript`/`PrepareModule`、缓存函数句柄、预热后计时 | `bench/Jaunt.Benchmarks`，结果见 §3 与 [`docs/benchmarks.md`](../docs/benchmarks.md) |
 | Jint 5 源生成会对部分签名回退反射：Jaunt 必须提供完整 AOT 路径并明确诊断 | `src/Jaunt.Generators`：`[JsSerializable]` 生成只做静态成员访问的 `JsTypeInfo<T>`；不支持的成员类型是**编译错误** `JAUNT003`，不存在反射/JSON 回退；手写 `JsTypeInfo.Object<T>()` 是同等的 AOT 路径；基础类型宿主函数使用按闭合泛型解析的静态适配器 | `GeneratorTests`（往返、递归类型、改名/忽略、`JAUNT001–004`）；AOT 检查 “source-generated DTO bindings” PASS |
 | Jint 的线程契约：单活动 operation、冲突 fail-fast | 同上：`JsEngine` 并发进入立即 `InvalidOperationException`，宿主回调重入同一引擎被拒 | `ConcurrentEntryFailsFast` |
-| Okojo：不可变 code + 私有 linked constants/IC；同名类型不代表同一生命周期 | `FunctionTemplate`/`ScriptTemplate`（`JsScript`/`JsModule`）只含字节码、原始常量、源位置；IC/模板对象/闭包状态存于每 Realm 的 `Feedback`；`JsModuleInstance` 属于具体引擎 | `CompiledScriptIsSharedAcrossEnginesWithPrivateState`（16 线程并发共享同一 `JsScript`）；核心对照：`bench/Jaunt.Benchmarks/EngineComparison.cs` 对 Okojo 0.2.0-preview.2 做同源码热调用、宿主调用、建实例与驻留内存测量（`--engines-check` 校验结果一致），结果见 [`docs/benchmarks.md`](../docs/benchmarks.md) |
+| Okojo：不可变 code + 私有 linked constants/IC；同名类型不代表同一生命周期 | `FunctionTemplate`/`ScriptTemplate`（`JsScript`/`JsModule`）只含字节码、原始常量、源位置；IC/模板对象/闭包状态存于每 Realm 的 `Feedback`；`JsModuleInstance` 属于具体引擎 | `CompiledScriptIsSharedAcrossEnginesWithPrivateState`（16 线程并发共享同一 `JsScript`）、`SharedCodeInvariantTests`（8 线程 × 3 引擎热执行含类/私有字段/生成器/async/正则/模板字面量/eval 的脚本后，全部嵌套 `FunctionTemplate` 的字节码、常量、对象表、handler、位置表逐字节不变；运行时代码中不存在对模板数组的写入）；核心对照：`bench/Jaunt.Benchmarks/EngineComparison.cs` 对 Okojo 0.2.0-preview.2 做同源码热调用、宿主调用、建实例与驻留内存测量（`--engines-check` 校验结果一致），结果见 [`docs/benchmarks.md`](../docs/benchmarks.md) |
 | Okojo 默认文件 loader 会读文件：AOT/Realm 设计不能代替能力审计 | 没有默认文件/网络 loader；`JsDictionaryModuleResolver` 只解析宿主显式加入的源码 | `JsEngine.Modules.cs` |
 | ClearScript：Runtime/Engine 分层，便捷与快速绑定都要比较 | `JsCompiler`/`JsScript`（无状态、可共享）与 `JsEngine`（有状态）分离；便捷入口与快速入口（固定 arity `Invoke`、raw `JsNativeFunction`）走同一语义 | `ScalarCalls`、`host-callback` 基准；`EngineComparison.cs` 实测 ClearScript V8 7.5.1.1 的便捷绑定（委托 host object）与 FastProxy（`V8FastHostFunction`）两条宿主调用路径，原生 V8 堆（`GetHeapInfo`）与托管堆分开报告，见 `docs/benchmarks.md` |
 | QuickJS：栈式字节码、显式限额；V8：寄存器解释器 + 反馈/IC | 寄存器字节码、显式 VM 帧栈（JS 调用不消耗 CLR 栈）、形状 + 单态 IC（含原型、加属性转移、全局、字符串接收者）、所有快路径都有正确慢路径与失效 guard | `DeepButLegalRecursionWorks`（5000 层 JS 递归）、`DeepJsRecursionIsBoundedByStackLimit`；基准 §3 |
@@ -64,6 +64,9 @@ BenchmarkDotNet（Apple M5，.NET 10.0.12，ShortRun；对 Jint 4.17.0，耗时�
 早期实现中新建引擎为 224 µs、插件端到端 840 µs；经过惰性内建、共享 shape、预测布局填充、去除每 Realm 字典与身份哈希等改动后降至上表数值。
 
 功能补全（BigInt、direct eval/with、异步生成器、原生 RegExp 引擎等）及其后的性能轮之后，`--quick` 同进程交替测量（Jaunt 相对 Jint 的**加速比**，> 1 表示 Jaunt 更快）：数值循环 2.73×、fib 2.68×、对象 2.42×、class 3.85×、数组 1.43×、字符串 1.51×、JSON 1.31×、标量调用 2.18×、JS→宿主回调 5.32×、插件端到端 2.18×；编译 18 KB 源码 0.96×（分配由 1.93 MB 降至 0.92 MB）、新建裸引擎 0.92×（分配 8.8 KB，少于 Jint 的 9.5 KB）仍略慢于 Jint。改动与剖析结论见 `docs/benchmarks.md` 末节。
+
+* 冷启动与共享成本（研究文档 §3.5：新 runtime ≠ 冷启动，进程级共享成本不能从分母中消失）：NativeAOT 宿主从进程启动到输出结果 7.9 ms（CoreCLR 98.5 ms）；CoreCLR 进程内第 1 个引擎 155.7 ms（类型加载/JIT/共享状态），之后每个 9.4 ms；全部引擎释放后进程级共享状态约 197 KB。见 `docs/benchmarks.md` “Cold start and shared costs”（`--cold`）。
+* 其他引擎对照（Okojo 0.2.0-preview.2、ClearScript/V8 7.5.1.1，含 FastProxy 与原生堆分列）见 `docs/benchmarks.md`。
 
 ## 4. 尚未完成 / 已知偏差
 

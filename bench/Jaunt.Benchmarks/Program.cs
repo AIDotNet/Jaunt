@@ -74,6 +74,16 @@ if (args.Length > 2 && args[0] == "--cross")
     CrossBench.Run(args.Skip(1).ToArray());
     return;
 }
+if (args.Length > 0 && args[0] == "--cold-child")
+{
+    ColdStart.Child();
+    return;
+}
+if (args.Length > 0 && args[0] == "--cold")
+{
+    ColdStart.Run(args.Skip(1).ToArray());
+    return;
+}
 if (args.Length > 0 && args[0] == "--engines-check")
 {
     EngineCheck.Run();
