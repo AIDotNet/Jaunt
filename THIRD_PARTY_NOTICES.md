@@ -98,8 +98,9 @@ source software projects, including but not limited to:
 * Test262-Harness-dotnet (MIT License) - https://github.com/lahma/test262-harness-dotnet
 ```
 
-This file is packed into the `Jaunt` NuGet package (root of the package) so that it accompanies binary
-redistributions; applications that redistribute Jaunt should ship it alongside their binaries.
+This file is packed into the `Jaunt` NuGet package (at the package root, and as a content file) and is copied as
+`Jaunt.THIRD_PARTY_NOTICES.md` into the build and publish output — NativeAOT included — of every application that
+references Jaunt, so it accompanies binary redistributions.
 
 ### Platform ICU (loaded at run time, not redistributed)
 
