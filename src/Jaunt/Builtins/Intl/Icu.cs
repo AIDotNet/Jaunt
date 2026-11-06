@@ -95,6 +95,29 @@ internal static unsafe partial class Icu
         throw new EntryPointNotFoundException("ICU function not found: " + full);
     }
 
+    /// <summary>True when the platform ICU exports the function (some, e.g. Windows' icu.dll, omit newer APIs).</summary>
+    public static bool Has(string name)
+    {
+        if (!s_initialized) Init();
+        if (!s_available) return false;
+        var full = name + s_suffix;
+        return NativeLibrary.TryGetExport(s_uc, full, out _) || (s_i18n != s_uc && NativeLibrary.TryGetExport(s_i18n, full, out _));
+    }
+
+    /// <summary>Hour cycle from a locale's preferred hour pattern character ('j' skeleton): 0 h11, 1 h12, 2 h23, 3 h24.</summary>
+    public static int HourCycleFromPattern(string? pattern)
+    {
+        if (pattern == null) return 2;
+        bool quoted = false;
+        foreach (char c in pattern)
+        {
+            if (c == '\'') { quoted = !quoted; continue; }
+            if (quoted) continue;
+            switch (c) { case 'K': return 0; case 'h': return 1; case 'H': return 2; case 'k': return 3; }
+        }
+        return 2;
+    }
+
     /// <summary>Lazily resolves into a cache slot.</summary>
     public static nint P(ref nint slot, string name)
     {

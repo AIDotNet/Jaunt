@@ -676,13 +676,19 @@ internal static unsafe partial class IntlDateTimeFormat
         lock (s_hcData)
             if (s_hcData.TryGetValue(icuBase, out var d)) return d;
         string def = "h23", hc12 = "h12";
-        lock (s_generators)
+        int c;
+        if (Icu.Has("udatpg_getDefaultHourCycle"))
         {
-            var g = Generator(icuBase);
-            int err = 0;
-            int c = IcuDtf.udatpg_getDefaultHourCycle(g, &err);
-            if (!Icu.Failure(err)) def = c switch { 0 => "h11", 1 => "h12", 3 => "h24", _ => "h23" };
+            lock (s_generators)
+            {
+                var g = Generator(icuBase);
+                int err = 0;
+                c = IcuDtf.udatpg_getDefaultHourCycle(g, &err);
+                if (Icu.Failure(err)) c = 2;
+            }
         }
+        else c = Icu.HourCycleFromPattern(BestPattern(icuBase, "j"));   // ICU without the API (e.g. Windows' icu.dll)
+        def = c switch { 0 => "h11", 1 => "h12", 3 => "h24", _ => "h23" };
         var p = BestPattern(icuBase, "hm");
         if (HourChar(p) == 'K') hc12 = "h11";
         if (def is "h11" or "h12") def = hc12;

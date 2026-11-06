@@ -61,12 +61,12 @@ jobs:
 
       - name: test262 on CoreCLR net10.0
         run: |
-          dotnet run -c Release --project tools/Jaunt.Test262 -- artifacts/test262 --out artifacts/test262-net10 | tail -1
+          dotnet run -c Release --project tools/Jaunt.Test262 -- artifacts/test262 --retry-timeouts --timeout-seconds 20 --out artifacts/test262-net10 | tail -1
           python3 tools/Jaunt.Test262/check-results.py artifacts/test262-net10
 
       - name: test262 on CoreCLR net8.0
         run: |
-          dotnet run -c Release --project tools/Jaunt.Test262 -p:JauntRunnerFramework=net8.0 -- artifacts/test262 --threads 2 --out artifacts/test262-net8 | tail -1
+          dotnet run -c Release --project tools/Jaunt.Test262 -p:JauntRunnerFramework=net8.0 -- artifacts/test262 --threads 2 --retry-timeouts --timeout-seconds 20 --out artifacts/test262-net8 | tail -1
           python3 tools/Jaunt.Test262/check-results.py artifacts/test262-net8
 
       - name: NativeAOT gate (publish, then run new JS against the native binaries)

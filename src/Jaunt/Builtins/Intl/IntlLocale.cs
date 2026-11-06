@@ -71,6 +71,7 @@ internal static unsafe partial class Icu
         if (Failure(err) || g == 0) return -1;
         try
         {
+            if (!Has("udatpg_getDefaultHourCycle")) return HourCycleFromPattern(BestDatePattern(locale, "j"));
             int e2 = 0;
             int hc = ((delegate* unmanaged<nint, int*, int>)P(ref s_udatpgHourCycle, "udatpg_getDefaultHourCycle"))(g, &e2);
             return Failure(e2) ? -1 : hc;

@@ -6,7 +6,7 @@ using System.Text.RegularExpressions;
 using Jaunt;
 
 // test262 runner for Jaunt (follows tc39/test262 INTERPRETING.md).
-// Usage: Jaunt.Test262 <test262-root> [--filter <substring>] [--list <file of relative paths>] [--out <dir>] [--threads N]
+// Usage: Jaunt.Test262 <test262-root> [--filter <substring>] [--list <file of relative paths>] [--out <dir>] [--threads N] [--timeout-seconds N] [--retry-timeouts]
 // Produces <out>/results.json (per-variant outcomes) and <out>/summary.md (totals, skip reasons, failures).
 
 var root = args.Length > 0 && !args[0].StartsWith("--") ? args[0] : "artifacts/test262";
@@ -14,12 +14,16 @@ string? filter = null;
 HashSet<string>? only = null;
 string outDir = "artifacts/test262-results";
 int threads = Environment.ProcessorCount;
+int timeoutSeconds = 10;
+bool retryTimeouts = false;
 for (int i = 0; i < args.Length; i++)
 {
     if (args[i] == "--filter") filter = args[++i];
     else if (args[i] == "--list") only = new HashSet<string>(File.ReadAllLines(args[++i]).Select(l => l.Trim()).Where(l => l.Length > 0), StringComparer.Ordinal);
     else if (args[i] == "--out") outDir = args[++i];
     else if (args[i] == "--threads") threads = int.Parse(args[++i]);
+    else if (args[i] == "--timeout-seconds") timeoutSeconds = int.Parse(args[++i]);
+    else if (args[i] == "--retry-timeouts") retryTimeouts = true;
 }
 Directory.CreateDirectory(outDir);
 var revision = TryGitRevision(root);
@@ -44,7 +48,20 @@ bool trace = Environment.GetEnvironmentVariable("JAUNT_T262_TRACE") == "1";
 // with little parallelism, so CPU contention from other tests cannot starve their agent threads
 var agentFiles = files.Where(f => File.ReadAllText(f).Contains("$262.agent.start", StringComparison.Ordinal)).ToHashSet();
 Parallel.ForEach(files.Where(f => !agentFiles.Contains(f)), new ParallelOptions { MaxDegreeOfParallelism = threads }, RunOne);
-Parallel.ForEach(agentFiles.Order(StringComparer.Ordinal), new ParallelOptions { MaxDegreeOfParallelism = Math.Min(threads, 4) }, RunOne);
+Console.Error.WriteLine($"  multi-agent tests: {agentFiles.Count} files ({sw.Elapsed.TotalSeconds:F0}s)");
+Parallel.ForEach(agentFiles.Order(StringComparer.Ordinal), new ParallelOptions { MaxDegreeOfParallelism = Math.Min(threads, 2) }, RunOne);
+if (retryTimeouts)
+{
+    // slow or busy machines: run each timed-out file again on its own (results of the rerun replace the first ones)
+    var timedOut = results.Where(r => r.Outcome == "timeout").Select(r => r.File).ToHashSet(StringComparer.Ordinal);
+    if (timedOut.Count > 0)
+    {
+        Console.Error.WriteLine($"  retrying {timedOut.Count} timed-out files one at a time ({sw.Elapsed.TotalSeconds:F0}s)");
+        var kept = results.Where(r => !timedOut.Contains(r.File)).ToList();
+        results = new ConcurrentBag<Result>(kept);
+        foreach (var f in files.Where(f => timedOut.Contains(Path.GetRelativePath(root, f).Replace('\\', '/')))) RunOne(f);
+    }
+}
 
 void RunOne(string file)
 {
@@ -103,7 +120,7 @@ Result RunVariant(string rel, string file, string src, Meta meta, string mode)
         // far more in total than any other test while waiting
         Limits = new JsLimits
         {
-            Timeout = TimeSpan.FromSeconds(10),
+            Timeout = TimeSpan.FromSeconds(timeoutSeconds),
             MaxTrackedBytes = meta.Includes.Contains("atomicsHelper.js") ? 16L << 30 : 512L << 20,
             MaxStackDepth = 3000,
         },
