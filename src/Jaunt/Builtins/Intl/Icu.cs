@@ -51,38 +51,84 @@ internal static unsafe partial class Icu
         }
     }
 
+    /// <summary>
+    /// ICU functions Jaunt binds unconditionally. A library missing any of them (e.g. the older system icu.dll of some
+    /// Windows versions) is not used; optional functions with fallbacks are probed with <see cref="Has"/>.
+    /// </summary>
+    private static readonly string[] s_required =
+    {
+        "u_strToLower", "u_strToUpper", "ubrk_close", "ubrk_following", "ubrk_getRuleStatus", "ubrk_open",
+        "ubrk_preceding", "ubrk_setText", "ucal_clone", "ucal_close", "ucal_get", "ucal_getAttribute",
+        "ucal_getCanonicalTimeZoneID", "ucal_getDayOfWeekType", "ucal_getKeywordValuesForLocale", "ucal_getLimit", "ucal_getMillis", "ucal_getTimeZoneTransitionDate",
+        "ucal_open", "ucal_openTimeZoneIDEnumeration", "ucal_openTimeZones", "ucal_setGregorianChange", "ucal_setMillis", "ucfpos_close",
+        "ucfpos_constrainField", "ucfpos_getCategory", "ucfpos_getField", "ucfpos_getIndexes", "ucfpos_open", "ucfpos_reset",
+        "ucol_close", "ucol_getAttribute", "ucol_getKeywordValues", "ucol_getKeywordValuesForLocale", "ucol_open", "ucol_setAttribute",
+        "ucol_strcoll", "ucurr_getDefaultFractionDigits", "ucurr_getName", "ucurr_openISOCurrencies", "udat_close", "udat_format",
+        "udat_formatForFields", "udat_getCalendar", "udat_open", "udat_setCalendar", "udat_toPattern", "udatpg_close",
+        "udatpg_getBestPattern", "udatpg_getBestPatternWithOptions", "udatpg_getFieldDisplayName", "udatpg_getSkeleton", "udatpg_open", "udtitvfmt_close",
+        "udtitvfmt_closeResult", "udtitvfmt_formatCalendarToResult", "udtitvfmt_open", "udtitvfmt_openResult", "udtitvfmt_resultAsValue", "uenum_close",
+        "uenum_next", "uenum_unext", "ufieldpositer_close", "ufieldpositer_next", "ufieldpositer_open", "ufmtval_getString",
+        "ufmtval_nextPosition", "uldn_close", "uldn_keyValueDisplayName", "uldn_localeDisplayName", "uldn_openForContext", "uldn_regionDisplayName",
+        "uldn_scriptDisplayName", "ulistfmt_close", "ulistfmt_closeResult", "ulistfmt_formatStringsToResult", "ulistfmt_openForType", "ulistfmt_openResult",
+        "ulistfmt_resultAsValue", "uloc_addLikelySubtags", "uloc_canonicalize", "uloc_countAvailable", "uloc_forLanguageTag", "uloc_getAvailable",
+        "uloc_isRightToLeft", "uloc_minimizeSubtags", "uloc_toLanguageTag", "uloc_toLegacyType", "uloc_toUnicodeLocaleType", "unum_open",
+        "unum_setAttribute", "unumf_close", "unumf_closeResult", "unumf_formatDecimal", "unumf_formatDouble", "unumf_openForSkeletonAndLocale",
+        "unumf_openResult", "unumf_resultAsValue", "unumf_resultGetAllFieldPositions", "unumf_resultToString", "unumrf_close", "unumrf_formatDecimalRange",
+        "unumrf_formatDoubleRange", "unumrf_openForSkeletonWithCollapseAndIdentityFallback", "unumrf_openResult", "unumrf_resultAsValue", "unumsys_close", "unumsys_getDescription",
+        "unumsys_getName", "unumsys_getRadix", "unumsys_isAlgorithmic", "unumsys_open", "unumsys_openAvailableNames", "unumsys_openByName",
+        "uplrules_close", "uplrules_getKeywords", "uplrules_openForType", "uplrules_selectFormatted", "uplrules_selectForRange", "ureldatefmt_close",
+        "ureldatefmt_closeResult", "ureldatefmt_formatNumericToResult", "ureldatefmt_formatToResult", "ureldatefmt_open", "ureldatefmt_openResult", "ureldatefmt_resultAsValue",
+    };
+
+    private static bool Complete(nint uc, nint i18n, string suffix)
+    {
+        foreach (var n in s_required)
+            if (!NativeLibrary.TryGetExport(uc, n + suffix, out _) && (i18n == uc || !NativeLibrary.TryGetExport(i18n, n + suffix, out _))) return false;
+        return true;
+    }
+
     private static bool TryLoad()
     {
         if (Environment.GetEnvironmentVariable("JAUNT_DISABLE_ICU") == "1") return false;
+        foreach (var (uc, i18n, suffix) in Candidates())
+        {
+            if (!NativeLibrary.TryGetExport(uc, "u_getVersion" + suffix, out _) || !Complete(uc, i18n, suffix)) continue;
+            s_uc = uc;
+            s_i18n = i18n;
+            s_suffix = suffix;
+            return true;
+        }
+        return false;
+    }
+
+    /// <summary>ICU libraries to try, best first: app-local versioned DLLs on Windows (Microsoft.ICU.ICU4C.Runtime), then the system ICU.</summary>
+    private static System.Collections.Generic.IEnumerable<(nint Uc, nint I18n, string Suffix)> Candidates()
+    {
         if (OperatingSystem.IsMacOS() || OperatingSystem.IsIOS() || OperatingSystem.IsMacCatalyst())
         {
-            if (NativeLibrary.TryLoad("/usr/lib/libicucore.dylib", out var h))
-            {
-                s_uc = s_i18n = h;
-                return NativeLibrary.TryGetExport(h, "u_getVersion", out _);
-            }
-            return false;
+            if (NativeLibrary.TryLoad("/usr/lib/libicucore.dylib", out var h)) yield return (h, h, "");
+            yield break;
         }
         if (OperatingSystem.IsWindows())
         {
-            if (NativeLibrary.TryLoad("icu.dll", out var h))
+            // app-local ICU resolved through the app's native search paths (deps.json / next to the executable)
+            var asm = typeof(Icu).Assembly;
+            for (int v = 99; v >= 50; v--)
             {
-                s_uc = s_i18n = h;
-                return NativeLibrary.TryGetExport(h, "u_getVersion", out _);
+                if (NativeLibrary.TryLoad($"icuuc{v}.dll", asm, null, out var uc) && NativeLibrary.TryLoad($"icuin{v}.dll", asm, null, out var i18n))
+                    yield return (uc, i18n, "_" + v);
             }
-            return false;
+            if (NativeLibrary.TryLoad("icu.dll", out var sys)) yield return (sys, sys, "");
+            yield break;
         }
         // Linux and other Unix: newest libicuuc.so.N with its matching libicui18n
         for (int v = 99; v >= 50; v--)
         {
             if (!NativeLibrary.TryLoad($"libicuuc.so.{v}", out var uc)) continue;
             if (!NativeLibrary.TryLoad($"libicui18n.so.{v}", out var i18n)) continue;
-            s_uc = uc;
-            s_i18n = i18n;
-            if (NativeLibrary.TryGetExport(uc, "u_getVersion_" + v, out _)) { s_suffix = "_" + v; return true; }
-            if (NativeLibrary.TryGetExport(uc, "u_getVersion", out _)) { s_suffix = ""; return true; }
+            if (NativeLibrary.TryGetExport(uc, "u_getVersion_" + v, out _)) yield return (uc, i18n, "_" + v);
+            else yield return (uc, i18n, "");
         }
-        return false;
     }
 
     /// <summary>Resolves an ICU C API function (with the library's version suffix, if any).</summary>

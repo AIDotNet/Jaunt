@@ -90,7 +90,10 @@ and `arguments` (null) properties; `JsCallContext.CreateHtmlDdaObject()` creates
 `Locale` (incl. Locale Info: `getCalendars`, `getWeekInfo`, …), `DurationFormat`, `Intl.getCanonicalLocales`,
 `Intl.supportedValuesOf`, and the locale-sensitive `toLocaleString`/`localeCompare`/`toLocale{Upper,Lower}Case`
 methods. Locale data and algorithms come from the platform ICU, bound at run time (no managed dependency, NativeAOT
-compatible): `libicucore` on macOS, `icu.dll` on Windows 10+, the newest `libicuuc.so.N` on Linux. Language tags are
+compatible): `libicucore` on macOS, the newest `libicuuc.so.N` on Linux, and on Windows an app-local ICU (the
+`Microsoft.ICU.ICU4C.Runtime` package, `icuucNN.dll`) or else the system `icu.dll`. A library is used only if it exports
+every ICU function Jaunt needs — the system `icu.dll` of Windows Server 2022 / Windows 10 does not, so Windows hosts
+that want `Intl` should reference `Microsoft.ICU.ICU4C.Runtime`. Language tags are
 canonicalized with UTS 35 using CLDR alias tables generated into the assembly (`tools/unicode/cldr_locale.py`, CLDR
 48). Without ICU (or with `JAUNT_DISABLE_ICU=1`) the `Intl` global is absent and `toLocale*` fall back to the
 invariant culture. Temporal additionally supports the calendars `buddhist`, `chinese`, `coptic`, `dangi`, `ethioaa`,

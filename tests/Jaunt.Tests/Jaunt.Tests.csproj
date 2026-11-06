@@ -18,4 +18,8 @@
     <ProjectReference Include="../../src/Jaunt.Generators/Jaunt.Generators.csproj" OutputItemType="Analyzer" ReferenceOutputAssembly="false" />
     <ProjectReference Include="../../src/Jaunt.Generators/Jaunt.Generators.csproj" Aliases="gen" ReferenceOutputAssembly="true" Private="true" />
   </ItemGroup>
+  <ItemGroup Condition="'$(OS)' == 'Windows_NT'">
+    <!-- app-local ICU 72: the system icu.dll of Windows Server 2022 lacks APIs Intl needs (see docs/FEATURES.md) -->
+    <PackageReference Include="Microsoft.ICU.ICU4C.Runtime" Version="72.1.0.3" />
+  </ItemGroup>
 </Project>
