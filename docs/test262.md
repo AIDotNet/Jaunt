@@ -47,8 +47,9 @@ postponement rules) instead of through ICU, whose Hebrew calendar is wrong for y
 and `Intl.DateTimeFormat` shows ECMA-402's eras before a calendar's epoch, where ICU's differ — CLDR's "Before Hijrah"
 era for the Islamic calendars and the single "am" era with negative years for Coptic (`formatToParts/era.js`).
 
-Nothing is skipped. With an older platform ICU (e.g. Ubuntu 24.04's ICU 74 / CLDR 44) about 19 more `intl402/` files
-fail because they encode newer locale data, tzdata links or ICU 76+ Chinese calendar results; they are listed
+Nothing is skipped. With an older platform ICU (e.g. Ubuntu 24.04's ICU 74 / CLDR 44) about 20 more `intl402/` files
+fail because they encode newer locale data (including the Islamic "Before Hijrah" era name, new in CLDR 48), tzdata links
+or ICU 76+ Chinese calendar results; they are listed
 with an `icu<78` prefix in `tools/Jaunt.Test262/known-failures.txt`, which `tools/Jaunt.Test262/check-results.py`
 (used by CI) applies according to the ICU version the run reports.
 
