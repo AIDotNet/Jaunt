@@ -2,7 +2,7 @@
 
 Measured 2026-11-06 with `tools/Jaunt.Test262` (follows tc39/test262 `INTERPRETING.md`: sloppy and strict
 variants, `onlyStrict`/`noStrict`/`raw`/`module`/`async` flags, `negative` phase/type, includes, `$DONE`,
-`$262.evalScript`, `$262.detachArrayBuffer`, `$262.createRealm`, `$262.agent`). Full generated report: [`test262-summary.md`](test262-summary.md) (generated on a heavily loaded machine: its 137 timed-out variants — RegExp property escapes, `decodeURI` — all pass when rerun; on Linux x64 under emulation the same holds).
+`$262.evalScript`, `$262.detachArrayBuffer`, `$262.createRealm`, `$262.agent`). Full generated report: [`test262-summary.md`](test262-summary.md).
 
 | Item | Value |
 | --- | --- |

@@ -180,7 +180,7 @@ internal sealed partial class Vm
                             }
                             else if (ov.IsString && ic.Kind == IcKind.StringLength)
                             {
-                                regs[bp + code[pc + 1]] = new JsValue((double)Unsafe.As<string>(ov.Ref!).Length);
+                                regs[bp + code[pc + 1]] = new JsValue((double)ov.StringLength);
                                 pc += 5;
                                 continue;
                             }
@@ -903,7 +903,7 @@ internal sealed partial class Vm
     {
         if (a.IsString && b.IsString)
         {
-            int c = string.CompareOrdinal((string)a.Ref!, (string)b.Ref!);
+            int c = string.CompareOrdinal(a.AsStringUnchecked, b.AsStringUnchecked);
             return op switch { Op.Lt => c < 0, Op.Le => c <= 0, Op.Gt => c > 0, _ => c >= 0 };
         }
         switch (op)

@@ -11,6 +11,6 @@ function main() {
   Promise.race([new Promise(r => r('fast')), new Promise(() => {})]).then(v => out.order.push(v));
   Promise.reject(new Error('boom')).catch(e => out.order.push(e.message)).finally(() => out.order.push('fin'));
   Promise.any([Promise.reject(1), Promise.resolve(2)]).then(v => out.order.push('any' + v));
-  Promise.resolve().then(() => out.order.push('m1')); queueMicrotask(() => out.order.push('m2'));
+  Promise.resolve().then(() => out.order.push('m1')); Promise.resolve().then(() => out.order.push('m2'));
 }
 function result() { return out.n + ':' + out.order.join(','); }

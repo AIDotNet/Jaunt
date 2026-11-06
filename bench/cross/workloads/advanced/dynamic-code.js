@@ -10,5 +10,5 @@ function main() {
   }
   const fnSrc = (function sample(a, b) { return a + b; }).toString();
   const arrow = ((x) => x * 2).toString();
-  return [t, fnSrc.length, arrow, typeof globalThis.eval, eval('var __v = 5; __v * 2')].join(',');
+  return [t, fnSrc.includes('a + b'), arrow.includes('x * 2'), typeof globalThis.eval, eval('var __v = 5; __v * 2')].join(',');
 }

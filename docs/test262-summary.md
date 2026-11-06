@@ -4,15 +4,14 @@
 - engine: Jaunt 0.1.0.0 / .NET 10.0.12 / osx-arm64 / profile Standard / interpreter
 - scope: `test/**` excluding `staging/`; 52112 files; 100169 executed variants (sloppy/strict/module/raw counted separately)
 - platform ICU: 78.1
-- run time: 770s
+- run time: 235s
 
 | outcome | variants |
 | --- | ---: |
 | fail | 6 |
-| pass | 100026 |
-| timeout | 137 |
+| pass | 100163 |
 
-Pass rate over executed (non-skipped) variants: **99.86%**. Skips are listed below by reason and are not counted as passes.
+Pass rate over executed (non-skipped) variants: **99.99%**. Skips are listed below by reason and are not counted as passes.
 
 ## Skips by reason
 
@@ -60,7 +59,7 @@ Pass rate over executed (non-skipped) variants: **99.86%**. Skips are listed bel
 | test/built-ins/Promise | 1458 | 0 | 0 | 0 |
 | test/built-ins/Proxy | 607 | 0 | 0 | 0 |
 | test/built-ins/Reflect | 306 | 0 | 0 | 0 |
-| test/built-ins/RegExp | 3635 | 0 | 121 | 0 |
+| test/built-ins/RegExp | 3756 | 0 | 0 | 0 |
 | test/built-ins/RegExpStringIteratorPrototype | 34 | 0 | 0 | 0 |
 | test/built-ins/Set | 764 | 0 | 0 | 0 |
 | test/built-ins/SetIteratorPrototype | 22 | 0 | 0 | 0 |
@@ -78,8 +77,8 @@ Pass rate over executed (non-skipped) variants: **99.86%**. Skips are listed bel
 | test/built-ins/WeakMap | 281 | 0 | 0 | 0 |
 | test/built-ins/WeakRef | 58 | 0 | 0 | 0 |
 | test/built-ins/WeakSet | 170 | 0 | 0 | 0 |
-| test/built-ins/decodeURI | 104 | 0 | 6 | 0 |
-| test/built-ins/decodeURIComponent | 104 | 0 | 8 | 0 |
+| test/built-ins/decodeURI | 110 | 0 | 0 | 0 |
+| test/built-ins/decodeURIComponent | 112 | 0 | 0 | 0 |
 | test/built-ins/encodeURI | 62 | 0 | 0 | 0 |
 | test/built-ins/encodeURIComponent | 62 | 0 | 0 | 0 |
 | test/built-ins/eval | 20 | 0 | 0 | 0 |
@@ -264,7 +263,7 @@ Pass rate over executed (non-skipped) variants: **99.86%**. Skips are listed bel
 | test/language/import | 135 | 0 | 0 | 0 |
 | test/language/keywords | 50 | 0 | 0 | 0 |
 | test/language/line-terminators | 82 | 0 | 0 | 0 |
-| test/language/literals | 1039 | 0 | 2 | 0 |
+| test/language/literals | 1041 | 0 | 0 | 0 |
 | test/language/module-code | 602 | 0 | 0 | 0 |
 | test/language/punctuators | 22 | 0 | 0 | 0 |
 | test/language/reserved-words | 53 | 0 | 0 | 0 |

@@ -159,7 +159,12 @@ internal sealed partial class Realm
     public uint MaxArrayLength = 100_000_000;
     private bool _accounting;
 
-    private ConditionalWeakTable<ScriptTemplate, Feedback>? _scriptFeedback;
+    /// <summary>
+    /// Feedback of the shared scripts this realm has run. A plain dictionary owned by the realm: a ConditionalWeakTable
+    /// keyed by the (long-lived, shared) templates would keep every realm alive, because the feedback's inline caches
+    /// reference the realm's objects and a weak table's values live as long as their keys.
+    /// </summary>
+    private Dictionary<ScriptTemplate, Feedback>? _scriptFeedback;
     private ScriptTemplate? _lastScript;
     private Feedback? _lastFeedback;
     internal readonly List<JsPromise> UnhandledRejections = new();
@@ -435,9 +440,13 @@ internal sealed partial class Realm
         }
         else
         {
-            _scriptFeedback ??= new ConditionalWeakTable<ScriptTemplate, Feedback>();
+            _scriptFeedback ??= new Dictionary<ScriptTemplate, Feedback>(ReferenceEqualityComparer.Instance);
             if (_lastFeedback != null) _scriptFeedback.TryAdd(_lastScript, _lastFeedback);
-            fb = _scriptFeedback.GetValue(script, static s => new Feedback(s.Body));
+            if (!_scriptFeedback.TryGetValue(script, out fb!))
+            {
+                fb = new Feedback(script.Body);
+                _scriptFeedback[script] = fb;
+            }
         }
         _lastScript = script;
         _lastFeedback = fb;

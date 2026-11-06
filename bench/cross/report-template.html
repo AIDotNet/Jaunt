@@ -1,0 +1,220 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Jaunt、MoeJS、Jint 性能对比</title>
+<style>
+:root{--fg:#1c2330;--muted:#5b6678;--bg:#f5f6f9;--panel:#fff;--line:#dfe3ea;--grid:#e6e9ef;--ref:#7a8599;--track:#eceff4;
+--c-jaunt:#13907c;--c-moejs:#3b78e0;--c-jint:#d9822b;--win:#13907c;--pop:#fff;--shadow:0 4px 14px rgba(20,30,50,.15);color-scheme:light}
+@media (prefers-color-scheme:dark){:root{--fg:#e6e9ef;--muted:#9aa4b5;--bg:#12161d;--panel:#1a2029;--line:#2c3442;--grid:#2a3240;--ref:#8a95a8;--track:#262e3a;
+--c-jaunt:#2fc4ac;--c-moejs:#6d9cf0;--c-jint:#eba04d;--pop:#222a36;--shadow:0 4px 14px rgba(0,0,0,.5);color-scheme:dark}}
+*{box-sizing:border-box}
+html,body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.5 system-ui,-apple-system,"PingFang SC","Microsoft YaHei",sans-serif}
+.wrap{max-width:1100px;margin:0 auto;padding:clamp(14px,3vw,32px);display:flex;flex-direction:column;gap:20px}
+h1{font:400 30px/1.25 Georgia,"Songti SC",serif;margin:0}
+h2{font-size:16px;font-weight:600;margin:0}
+p{margin:0}
+.muted{color:var(--muted)} .small{font-size:12px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:20px;display:flex;flex-direction:column;gap:12px;min-width:0}
+.verdict{border-left:4px solid var(--c-jaunt)}
+.verdict ul{margin:0;padding-left:20px;display:flex;flex-direction:column;gap:4px}
+.grid{display:grid;gap:16px;grid-template-columns:repeat(auto-fit,minmax(min(100%,22rem),1fr))}
+.grid3{display:grid;gap:16px;grid-template-columns:repeat(auto-fit,minmax(min(100%,15rem),1fr))}
+.legend{display:flex;flex-wrap:wrap;gap:16px;font-size:12px;color:var(--muted)}
+.legend i,.dot{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:6px;vertical-align:-1px}
+.bars{display:flex;flex-direction:column;gap:8px}
+.bar{display:grid;grid-template-columns:4.6rem 1fr 5.2rem;gap:10px;align-items:center;font-size:13px}
+.bar .track{height:16px;background:var(--track);border-radius:4px;overflow:hidden}
+.bar .fill{height:100%;border-radius:4px}
+.bar .val{font-variant-numeric:tabular-nums;text-align:right;white-space:nowrap}
+.bar.best .nm{font-weight:700} .bar.best .val{font-weight:700}
+.tag{font-size:11px;color:var(--win);border:1px solid var(--win);border-radius:4px;padding:0 4px;margin-left:4px}
+.wins{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}
+.win{border:1px solid var(--line);border-radius:8px;padding:12px;text-align:center}
+.win .n{font:400 34px/1.1 Georgia,serif;font-variant-numeric:tabular-nums}
+.win .l{font-size:12px;color:var(--muted)}
+.chart{position:relative;min-height:100px}
+.tip{position:absolute;pointer-events:none;background:var(--pop);border:1px solid var(--line);border-radius:8px;box-shadow:var(--shadow);padding:6px 10px;font-size:12px;white-space:nowrap;z-index:5}
+ol.rank{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:6px}
+ol.rank li{display:flex;justify-content:space-between;gap:12px;border-bottom:1px solid var(--line);padding-bottom:6px}
+ol.rank li span:last-child{font-variant-numeric:tabular-nums;white-space:nowrap}
+.tools input{font:inherit;font-size:12px;padding:6px 10px;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--fg);width:min(100%,16rem)}
+.tablebox{max-height:560px;overflow:auto;border:1px solid var(--line);border-radius:8px}
+table{border-collapse:collapse;width:100%;font-size:12px;font-variant-numeric:tabular-nums}
+th,td{padding:6px 10px;text-align:right;border-bottom:1px solid var(--line);white-space:nowrap}
+th:first-child,td:first-child{text-align:left}
+th{position:sticky;top:0;background:var(--panel);font-weight:600}
+th button{all:unset;cursor:pointer} th button:focus-visible{outline:2px solid var(--fg);outline-offset:2px}
+td.na{color:var(--muted)} td.best{font-weight:700}
+details{font-size:12px;color:var(--muted)} details summary{cursor:pointer;color:var(--fg);font-size:14px}
+details ul{margin:8px 0 0;padding-left:18px;display:flex;flex-direction:column;gap:4px}
+code{font-size:12px}
+</style></head><body>
+<div class="wrap">
+  <header style="display:flex;flex-direction:column;gap:8px">
+    <h1>Jaunt、MoeJS、Jint 性能对比</h1>
+    <p class="muted small">同一批 JavaScript 脚本,三个引擎各自运行;测量日期 2026-11-06,Jaunt 与 Jint 在同一个 .NET 进程,MoeJS 是 Go 引擎,单独进程运行。</p>
+  </header>
+
+  <section class="card verdict">
+    <h2>结论</h2>
+    <ul>
+      <li><b>Jaunt 和 MoeJS 综合速度基本相当</b>,两者都明显快于 Jint(约快一倍)。</li>
+      <li><b>按赢的测试数,Jaunt 领先</b>(<span id="v-wins">…</span>);但 MoeJS 在字符串类测试上比 Jaunt 快十几到二十多倍,把综合速度拉平了。所以「赢得多」和「综合速度」是两回事,请两个都看。</li>
+      <li><b>计算、对象、迭代器、BigInt</b> 这类代码,Jaunt 通常更快;<b>字符串拼接、切分、哈希</b> 这类代码,Jaunt 明显落后 MoeJS 和 Jint,这是最需要优化的地方。</li>
+      <li>MoeJS 目前不支持 Temporal、迭代器 helpers、<code>Intl.Collator</code>;Jaunt 和 Jint 都支持。</li>
+    </ul>
+    <p class="muted small">下面所有数字都来自测量数据。条形越长表示越快,每组里最快的一个标有「最快」。</p>
+  </section>
+
+  <section class="card">
+    <h2>综合速度</h2>
+    <p class="muted small" id="overall-note"></p>
+    <div class="legend"><span><i style="background:var(--c-jaunt)"></i>Jaunt</span><span><i style="background:var(--c-moejs)"></i>MoeJS</span><span><i style="background:var(--c-jint)"></i>Jint</span></div>
+    <div class="grid3">
+      <div><p class="small muted" style="margin-bottom:6px"><b>已预热后的单次调用</b></p><div class="bars" id="bars-warm"></div></div>
+      <div><p class="small muted" style="margin-bottom:6px"><b>首次调用</b>(新建引擎+加载+运行)</p><div class="bars" id="bars-cold"></div></div>
+      <div><p class="small muted" style="margin-bottom:6px"><b>编译脚本</b></p><div class="bars" id="bars-compile"></div></div>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>逐项比拼:谁在多少个测试里最快</h2>
+    <p class="muted small" id="wins-note"></p>
+    <div class="wins" id="wins"></div>
+  </section>
+
+  <section class="card">
+    <h2>按类型看</h2>
+    <p class="muted small">每个类型里三个引擎的综合速度,条形长度是相对该类型最快者的比例。</p>
+    <div class="grid3" id="cats"></div>
+  </section>
+
+  <section class="card">
+    <h2>每个测试的速度,相对 Jaunt</h2>
+    <p class="muted small">竖线是 Jaunt(1×)。圆点在竖线<b>右边</b>表示该引擎比 Jaunt <b>快</b>,在<b>左边</b>表示更慢;刻度是对数,每格 2 倍。按 MoeJS 的速度排序,最上面是 Jaunt 最占优的。鼠标悬停可看具体耗时。</p>
+    <div class="legend"><span><i style="background:var(--c-moejs)"></i>MoeJS</span><span><i style="background:var(--c-jint)"></i>Jint</span></div>
+    <div class="chart" id="dumb"></div>
+  </section>
+
+  <section class="grid">
+    <div class="card"><h2>Jaunt 最落后的 5 项</h2><p class="muted small">MoeJS 比 Jaunt 快多少倍</p><ol class="rank" id="behind"></ol></div>
+    <div class="card"><h2>Jaunt 最领先的 5 项</h2><p class="muted small">Jaunt 比 MoeJS 快多少倍</p><ol class="rank" id="ahead"></ol></div>
+  </section>
+
+  <section class="card">
+    <h2>完整数据</h2>
+    <p class="muted small">已预热后的单次调用耗时(毫秒,越小越快),三轮取最好成绩。点表头排序。</p>
+    <div class="tools"><input id="q" type="search" placeholder="筛选测试名" aria-label="筛选测试名"></div>
+    <div class="tablebox"><table><thead><tr>
+      <th><button type="button" data-sort="name">测试</button></th>
+      <th><button type="button" data-sort="jaunt">Jaunt</button></th>
+      <th><button type="button" data-sort="moejs">MoeJS</button></th>
+      <th><button type="button" data-sort="jint">Jint</button></th>
+      <th><button type="button" data-sort="best">最快</button></th>
+    </tr></thead><tbody id="tb"></tbody></table></div>
+  </section>
+
+  <details class="card">
+    <summary>测试方法与注意事项</summary>
+    <ul>
+      <li>三个引擎运行同一批脚本,每个脚本定义 <code>main()</code> 并返回校验值,与 Node 的输出对照,保证结果正确。</li>
+      <li>引擎依次运行,从不同时运行。「已预热」耗时是预热后多批计时的中位数;页面展示的是三轮里最好的一次,因为测试机器上同时有其他任务在占用 CPU。</li>
+      <li>不同语言运行时(.NET 与 Go)的内存管理不同,绝对耗时不能完全等同,请主要看相对快慢。</li>
+      <li>综合速度只统计三个引擎都支持的测试;MoeJS 不支持的三个测试不计入。</li>
+      <li>Jint 在两个测试(函数源码文本、日期格式)上的输出与 Node 不一致,耗时仍然显示。</li>
+      <li>可复现:运行 <code>bench/cross/run.sh</code>,再用 <code>bench/cross/make_report.py</code> 生成本页。</li>
+    </ul>
+  </details>
+</div>
+
+<script>__D3__</script>
+<script>
+const RESULTS = __DATA__;
+const ENG = [{k:'jaunt',n:'Jaunt',c:'var(--c-jaunt)'},{k:'moejs',n:'MoeJS',c:'var(--c-moejs)'},{k:'jint',n:'Jint',c:'var(--c-jint)'}];
+const $ = (id) => document.getElementById(id);
+const X = (v) => (v < 10 ? v.toFixed(2) : v.toFixed(1)) + '×';
+const MS = (v) => v == null ? '不支持' : v < 1 ? v.toFixed(3) : v < 10 ? v.toFixed(2) : v < 100 ? v.toFixed(1) : d3.format(',.0f')(v);
+const common = RESULTS.filter((r) => r.jaunt && r.moejs && r.jint);
+const speedVsJaunt = (rs, suffix, eng) => eng === 'jaunt' ? 1 : Math.exp(rs.reduce((a, r) => a + Math.log(r['jaunt' + suffix] / r[eng + suffix]), 0) / rs.length);
+
+function bars(el, rs, suffix) {
+  const vals = ENG.map((e) => ({ ...e, v: speedVsJaunt(rs, suffix, e.k) })), max = Math.max(...vals.map((x) => x.v));
+  el.replaceChildren(...vals.map((x) => {
+    const row = document.createElement('div'); row.className = 'bar' + (x.v === max ? ' best' : '');
+    const nm = document.createElement('span'); nm.className = 'nm'; nm.textContent = x.n;
+    const tr = document.createElement('div'); tr.className = 'track'; const f = document.createElement('div'); f.className = 'fill'; f.style.width = (x.v / max * 100) + '%'; f.style.background = x.c; tr.append(f);
+    const val = document.createElement('span'); val.className = 'val'; val.textContent = X(x.v) + (x.v === max ? ' ' : '');
+    if (x.v === max) { const t = document.createElement('span'); t.className = 'tag'; t.textContent = '最快'; val.append(t); }
+    row.append(nm, tr, val); return row;
+  }));
+}
+bars($('bars-warm'), common, ''); bars($('bars-cold'), common, '_cold'); bars($('bars-compile'), common, '_compile');
+$('overall-note').textContent = '数字是相对 Jaunt 的速度(Jaunt = 1.00×,大于 1 表示比 Jaunt 快),取 ' + common.length + ' 个三方都支持的测试的几何平均。';
+
+// wins
+const wins = { jaunt: 0, moejs: 0, jint: 0 };
+RESULTS.forEach((r) => { const c = ENG.filter((e) => r[e.k] != null).map((e) => [e.k, r[e.k]]); c.sort((a, b) => a[1] - b[1]); r.best = c[0][0]; wins[r.best]++; });
+$('wins-note').textContent = '共 ' + RESULTS.length + ' 个测试,每个测试里耗时最短的引擎记一次。';
+$('wins').replaceChildren(...ENG.map((e) => { const d = document.createElement('div'); d.className = 'win'; d.style.borderTop = '3px solid ' + e.c; const n = document.createElement('div'); n.className = 'n'; n.textContent = wins[e.k]; const l = document.createElement('div'); l.className = 'l'; l.textContent = e.n + ' 最快'; d.append(n, l); return d; }));
+
+$('v-wins').textContent = '共 ' + RESULTS.length + ' 个测试:Jaunt 最快 ' + wins.jaunt + ' 个,MoeJS ' + wins.moejs + ' 个,Jint ' + wins.jint + ' 个';
+
+// categories
+const CAT = { advanced: '高级特性', apps: '复杂应用', async: '异步', collections: '集合与数值', compute: '纯计算', functional: '函数式与迭代器', objects: '对象与类', strings: '字符串与正则' };
+$('cats').replaceChildren(...Object.keys(CAT).map((c) => {
+  const rs = common.filter((r) => r.category === c), card = document.createElement('div');
+  const h = document.createElement('p'); h.className = 'small'; h.style.marginBottom = '6px'; h.innerHTML = ''; const b = document.createElement('b'); b.textContent = CAT[c]; h.append(b, ' · ' + rs.length + ' 项');
+  const bx = document.createElement('div'); bx.className = 'bars'; card.append(h, bx); bars(bx, rs, ''); return card;
+}));
+// bars() shows "× vs Jaunt" labels; per-category bars use the same scale: longest = fastest.
+
+// dumbbell (speed relative to Jaunt, log scale)
+function dumbbell() {
+  const el = $('dumb'); el.replaceChildren();
+  const rows = RESULTS.map((r) => ({ r, m: r.moejs ? r.jaunt / r.moejs : null, j: r.jint ? r.jaunt / r.jint : null })).sort((a, b) => (a.m ?? -1) - (b.m ?? -1) || (a.j ?? -1) - (b.j ?? -1)).reverse().reverse();
+  rows.sort((a, b) => (a.m ?? 1e9) - (b.m ?? 1e9));
+  const W = Math.max(300, el.clientWidth), rh = 17, mt = 8, mb = 30;
+  const probe = d3.select(el).append('svg').attr('width', 0).attr('height', 0).append('text').attr('font-size', 11);
+  let lw = 0; rows.forEach((o) => { probe.text(o.r.name); lw = Math.max(lw, probe.node().getComputedTextLength()); }); d3.select(el).select('svg').remove();
+  const ml = Math.ceil(lw) + 14, mr = 14, H = mt + rows.length * rh + mb;
+  const x = d3.scaleLog().domain([0.04, 30]).range([ml, W - mr]).clamp(true);
+  const svg = d3.select(el).append('svg').attr('width', '100%').attr('viewBox', `0 0 ${W} ${H}`).attr('role', 'img').attr('aria-label', '每个测试里 MoeJS 和 Jint 相对 Jaunt 的速度');
+  const ticks = [0.05, 0.125, 0.25, 0.5, 1, 2, 4, 8, 16].filter((t) => x(t) >= ml && x(t) <= W - mr);
+  svg.append('g').selectAll('line').data(ticks).join('line').attr('x1', (t) => x(t)).attr('x2', (t) => x(t)).attr('y1', mt).attr('y2', H - mb).attr('stroke', (t) => t === 1 ? 'var(--ref)' : 'var(--grid)').attr('stroke-width', (t) => t === 1 ? 1.8 : 1);
+  svg.append('g').selectAll('text').data(ticks).join('text').attr('x', (t) => x(t)).attr('y', H - mb + 16).attr('text-anchor', 'middle').attr('font-size', 11).attr('fill', 'var(--muted)').text((t) => t < 1 ? '1/' + Math.round(1 / t) + '×' : t + '×');
+  svg.append('text').attr('x', x(1) - 6).attr('y', H - 4).attr('text-anchor', 'end').attr('font-size', 11).attr('fill', 'var(--muted)').text('← 更慢');
+  svg.append('text').attr('x', x(1) + 6).attr('y', H - 4).attr('font-size', 11).attr('fill', 'var(--muted)').text('更快 →');
+  const tip = d3.select(el).append('div').attr('class', 'tip').style('display', 'none');
+  const g = svg.append('g').selectAll('g').data(rows).join('g').attr('transform', (o, i) => `translate(0,${mt + i * rh + rh / 2})`);
+  g.append('text').attr('x', ml - 8).attr('text-anchor', 'end').attr('dy', '0.32em').attr('font-size', 11).attr('fill', 'var(--muted)').text((o) => o.r.name);
+  g.each(function (o) {
+    const s = d3.select(this), vs = [o.m, o.j].filter((v) => v != null);
+    if (vs.length === 2) s.append('line').attr('x1', x(vs[0])).attr('x2', x(vs[1])).attr('stroke', 'var(--grid)').attr('stroke-width', 2);
+    [[o.m, 'var(--c-moejs)'], [o.j, 'var(--c-jint)']].forEach(([v, c]) => { if (v != null) s.append('circle').attr('cx', x(v)).attr('r', 4).attr('fill', c).attr('stroke', 'var(--panel)').attr('stroke-width', 2); });
+    s.append('rect').attr('x', 0).attr('y', -rh / 2).attr('width', W).attr('height', rh).attr('fill', 'transparent')
+      .on('pointermove', (ev) => {
+        const [px, py] = d3.pointer(ev, el); tip.style('display', 'block').html('');
+        tip.append('div').append('b').text(o.r.name);
+        [['Jaunt', o.r.jaunt], ['MoeJS', o.r.moejs], ['Jint', o.r.jint]].forEach(([n, v]) => tip.append('div').text(n + ' ' + (v == null ? '不支持' : MS(v) + ' 毫秒') + (n === 'Jaunt' ? '' : v == null ? '' : '(相对 Jaunt ' + X(o.r.jaunt / v) + ')')));
+        const tw = tip.node().offsetWidth; tip.style('left', Math.max(0, Math.min(W - tw, px + 12)) + 'px').style('top', Math.max(0, py - 56) + 'px');
+      }).on('pointerleave', () => tip.style('display', 'none'));
+  });
+}
+dumbbell(); let rt; addEventListener('resize', () => { clearTimeout(rt); rt = setTimeout(dumbbell, 120); });
+
+// rankings
+const withM = RESULTS.filter((r) => r.moejs);
+const rank = (id, list, f) => $(id).replaceChildren(...list.map((r) => { const li = document.createElement('li'), a = document.createElement('span'), b = document.createElement('span'); a.textContent = r.name; b.textContent = f(r); li.append(a, b); return li; }));
+rank('behind', withM.slice().sort((a, b) => a.moejs / a.jaunt - b.moejs / b.jaunt).slice(0, 5), (r) => '慢 ' + X(r.jaunt / r.moejs).replace('×', '') + ' 倍');
+rank('ahead', withM.slice().sort((a, b) => b.moejs / b.jaunt - a.moejs / a.jaunt).slice(0, 5), (r) => '快 ' + X(r.moejs / r.jaunt).replace('×', '') + ' 倍');
+
+// table
+const st = { key: 'jaunt', dir: 1, q: '' }, NAME = { jaunt: 'Jaunt', moejs: 'MoeJS', jint: 'Jint' };
+document.querySelectorAll('th button').forEach((b) => b.addEventListener('click', () => { const k = b.dataset.sort; st.dir = st.key === k ? -st.dir : 1; st.key = k; table(); }));
+$('q').addEventListener('input', (e) => { st.q = e.target.value.trim().toLowerCase(); table(); });
+function table() {
+  const k = st.key, rs = RESULTS.filter((r) => r.name.toLowerCase().includes(st.q)).sort((a, b) => k === 'name' || k === 'best' ? st.dir * String(a[k]).localeCompare(String(b[k])) : st.dir * ((a[k] ?? Infinity) - (b[k] ?? Infinity)));
+  $('tb').replaceChildren(...rs.map((r) => { const tr = document.createElement('tr'); [r.name, MS(r.jaunt), MS(r.moejs), MS(r.jint), NAME[r.best]].forEach((t, i) => { const td = document.createElement('td'); td.textContent = t; if (t === '不支持') td.className = 'na'; if (i >= 1 && i <= 3 && ['jaunt', 'moejs', 'jint'][i - 1] === r.best) td.className = 'best'; tr.append(td); }); return tr; }));
+}
+table();
+</script>
+</body></html>

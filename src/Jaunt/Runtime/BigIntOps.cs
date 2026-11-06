@@ -189,7 +189,7 @@ internal static class BigIntOps
             case JsTag.BigInt: return p.BigIntValue;
             case JsTag.Boolean: return p.IsTrue ? BigInteger.One : BigInteger.Zero;
             case JsTag.String:
-                return StringToBigInt((string)p.Ref!) ?? throw JsErrors.SyntaxError(realm, $"Cannot convert {(string)p.Ref!} to a BigInt");
+                return StringToBigInt(p.AsStringUnchecked) ?? throw JsErrors.SyntaxError(realm, $"Cannot convert {p.AsStringUnchecked} to a BigInt");
             case JsTag.Number: throw JsErrors.TypeError(realm, $"Cannot convert {p} to a BigInt");
             case JsTag.Symbol: throw JsErrors.TypeError(realm, "Cannot convert a Symbol value to a BigInt");
             default: throw JsErrors.TypeError(realm, $"Cannot convert {p} to a BigInt");

@@ -14,5 +14,8 @@ for (const f of files) {
     res[name] = String(r);
   } catch (e) { res[name] = 'ERR ' + e.message; }
 }
+// Node has no Temporal: overrides hold results two independent engines (Jaunt, Jint) agree on.
+const ov = path.join(path.dirname(new URL(import.meta.url).pathname), 'expected-overrides.json');
+if (fs.existsSync(ov)) Object.assign(res, JSON.parse(fs.readFileSync(ov, 'utf8')));
 fs.writeFileSync(outFile, JSON.stringify(res, null, 1));
 for (const [k, v] of Object.entries(res)) console.log(k.padEnd(34), v.length > 90 ? v.slice(0, 90) + '…' : v);

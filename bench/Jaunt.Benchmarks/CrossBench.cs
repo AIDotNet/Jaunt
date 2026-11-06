@@ -26,7 +26,7 @@ public static class CrossBench
     {
         private readonly Jint.Engine _e = new(); private readonly bool _hasResult;
         public JintRunner(Jint.Prepared<Acornima.Ast.Script> script) { _e.Execute(script); _hasResult = _e.GetValue("result").Type == Jint.Runtime.Types.Object; }
-        public string Call() { var r = _e.Invoke("main"); if (_hasResult) r = _e.Invoke("result"); return r.ToString(); }
+        public string Call() { var r = _e.Invoke("main"); _e.Advanced.ProcessTasks(); if (_hasResult) r = _e.Invoke("result"); return r.ToString(); }
         public void Dispose() => _e.Dispose();
     }
 

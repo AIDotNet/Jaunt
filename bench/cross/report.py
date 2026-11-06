@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 """Merge cross-engine .jsonl results: print a table and write a summary JSON.
-usage: report.py out.json in1.jsonl [in2.jsonl ...]"""
+usage: report.py out.json in1.jsonl [in2.jsonl ...]  (several passes of the same engine => per-field minimum)"""
 import json, sys, math
 out, ins = sys.argv[1], sys.argv[2:]
 rows = {}
 for p in ins:
     for line in open(p):
-        r = json.loads(line); rows.setdefault(r['name'], {})[r['engine']] = r
+        r = json.loads(line); cur = rows.setdefault(r['name'], {}).get(r['engine'])
+        if cur is None or cur['status'] not in ('ok', 'mismatch'): rows[r['name']][r['engine']] = r; continue
+        if r['status'] in ('ok', 'mismatch'):  # best-of-passes: keep the minimum of every timing field (robust to background load)
+            for k in ('medianUs', 'minUs', 'coldUs', 'compileUs', 'allocB'): cur[k] = min(cur[k], r[k])
 engines = ['jaunt', 'moejs', 'jint']
 def v(r, k): return r.get(k) if r and r.get('status') in ('ok', 'mismatch') else None
 def fmt(x): return '   —   ' if x is None else (f'{x/1000:9.2f}ms' if x >= 1000 else f'{x:9.1f}µs')

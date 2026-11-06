@@ -53,7 +53,7 @@ internal static class JsErrors
 
     public static string Describe(JsValue v) => v.Tag switch
     {
-        JsTag.String => "\"" + (string)v.Ref! + "\"",
+        JsTag.String => "\"" + v.AsStringUnchecked + "\"",
         JsTag.Object => v.Ref is JsFunctionObject f ? "function " + f.DebugName : "object",
         _ => v.ToString(),
     };

@@ -165,10 +165,10 @@ public static class JsTypeInfo
     /// <summary>JS boolean ↔ bool.</summary>
     public static JsTypeInfo<bool> Boolean { get; } = new Prim<bool>(static (c, v) => v.IsBoolean ? v.IsTrue : throw c.Fail($"Expected a boolean but found {v.TypeName}"), static (c, v) => JsValue.FromBool(v));
     /// <summary>JS string ↔ string (null ↔ null; undefined reads as null).</summary>
-    public static JsTypeInfo<string?> String { get; } = new Prim<string?>(static (c, v) => v.IsString ? (string)v.Ref! : v.IsNullOrUndefined ? null : throw c.Fail($"Expected a string but found {v.TypeName}"), static (c, v) => JsValue.From(v));
+    public static JsTypeInfo<string?> String { get; } = new Prim<string?>(static (c, v) => v.IsString ? v.AsStringUnchecked : v.IsNullOrUndefined ? null : throw c.Fail($"Expected a string but found {v.TypeName}"), static (c, v) => JsValue.From(v));
     /// <summary>ISO-8601 string ↔ DateTimeOffset (explicit; no culture guessing).</summary>
     public static JsTypeInfo<DateTimeOffset> IsoDateTime { get; } = new Prim<DateTimeOffset>(
-        static (c, v) => v.IsString && DateTimeOffset.TryParse((string)v.Ref!, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.RoundtripKind, out var d) ? d : throw c.Fail("Expected an ISO-8601 date string"),
+        static (c, v) => v.IsString && DateTimeOffset.TryParse(v.AsStringUnchecked, System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.RoundtripKind, out var d) ? d : throw c.Fail("Expected an ISO-8601 date string"),
         static (c, v) => new JsValue(v.ToString("O", System.Globalization.CultureInfo.InvariantCulture)));
 
     /// <summary>Nullable value type (null/undefined ↔ null).</summary>

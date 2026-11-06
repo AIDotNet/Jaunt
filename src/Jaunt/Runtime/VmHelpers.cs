@@ -110,7 +110,7 @@ internal sealed partial class Vm
                 if (key.Value is string ks && ks == "length")
                 {
                     ic.Kind = IcKind.StringLength;
-                    return new JsValue(ov.AsStringUnchecked.Length);
+                    return new JsValue(ov.StringLength);
                 }
                 var sp = Realm.StringPrototype;
                 if (sp.Dict == null && sp.CanCacheNamed(key))

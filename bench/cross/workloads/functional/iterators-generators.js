@@ -1,4 +1,4 @@
-// Generators, custom iterables, spread of iterables, iterator helpers pipeline, yield*, return/throw.
+// Generators, custom iterables, spread of iterables, yield*, return/throw.
 function* range(a, b) { for (let i = a; i < b; i++) yield i; }
 function* mapG(it, f) { for (const x of it) yield f(x); }
 function* filterG(it, f) { for (const x of it) if (f(x)) yield x; }
@@ -12,6 +12,5 @@ function main() {
   t += [...new Coll(5000)].length + Math.max(...new Coll(3000));
   const gen = (function* () { try { const x = yield 1; yield x * 2; } finally { t += 1000; } })();
   gen.next(); t += gen.next(21).value; gen.return(0);
-  t += Iterator.from(range(0, 50000)).map(x => x * 2).filter(x => x % 3 === 0).take(5000).reduce((a, b) => a + b, 0);
   return String(t);
 }

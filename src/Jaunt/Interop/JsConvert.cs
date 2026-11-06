@@ -59,7 +59,7 @@ internal static class JsConvert<T>
 
     private static string? FromString(Realm realm, JsValue v, int index, string fn)
     {
-        if (v.IsString) return (string)v.Ref!;
+        if (v.IsString) return v.AsStringUnchecked;
         if (v.IsNullOrUndefined) return null;
         throw JsErrors.TypeError(realm, $"Argument {index + 1} of '{fn}' must be a string, got {v.TypeName}");
     }

@@ -94,6 +94,13 @@ public readonly struct JsValue : IEquatable<JsValue>
         Bits = StringBits;
     }
 
+    /// <summary>A lazily concatenated string; see <see cref="JsRope"/>.</summary>
+    internal JsValue(JsRope value)
+    {
+        Ref = value;
+        Bits = StringBits;
+    }
+
     /// <summary>Creates a JS BigInt.</summary>
     public static JsValue FromBigInteger(System.Numerics.BigInteger value) => new(value, BigIntBits);
 
@@ -203,7 +210,10 @@ public readonly struct JsValue : IEquatable<JsValue>
     /// <summary>Object payload. Type-checked cast: misuse faults the engine instead of corrupting memory.</summary>
     internal JsObject AsObjectUnchecked => (JsObject)Ref!;
     /// <summary>String payload (type-checked).</summary>
-    internal string AsStringUnchecked => (string)Ref!;
+    internal string AsStringUnchecked => Ref is string s ? s : Unsafe.As<JsRope>(Ref!).Flatten();
+
+    /// <summary>Length of a string value without flattening a rope. The value must be a string.</summary>
+    internal int StringLength => Ref is string s ? s.Length : Unsafe.As<JsRope>(Ref!).Length;
 
     /// <summary>Returns the number. Throws when the value is not a number (no JS coercion is performed).</summary>
     public double AsNumber()
@@ -223,7 +233,7 @@ public readonly struct JsValue : IEquatable<JsValue>
     public string AsString()
     {
         if (Tag != JsTag.String) ThrowType("string");
-        return (string)Ref!;
+        return AsStringUnchecked;
     }
 
     /// <summary>
@@ -274,7 +284,7 @@ public readonly struct JsValue : IEquatable<JsValue>
         {
             JsTag.Number => Num.Equals(other.Num),
             JsTag.Boolean => Bits == other.Bits,
-            JsTag.String => string.Equals((string)Ref!, (string)other.Ref!, StringComparison.Ordinal),
+            JsTag.String => StringLength == other.StringLength && string.Equals(AsStringUnchecked, other.AsStringUnchecked, StringComparison.Ordinal),
             JsTag.BigInt => BigIntValue == other.BigIntValue,
             JsTag.Undefined or JsTag.Null or JsTag.Empty => true,
             _ => ReferenceEquals(Ref, other.Ref),
@@ -289,7 +299,7 @@ public readonly struct JsValue : IEquatable<JsValue>
     {
         JsTag.Number => Num.GetHashCode(),
         JsTag.Boolean => Bits.GetHashCode(),
-        JsTag.String => StringComparer.Ordinal.GetHashCode((string)Ref!),
+        JsTag.String => StringComparer.Ordinal.GetHashCode(AsStringUnchecked),
         JsTag.BigInt => BigIntValue.GetHashCode(),
         JsTag.Undefined or JsTag.Null or JsTag.Empty => (int)Tag,
         _ => RuntimeHelpers.GetHashCode(Ref!),
@@ -310,7 +320,7 @@ public readonly struct JsValue : IEquatable<JsValue>
         JsTag.Null => "null",
         JsTag.Boolean => Bits == TrueBits ? "true" : "false",
         JsTag.Number => NumberFormatting.ToString(Num),
-        JsTag.String => (string)Ref!,
+        JsTag.String => AsStringUnchecked,
         JsTag.Symbol => ((JsSymbol)Ref!).ToString(),
         JsTag.BigInt => BigIntValue.ToString(System.Globalization.CultureInfo.InvariantCulture),
         JsTag.Object => "[object " + ((JsObject)Ref!).ClassName + "]",

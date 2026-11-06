@@ -7,6 +7,33 @@ namespace Jaunt.Tests;
 public class ApiTests
 {
     [Fact]
+    public void EnginesRunningASharedScriptAreCollected()
+    {
+        // a compiled script shared by many engines must not keep them alive (per-realm feedback must not be rooted
+        // through the long-lived script)
+        var script = JsCompiler.CompileScript("var o = { a: 1 }; function f(x) { return x.a + [1, 2].length; } f(o) + f(o)");
+        var script2 = JsCompiler.CompileScript("f(o) + [3].concat([4]).length");
+        var refs = new List<WeakReference>();
+        void Run()
+        {
+            for (int i = 0; i < 20; i++)
+            {
+                var engine = new JsEngine();
+                engine.Evaluate(script);
+                engine.Evaluate(script2);
+                engine.Evaluate(script);
+                refs.Add(new WeakReference(engine));
+                engine.Dispose();
+            }
+        }
+        Run();
+        for (int i = 0; i < 3; i++) { GC.Collect(); GC.WaitForPendingFinalizers(); }
+        GC.KeepAlive(script);
+        GC.KeepAlive(script2);
+        Assert.True(refs.Count(r => r.IsAlive) <= 1, $"{refs.Count(r => r.IsAlive)} of {refs.Count} engines are still alive");
+    }
+
+    [Fact]
     public void HtmlDdaObjectBehavesLikeDocumentAll()
     {
         using var engine = new JsEngine();

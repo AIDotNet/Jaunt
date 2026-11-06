@@ -13,7 +13,7 @@ internal static class Operations
         {
             case JsTag.Boolean: return v.IsTrue;
             case JsTag.Number: return !(v.Num == 0 || double.IsNaN(v.Num));
-            case JsTag.String: return ((string)v.Ref!).Length != 0;
+            case JsTag.String: return v.StringLength != 0;
             case JsTag.Object: return v.Ref is not JsHtmlDda;
             case JsTag.Symbol: return true;
             case JsTag.BigInt: return !v.BigIntValue.IsZero;
@@ -35,7 +35,7 @@ internal static class Operations
             case JsTag.Undefined: return double.NaN;
             case JsTag.Null: return 0;
             case JsTag.Boolean: return v.IsTrue ? 1 : 0;
-            case JsTag.String: return NumberFormatting.StringToNumber((string)v.Ref!);
+            case JsTag.String: return NumberFormatting.StringToNumber(v.AsStringUnchecked);
             case JsTag.Symbol: throw JsErrors.TypeError(realm, "Cannot convert a Symbol value to a number");
             case JsTag.BigInt: throw JsErrors.TypeError(realm, "Cannot convert a BigInt value to a number");
             case JsTag.Object: return ToNumber(realm, ToPrimitive(realm, v, PreferredType.Number));
@@ -58,7 +58,7 @@ internal static class Operations
     {
         switch (v.Tag)
         {
-            case JsTag.String: return (string)v.Ref!;
+            case JsTag.String: return v.AsStringUnchecked;
             case JsTag.Number: return NumberFormatting.ToString(v.Num);
             case JsTag.Undefined: return "undefined";
             case JsTag.Null: return "null";
@@ -72,7 +72,7 @@ internal static class Operations
 
     public static PropertyKey ToPropertyKey(Realm realm, in JsValue v)
     {
-        if (v.IsString) return new PropertyKey((string)v.Ref!);
+        if (v.IsString) return new PropertyKey(v.AsStringUnchecked);
         if (v.IsSymbol) return new PropertyKey((JsSymbol)v.Ref!);
         if (v.IsNumber)
         {
@@ -139,7 +139,7 @@ internal static class Operations
             case JsTag.Null: throw JsErrors.TypeError(realm, $"Cannot convert {v} to object");
             case JsTag.Boolean: return new JsPrimitiveWrapper(realm, realm.BooleanPrototype, v);
             case JsTag.Number: return new JsPrimitiveWrapper(realm, realm.NumberPrototype, v);
-            case JsTag.String: return new JsStringObject(realm, (string)v.Ref!);
+            case JsTag.String: return new JsStringObject(realm, v.AsStringUnchecked);
             case JsTag.Symbol: return new JsPrimitiveWrapper(realm, realm.SymbolPrototype, v);
             case JsTag.BigInt: return new JsPrimitiveWrapper(realm, realm.BigIntPrototype, v);
             default: throw JsErrors.TypeError(realm, "Cannot convert value to object");
@@ -226,7 +226,7 @@ internal static class Operations
         switch (a.Tag)
         {
             case JsTag.Number: return a.Num == b.Num;
-            case JsTag.String: return string.Equals((string)a.Ref!, (string)b.Ref!);
+            case JsTag.String: return a.StringLength == b.StringLength && string.Equals(a.AsStringUnchecked, b.AsStringUnchecked);
             case JsTag.Boolean: return a.Bits == b.Bits;
             case JsTag.Undefined:
             case JsTag.Null: return true;
@@ -244,10 +244,10 @@ internal static class Operations
             // Annex B.3.6.2: [[IsHTMLDDA]] objects are loosely equal to null and undefined
             if ((a.IsNullOrUndefined && b.Ref is JsHtmlDda) || (b.IsNullOrUndefined && a.Ref is JsHtmlDda)) return true;
             if (a.IsNullOrUndefined || b.IsNullOrUndefined) return false;
-            if (a.IsNumber && b.IsString) return a.Num == NumberFormatting.StringToNumber((string)b.Ref!);
-            if (a.IsString && b.IsNumber) return NumberFormatting.StringToNumber((string)a.Ref!) == b.Num;
-            if (a.IsBigInt && b.IsString) { var n = BigIntOps.StringToBigInt((string)b.Ref!); return n.HasValue && n.Value == a.BigIntValue; }
-            if (a.IsString && b.IsBigInt) { var n = BigIntOps.StringToBigInt((string)a.Ref!); return n.HasValue && n.Value == b.BigIntValue; }
+            if (a.IsNumber && b.IsString) return a.Num == NumberFormatting.StringToNumber(b.AsStringUnchecked);
+            if (a.IsString && b.IsNumber) return NumberFormatting.StringToNumber(a.AsStringUnchecked) == b.Num;
+            if (a.IsBigInt && b.IsString) { var n = BigIntOps.StringToBigInt(b.AsStringUnchecked); return n.HasValue && n.Value == a.BigIntValue; }
+            if (a.IsString && b.IsBigInt) { var n = BigIntOps.StringToBigInt(a.AsStringUnchecked); return n.HasValue && n.Value == b.BigIntValue; }
             if (a.IsBoolean) { a = new JsValue(a.IsTrue ? 1.0 : 0.0); continue; }
             if (b.IsBoolean) { b = new JsValue(b.IsTrue ? 1.0 : 0.0); continue; }
             if (b.IsObject && a.Tag is JsTag.Number or JsTag.String or JsTag.Symbol or JsTag.BigInt) { b = ToPrimitive(realm, b); continue; }
@@ -274,23 +274,42 @@ internal static class Operations
     public static JsValue Add(Realm realm, in JsValue a, in JsValue b)
     {
         if (a.IsNumber && b.IsNumber) return new JsValue(a.Num + b.Num);
-        if (a.IsString && b.IsString) return Concat(realm, (string)a.Ref!, (string)b.Ref!);
+        if (a.IsString && b.IsString) return ConcatParts(realm, a.Ref!, b.Ref!);
         var pa = ToPrimitive(realm, a);
         var pb = ToPrimitive(realm, b);
         if (pa.IsString || pb.IsString)
-            return Concat(realm, ToString(realm, pa), ToString(realm, pb));
+        {
+            // A string operand stays as it is (it may be a rope); only the other side is converted.
+            object left = pa.IsString ? pa.Ref! : ToString(realm, pa);
+            object right = pb.IsString ? pb.Ref! : ToString(realm, pb);
+            return ConcatParts(realm, left, right);
+        }
         if (pa.IsBigInt || pb.IsBigInt) return BigIntOps.Binary(realm, Jaunt.Compiler.Op.Add, ToNumericValue(realm, pa), ToNumericValue(realm, pb));
         return new JsValue(ToNumber(realm, pa) + ToNumber(realm, pb));
     }
 
-    public static JsValue Concat(Realm realm, string a, string b)
+    public static JsValue Concat(Realm realm, string a, string b) => ConcatParts(realm, a, b);
+
+    private static JsValue FromPart(object part) => part is string s ? new JsValue(s) : new JsValue((JsRope)part);
+
+    /// <summary>
+    /// String concatenation of two parts, each a <see cref="string"/> or a <see cref="JsRope"/>. Short results are copied
+    /// flat; long ones become a rope node, so repeated appends do not copy the accumulated text each time.
+    /// </summary>
+    internal static JsValue ConcatParts(Realm realm, object a, object b)
     {
-        long len = (long)a.Length + b.Length;
+        int la = JsRope.LengthOf(a), lb = JsRope.LengthOf(b);
+        long len = (long)la + lb;
         if (len > realm.MaxStringLength) throw JsErrors.RangeError(realm, "Invalid string length");
-        if (a.Length == 0) return new JsValue(b);
-        if (b.Length == 0) return new JsValue(a);
-        realm.ChargeBytes(len * 2 + 24);
-        return new JsValue(string.Concat(a, b));
+        if (la == 0) return FromPart(b);
+        if (lb == 0) return FromPart(a);
+        if (len < JsRope.MinLength)
+        {
+            realm.ChargeBytes(len * 2 + 24);
+            return new JsValue(string.Concat(a as string ?? ((JsRope)a).Flatten(), b as string ?? ((JsRope)b).Flatten()));
+        }
+        realm.ChargeBytes(48);
+        return new JsValue(new JsRope(realm, a, b, (int)len));
     }
 
     /// <summary>IsLessThan (ECMA-262 7.2.13). Returns null for undefined (NaN involved).</summary>
@@ -300,15 +319,15 @@ internal static class Operations
         if (leftFirst) { px = ToPrimitive(realm, x, PreferredType.Number); py = ToPrimitive(realm, y, PreferredType.Number); }
         else { py = ToPrimitive(realm, y, PreferredType.Number); px = ToPrimitive(realm, x, PreferredType.Number); }
         if (px.IsString && py.IsString)
-            return string.CompareOrdinal((string)px.Ref!, (string)py.Ref!) < 0;
+            return string.CompareOrdinal(px.AsStringUnchecked, py.AsStringUnchecked) < 0;
         if (px.IsBigInt && py.IsString)
         {
-            var ny2 = BigIntOps.StringToBigInt((string)py.Ref!);
+            var ny2 = BigIntOps.StringToBigInt(py.AsStringUnchecked);
             return ny2.HasValue ? px.BigIntValue < ny2.Value : null;
         }
         if (px.IsString && py.IsBigInt)
         {
-            var nx2 = BigIntOps.StringToBigInt((string)px.Ref!);
+            var nx2 = BigIntOps.StringToBigInt(px.AsStringUnchecked);
             return nx2.HasValue ? nx2.Value < py.BigIntValue : null;
         }
         var cx = ToNumericValue(realm, px);
@@ -375,7 +394,7 @@ internal static class Operations
         {
             case JsTag.String:
             {
-                var s = (string)v.Ref!;
+                var s = v.AsStringUnchecked;
                 if (key.Value is string ks)
                 {
                     if (ks == "length") return new JsValue(s.Length);

@@ -11,7 +11,7 @@ internal sealed class SameValueZeroComparer : IEqualityComparer<JsValue>
     public int GetHashCode(JsValue v) => v.Tag switch
     {
         JsTag.Number => v.Num == 0 ? 0 : double.IsNaN(v.Num) ? 1 : v.Num.GetHashCode(),
-        JsTag.String => ((string)v.Ref!).GetHashCode(),
+        JsTag.String => v.AsStringUnchecked.GetHashCode(),
         JsTag.BigInt => v.BigIntValue.GetHashCode(),
         JsTag.Boolean => (int)v.Bits + 7,
         JsTag.Undefined or JsTag.Null => (int)v.Tag,
@@ -19,7 +19,14 @@ internal sealed class SameValueZeroComparer : IEqualityComparer<JsValue>
     };
 }
 
-internal sealed class TableCursor { public int Index; }
+internal sealed class TableCursor { public int Index; public TableEpoch Epoch = null!; }
+
+/// <summary>
+/// One generation of an <see cref="OrderedTable"/>'s slot numbering. Compaction closes the current epoch by recording how
+/// old slot indices map to new ones and linking the next epoch; a cursor that is behind replays those maps on its next
+/// step. Epochs are only reachable from cursors, so they are collected as soon as no iterator is behind.
+/// </summary>
+internal sealed class TableEpoch { public int[]? Remap; public TableEpoch? Next; }
 
 /// <summary>Insertion-ordered hash table with live-iteration semantics (Map/Set).</summary>
 internal sealed class OrderedTable
@@ -30,7 +37,9 @@ internal sealed class OrderedTable
     private int _count;
     private int _liveCount;
     private readonly Dictionary<JsValue, int> _index = new(SameValueZeroComparer.Instance);
-    private readonly List<WeakReference<TableCursor>> _cursors = new();
+    private TableEpoch _epoch = new();
+    /// <summary>Every slot before this index is dead, so a cursor may skip straight to it.</summary>
+    private int _head;
 
     public int Size => _liveCount;
     public int End => _count;
@@ -75,6 +84,7 @@ internal sealed class OrderedTable
         _keys[i] = default;
         _values[i] = default;
         _liveCount--;
+        if (i == _head) { while (_head < _count && !_live[_head]) _head++; }
         return true;
     }
 
@@ -83,19 +93,21 @@ internal sealed class OrderedTable
         for (int i = 0; i < _count; i++) { _live[i] = false; _keys[i] = default; _values[i] = default; }
         _index.Clear();
         _liveCount = 0;
+        _head = _count;
     }
 
-    public TableCursor CreateCursor()
-    {
-        var c = new TableCursor();
-        if (_cursors.Count > 16) _cursors.RemoveAll(w => !w.TryGetTarget(out _));
-        _cursors.Add(new WeakReference<TableCursor>(c));
-        return c;
-    }
+    public TableCursor CreateCursor() => new TableCursor { Epoch = _epoch };
 
     /// <summary>Advances the cursor to the next live entry.</summary>
     public bool Next(TableCursor c, out JsValue key, out JsValue value)
     {
+        while (c.Epoch != _epoch)
+        {
+            var remap = c.Epoch.Remap!;
+            c.Index = remap[Math.Min(c.Index, remap.Length - 1)];
+            c.Epoch = c.Epoch.Next!;
+        }
+        if (c.Index < _head) c.Index = _head;
         while (c.Index < _count)
         {
             int i = c.Index++;
@@ -122,13 +134,13 @@ internal sealed class OrderedTable
         remap[_count] = w;
         for (int i = w; i < _count; i++) { _keys[i] = default; _values[i] = default; _live[i] = false; }
         _count = w;
+        _head = 0;
         _index.Clear();
         for (int i = 0; i < _count; i++) _index[_keys[i]] = i;
-        for (int i = _cursors.Count - 1; i >= 0; i--)
-        {
-            if (_cursors[i].TryGetTarget(out var c)) c.Index = remap[Math.Min(c.Index, remap.Length - 1)];
-            else _cursors.RemoveAt(i);
-        }
+        var next = new TableEpoch();
+        _epoch.Remap = remap;
+        _epoch.Next = next;
+        _epoch = next;
     }
 }
 

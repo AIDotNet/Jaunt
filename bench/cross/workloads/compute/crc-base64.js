@@ -15,5 +15,5 @@ function main() {
   const data = new Uint8Array(30000);
   for (let i = 0; i < data.length; i++) data[i] = (i * 17 + (i >> 3)) & 255;
   const enc = b64(data);
-  return crc32(data) + ':' + enc.length + ':' + crc32(new TextEncoder().encode(enc)) + ':' + enc.slice(0, 16);
+  return crc32(data) + ':' + enc.length + ':' + crc32(Uint8Array.from(enc, c => c.charCodeAt(0))) + ':' + enc.slice(0, 16);
 }

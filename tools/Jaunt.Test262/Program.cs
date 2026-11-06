@@ -44,6 +44,7 @@ var results = new ConcurrentBag<Result>();
 var sw = Stopwatch.StartNew();
 int done = 0;
 bool trace = Environment.GetEnvironmentVariable("JAUNT_T262_TRACE") == "1";
+bool allocTrace = Environment.GetEnvironmentVariable("JAUNT_T262_ALLOC") == "1";
 // multi-agent tests rely on agents parking within short sleeps ($262.agent.tryYield): run them after the main pass,
 // with little parallelism, so CPU contention from other tests cannot starve their agent threads
 var agentFiles = files.Where(f => File.ReadAllText(f).Contains("$262.agent.start", StringComparison.Ordinal)).ToHashSet();
@@ -66,7 +67,13 @@ if (retryTimeouts)
 void RunOne(string file)
 {
     if (trace) { lock (results) { File.AppendAllText(Path.Combine(outDir, "trace.log"), "S " + file + "\n"); } }
+    long alloc0 = allocTrace ? GC.GetAllocatedBytesForCurrentThread() : 0;
     foreach (var r in RunFile(file)) results.Add(r);
+    if (allocTrace)
+    {
+        long mb = (GC.GetAllocatedBytesForCurrentThread() - alloc0) >> 20;
+        if (mb >= 100) lock (results) File.AppendAllText(Path.Combine(outDir, "alloc.log"), $"{mb} MB {file}\n");
+    }
     if (trace) { lock (results) { File.AppendAllText(Path.Combine(outDir, "trace.log"), "E " + file + "\n"); } }
     int n = Interlocked.Increment(ref done);
     if (n % 5000 == 0) Console.Error.WriteLine($"  {n}/{files.Count} files ({sw.Elapsed.TotalSeconds:F0}s)");
