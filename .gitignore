@@ -5,3 +5,7 @@ artifacts/
 .vs/
 BenchmarkDotNet.Artifacts/
 tools/unicode/.cache/
+
+# patch/merge leftovers
+*.orig
+*.rej

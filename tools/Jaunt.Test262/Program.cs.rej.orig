@@ -1,9 +1,0 @@
-@@ -375,7 +384,7 @@
-     public static readonly HashSet<string> UnsupportedFeatures = new(StringComparer.Ordinal)
-     {
-         // ECMA-402 (Intl) and proposals below stage 4
--        "decorators", "source-phase-imports", "source-phase-imports-module-source", "import-defer", "import-text",
-+        "decorators",
-         "legacy-regexp", "immutable-arraybuffer", "nonextensible-applies-to-private", "ShadowRealm", "await-dictionary",
-         "Iterator.prototype.join", "error-stack-accessor",
-         // optional host / legacy extensions Jaunt does not provide
