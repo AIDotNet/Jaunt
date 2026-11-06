@@ -141,8 +141,9 @@ public class HostBoundaryTests
         }
         using (var engine = new JsEngine(new JsEngineOptions { CompileOptions = compileOptions }))
         {
-            // a dedicated thread, not a thread-pool timer (parallel blocking tests can starve the pool)
-            var interrupter = new Thread(() => { Thread.Sleep(30); engine.Interrupt(); }) { IsBackground = true };
+            // a dedicated thread (not a starvable thread-pool timer) that interrupts as soon as the execution has begun,
+            // i.e. while the source is being compiled; an Interrupt() of an idle engine is (by design) a no-op
+            var interrupter = new Thread(() => { while (!engine.IsExecuting) Thread.Yield(); engine.Interrupt(); }) { IsBackground = true };
             interrupter.Start();
             Assert.Throws<OperationCanceledException>(() => engine.Evaluate(src));
             interrupter.Join();
