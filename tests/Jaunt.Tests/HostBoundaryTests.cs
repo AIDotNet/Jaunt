@@ -165,6 +165,54 @@ public class HostBoundaryTests
     }
 }
 
+public class AmbientCapabilityTests
+{
+    [Fact]
+    public async Task BareEngineHasNoAmbientCapabilities()
+    {
+        using var engine = new JsEngine();
+        var globals = engine.Evaluate("""
+            ['setTimeout', 'setInterval', 'fetch', 'XMLHttpRequest', 'WebSocket', 'console', 'require',
+             'process', 'Deno', 'Bun', 'importScripts', 'Worker', 'navigator', 'location', 'document']
+              .filter(n => typeof globalThis[n] !== 'undefined').join()
+            """);
+        Assert.Equal("", globals.ToString());
+        // no module loader: importing a file or built-in module is rejected, nothing is read
+        var r = await engine.EvaluateAsync("import('fs').then(() => 'loaded', e => e.constructor.name)");
+        Assert.Equal("TypeError", r.ToString());
+    }
+
+    [Fact]
+    public void ConcurrentEntryFromAnotherThreadFailsFast()
+    {
+        using var engine = new JsEngine();
+        using var inside = new ManualResetEventSlim();
+        using var release = new ManualResetEventSlim();
+        engine.SetFunction("block", () => { inside.Set(); release.Wait(TimeSpan.FromSeconds(30)); });
+        var running = Task.Run(() => engine.Evaluate("block(); 42"));
+        Assert.True(inside.Wait(TimeSpan.FromSeconds(30)));
+        Exception? second = null;
+        var other = new Thread(() => { try { engine.Evaluate("1"); } catch (Exception ex) { second = ex; } });
+        other.Start();
+        Assert.True(other.Join(TimeSpan.FromSeconds(30)));   // fails at once instead of waiting for a lock
+        release.Set();
+        Assert.IsType<InvalidOperationException>(second);
+        Assert.Equal(42, running.Result.AsInt32());
+        Assert.Equal(2, engine.Evaluate("1 + 1").AsInt32());
+    }
+
+    [Fact]
+    public void RetainSourceFalseKeepsNoSourceText()
+    {
+        const string src = "function secret(a) { return a + 'token-123'; } secret.toString()";
+        var script = JsCompiler.CompileScript(src, new JsCompileOptions { RetainSource = false });
+        using var engine = new JsEngine();
+        Assert.Equal("function secret() { [native code] }", engine.Evaluate(script).ToString());
+        using var e2 = new JsEngine();
+        Assert.Contains("token-123", e2.Evaluate(src).ToString());
+    }
+}
+
 /// <summary>Tests that change the process-wide .NET RegExp time slice run alone.</summary>
 [CollectionDefinition("RegexTimeSlice", DisableParallelization = true)]
 public sealed class RegexTimeSliceCollection;

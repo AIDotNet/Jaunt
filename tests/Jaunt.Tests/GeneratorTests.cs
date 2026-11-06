@@ -91,6 +91,17 @@ public class GeneratorTests
     }
 
     [Fact]
+    public void TypeWithoutUsableConstructorIsABuildError()
+    {
+        var diags = RunGenerator("""
+            using Jaunt;
+            public class Dto { private Dto() { } public Dto(string unrelated, int other) { } public int X { get; set; } }
+            [JsSerializable(typeof(Dto))] public partial class B : JsBindingContext { }
+            """);
+        Assert.Contains(diags, d => d.Id == "JAUNT005" && d.Severity == DiagnosticSeverity.Error);
+    }
+
+    [Fact]
     public void ContextMustBePartialAndDeriveFromBindingContext()
     {
         Assert.Contains(RunGenerator("""
