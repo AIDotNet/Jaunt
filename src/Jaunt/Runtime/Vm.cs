@@ -282,8 +282,33 @@ internal sealed partial class Vm
         if (top + count > chunk.Length) return AllocRegsSlow(count, out baseIndex, out chunkIndex);
         baseIndex = top;
         chunkIndex = _chunkIndex;
-        _top = top + count;
+        top += count;
+        _top = top;
+        if (top > _hwm) _hwm = top;
         return chunk;
+    }
+
+    /// <summary>Highest register index used in the current chunk since the last clear (see <see cref="ClearRegisterStack"/>).</summary>
+    private int _hwm;
+    private int _chunkHwm;
+
+    /// <summary>
+    /// Debug aid: fill the registers a call does not initialize with a recognizable string, so that a bytecode read of
+    /// an uninitialized register shows up in test results (JAUNT_POISON_REGISTERS=1).
+    /// </summary>
+    internal static readonly bool PoisonRegisters = Environment.GetEnvironmentVariable("JAUNT_POISON_REGISTERS") == "1";
+    private static readonly JsValue s_poison = new("<<uninitialized register>>");
+
+    /// <summary>
+    /// Clears the register stack up to its high-water mark. Popped frames leave their registers behind (clearing per
+    /// call costs more than it saves); the root execution clears them once so an idle engine retains no object graph.
+    /// </summary>
+    internal void ClearRegisterStack()
+    {
+        if (_chunks.Count > 0 && _chunks[0].Length > 0) Array.Clear(_chunks[0], 0, Math.Min(_hwm, _chunks[0].Length));
+        for (int i = 1; i <= _chunkHwm && i < _chunks.Count; i++) Array.Clear(_chunks[i]);
+        _hwm = 0;
+        _chunkHwm = 0;
     }
 
     [MethodImpl(MethodImplOptions.NoInlining)]
@@ -298,6 +323,7 @@ internal sealed partial class Vm
             baseIndex = 0;
             chunkIndex = 0;
             _top = count;
+            _hwm = count;   // the previous chunk 0 is gone
             return chunk;
         }
         _chunkIndex++;
@@ -309,6 +335,7 @@ internal sealed partial class Vm
         baseIndex = 0;
         chunkIndex = _chunkIndex;
         _top = count;
+        if (_chunkIndex > _chunkHwm) _chunkHwm = _chunkIndex;
         return chunk;
     }
 
@@ -342,15 +369,47 @@ internal sealed partial class Vm
             if (!ReferenceEquals(f.Regs, regs)) f.Regs = regs;   // a pooled frame usually sits in the same chunk as last time
         }
         int n = Math.Min(args.Length, t.ParamCount);
-        if (n <= 4)
         {
-            // element stores beat the bulk copy helper for the usual one to four arguments
             var regs = f.Regs; int b = f.Base;
-            for (int i = 0; i < n; i++) regs[b + i] = args[i];
+            if (n <= 4)
+            {
+                // element stores beat the bulk copy helper for the usual one to four arguments
+                for (int i = 0; i < n; i++) regs[b + i] = args[i];
+            }
+            else args.Slice(0, n).CopyTo(regs.AsSpan(b, n));
+            // Registers are not cleared when a frame is popped (the pooled stack is cleared when the root execution
+            // ends); the callee's function-scope bindings and missing parameters must start as undefined, every other
+            // register is written before it is read (see FunctionTemplate.InitUndefEnd; PoisonRegisters checks it).
+            int initEnd = t.InitUndefEnd < 0 ? t.RegisterCount : t.InitUndefEnd;
+            for (int i = n; i < initEnd; i++) regs[b + i] = default;
+            if (PoisonRegisters) for (int i = initEnd; i < t.RegisterCount; i++) regs[b + i] = s_poison;
         }
-        else args.Slice(0, n).CopyTo(f.Regs.AsSpan(f.Base, n));
         if ((t.Flags & FunctionFlags.NeedsArgsArray) != 0) f.Args = args.ToArray();   // otherwise still null from PopFrame
         SetupFrame(f, c, thisValue, newTarget, flags);
+        return f;
+    }
+
+    /// <summary>
+    /// <see cref="PushFrame"/> for the interpreter's Call/CallMethod: <c>this</c> and the arguments are read straight from
+    /// the caller's register window (no span and no 16-byte value copies cross the call), new.target is undefined and
+    /// the frame has no flags.
+    /// </summary>
+    internal Frame PushCallFrame(JsClosure c, JsValue[] callerRegs, int thisIndex, int argStart, int argc)
+    {
+        if (Depth + 1 > MaxDepth) StackOverflowFrame();
+        var t = c.Template;
+        var f = RentFrame();
+        var regs = AllocRegs(t.RegisterCount, out f.Base, out f.ChunkIndex);
+        if (!ReferenceEquals(f.Regs, regs)) f.Regs = regs;
+        int b = f.Base;
+        int n = argc < t.ParamCount ? argc : t.ParamCount;
+        if (n <= 4) { for (int i = 0; i < n; i++) regs[b + i] = callerRegs[argStart + i]; }
+        else Array.Copy(callerRegs, argStart, regs, b, n);
+        int initEnd = t.InitUndefEnd < 0 ? t.RegisterCount : t.InitUndefEnd;
+        for (int i = n; i < initEnd; i++) regs[b + i] = default;
+        if (PoisonRegisters) for (int i = initEnd; i < t.RegisterCount; i++) regs[b + i] = s_poison;
+        if ((t.Flags & FunctionFlags.NeedsArgsArray) != 0) f.Args = new ReadOnlySpan<JsValue>(callerRegs, argStart, argc).ToArray();
+        SetupFrame(f, c, thisIndex < 0 ? default : callerRegs[thisIndex], default, FrameFlags.None);
         return f;
     }
 
@@ -419,11 +478,8 @@ internal sealed partial class Vm
         if ((flags & FrameFlags.RealmSwitch) != 0) Realm = f.CallerRealm;
         if ((flags & FrameFlags.OwnsRegs) == 0)
         {
-            var regs = f.Regs; int b = f.Base, n = f.T.RegisterCount;
-            if (n <= 24) { for (int i = 0; i < n; i++) regs[b + i] = default; }
-            else Array.Clear(regs, b, n);
             if (_chunkIndex != f.ChunkIndex) { _chunkIndex = f.ChunkIndex; _chunk = _chunks[_chunkIndex]; }
-            _top = b;
+            _top = f.Base;
             f.Args = null;
             f.Caller = null;
             f.NewTarget = default;
@@ -436,6 +492,8 @@ internal sealed partial class Vm
     /// </summary>
     internal void ReleasePooledFrames()
     {
+        ClearRegisterStack();
+        if (_sortScratch != null && _sortScratch.Length > 1 << 12) _sortScratch = null;   // an idle engine keeps at most 64 KB of sort scratch
         var pool = _framePool;
         for (int i = 0; i < pool.Length; i++)
         {
@@ -524,6 +582,48 @@ internal sealed partial class Vm
         }
         var f = PushFrame(c, thisValue, args, JsValue.FromObject(newTarget), FrameFlags.Construct);
         return Run(f);
+    }
+
+    /// <summary>
+    /// Prepares repeated calls of <paramref name="fn"/> from a builtin loop (sort comparators, callbacks): true when it is
+    /// a plain closure that <see cref="CallClosureFast"/> may run; the native stack is probed once here, so the loop
+    /// does not probe per call (each native recursion level still probes on entry).
+    /// </summary>
+    internal bool TryPrepareFastCalls(in JsValue fn, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out JsClosure? closure)
+    {
+        if (fn.IsObject && fn.Ref is JsClosure c && (c.Template.Flags & (FunctionFlags.Generator | FunctionFlags.Async)) == 0 && !c.IsClassConstructor)
+        {
+            EnsureStack();
+            closure = c;
+            return true;
+        }
+        closure = null;
+        return false;
+    }
+
+    /// <summary>Calls a closure accepted by <see cref="TryPrepareFastCalls"/>: push and run, nothing else.</summary>
+    internal JsValue CallClosureFast(JsClosure c, JsValue thisValue, ReadOnlySpan<JsValue> args)
+    {
+        var f = PushFrame(c, thisValue, args, JsValue.Undefined, FrameFlags.None);
+        return Run(f);
+    }
+
+    private JsValue[]? _sortScratch;
+
+    /// <summary>A merge buffer of at least <paramref name="n"/> elements; taken out of the Vm while in use (re-entrant sorts allocate their own).</summary>
+    internal JsValue[] TakeSortScratch(int n)
+    {
+        var s = _sortScratch;
+        _sortScratch = null;
+        if (s == null || s.Length < n) s = new JsValue[Math.Max(n, 64)];
+        return s;
+    }
+
+    /// <summary>Returns the buffer cleared of references; buffers over 64K elements (1 MB) are not retained.</summary>
+    internal void ReturnSortScratch(JsValue[] s, int used)
+    {
+        Array.Clear(s, 0, used);
+        if (s.Length <= 1 << 16) _sortScratch = s;
     }
 
     private void EnsureStack()
@@ -668,6 +768,8 @@ internal sealed partial class Vm
     internal void ResetStack()
     {
         for (int i = 0; i < _chunks.Count; i++) Array.Clear(_chunks[i]);
+        _hwm = 0;
+        _chunkHwm = 0;
         for (int i = 0; i < _framePool.Length; i++) _framePool[i] = null;
         _chunkIndex = 0;
         _chunk = _chunks[0];

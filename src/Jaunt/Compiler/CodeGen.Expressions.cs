@@ -155,7 +155,7 @@ internal sealed partial class CodeGen
             case RegExpLiteral re:
             {
                 int d = Dst(dst);
-                _fb.Emit(Op.NewRegExp, d, _fb.Const(re.RegExp.Pattern), _fb.Const(re.RegExp.Flags));
+                _fb.Emit(Op.NewRegExp, d, _fb.Const(re.RegExp.Pattern), _fb.Const(re.RegExp.Flags), _fb.NewIc());
                 return d;
             }
             case BigIntLiteral bi:
@@ -351,14 +351,16 @@ internal sealed partial class CodeGen
     {
         int d = Dst(dst);
         _fb.Emit(Op.NewArray, d, ae.Elements.Count);
+        int remaining = ae.Elements.Count;
         foreach (var el in ae.Elements)
         {
             int m = Mark;
+            remaining--;
             if (el == null) _fb.Emit(Op.ArrayPushHole, d);
             else if (el is SpreadElement sp)
             {
                 int v = Expr(sp.Argument);
-                _fb.Emit(Op.ArraySpread, d, v);
+                _fb.Emit(Op.ArraySpread, d, v, remaining);   // reserve room for the elements that follow
             }
             else
             {
@@ -785,7 +787,7 @@ internal sealed partial class CodeGen
         if (t.IsSuper) _fb.Emit(Op.GetSuper, dst, t.Key, t.This, t.Obj);
         else if (t.IsPrivate) _fb.Emit(Op.PrivateGet, dst, t.Obj, t.Key);
         else if (t.Name != null) _fb.Emit(Op.GetProp, dst, t.Obj, _fb.Const(t.Name), t.Ic);
-        else _fb.Emit(Op.GetElem, dst, t.Obj, t.Key);
+        else _fb.Emit(Op.GetElem, dst, t.Obj, t.Key, _fb.NewIc());
     }
 
     private void WriteMemberTarget(in MemberTarget t, int src)
@@ -793,7 +795,7 @@ internal sealed partial class CodeGen
         if (t.IsSuper) _fb.Emit(Op.SetSuper, t.Key, src, t.This, t.Obj);
         else if (t.IsPrivate) _fb.Emit(Op.PrivateSet, t.Obj, t.Key, src);
         else if (t.Name != null) _fb.Emit(Op.SetProp, t.Obj, _fb.Const(t.Name), src, _fb.NewIc());
-        else _fb.Emit(Op.SetElem, t.Obj, t.Key, src);
+        else _fb.Emit(Op.SetElem, t.Obj, t.Key, src, _fb.NewIc());
     }
 
     private int LoadPrivateName(PrivateIdentifier pid)
@@ -840,7 +842,7 @@ internal sealed partial class CodeGen
                 return;
             }
             int k = Expr(me.Property);
-            _fb.Emit(Op.GetElem, d, obj, k);
+            _fb.Emit(Op.GetElem, d, obj, k, _fb.NewIc());
         }
         else
         {
@@ -875,13 +877,15 @@ internal sealed partial class CodeGen
     {
         int arr = Temp();
         _fb.Emit(Op.NewArray, arr, args.Count);
+        int remaining = args.Count;
         foreach (var a in args)
         {
             int m = Mark;
+            remaining--;
             if (a is SpreadElement sp)
             {
                 int v = Expr(sp.Argument);
-                _fb.Emit(Op.ArraySpread, arr, v);
+                _fb.Emit(Op.ArraySpread, arr, v, remaining);
             }
             else
             {
@@ -1314,7 +1318,7 @@ internal sealed partial class CodeGen
                         {
                             int rr = EmitResolveRef(dynId);
                             if (keyReg < 0) _fb.Emit(Op.GetProp, v, value, _fb.Const(name!), _fb.NewIc());
-                            else _fb.Emit(Op.GetElem, v, value, keyReg);
+                            else _fb.Emit(Op.GetElem, v, value, keyReg, _fb.NewIc());
                             if (dynDefault != null)
                             {
                                 int skip = _fb.NewLabel();
@@ -1331,7 +1335,7 @@ internal sealed partial class CodeGen
                         {
                             var mt = PrepareMemberTarget(memberTarget, deferKey: true);
                             if (keyReg < 0) _fb.Emit(Op.GetProp, v, value, _fb.Const(name!), _fb.NewIc());
-                            else _fb.Emit(Op.GetElem, v, value, keyReg);
+                            else _fb.Emit(Op.GetElem, v, value, keyReg, _fb.NewIc());
                             EmitDefault(v, memberDefault);
                             WriteMemberTarget(mt, v);
                             ki++;
@@ -1344,7 +1348,7 @@ internal sealed partial class CodeGen
                         }
                         else
                         {
-                            _fb.Emit(Op.GetElem, v, value, keyReg);
+                            _fb.Emit(Op.GetElem, v, value, keyReg, _fb.NewIc());
                         }
                         ki++;
                         BindPattern(prop.Value, v, mode);

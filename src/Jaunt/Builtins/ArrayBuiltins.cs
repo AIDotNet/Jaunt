@@ -1,4 +1,5 @@
 using System;
+using System.Runtime.CompilerServices;
 using System.Collections.Generic;
 using System.Text;
 
@@ -429,10 +430,21 @@ internal static class ArrayBuiltins
             if (len == 0) return new JsValue(-1);
             double n = a.Length > 1 ? Operations.ToIntegerOrInfinity(realm, a[1]) : len - 1;
             long k = n >= 0 ? (long)Math.Min(n, len - 1) : (long)(len + n);
+            var target = a[0];
+            if (o is JsArray arr && arr.Dense && len <= arr.Items.Length && !JsArray.ProtoChainMayHaveIndices(arr.Proto))
+            {
+                for (long i = k; i >= 0; i--)
+                {
+                    var v = arr.Items[i];
+                    if (v.IsNotEmpty && Operations.StrictEquals(v, target)) return new JsValue(i);
+                }
+                realm.Vm.Tick((int)Math.Min(len / 64, 1000));
+                return new JsValue(-1);
+            }
             for (long i = k; i >= 0; i--)
             {
                 var key = Key(i);
-                if (o.HasProperty(key) && Operations.StrictEquals(o.Get(key), a[0])) return new JsValue(i);
+                if (o.HasProperty(key) && Operations.StrictEquals(o.Get(key), target)) return new JsValue(i);
                 realm.Vm.Tick();
             }
             return new JsValue(-1);
@@ -481,6 +493,12 @@ internal static class ArrayBuiltins
             long from = Operations.RelativeIndex(realm, a[1], len, 0);
             long final = Operations.RelativeIndex(realm, a[2], len, len);
             long count = Math.Min(final - from, len - to);
+            if (count > 0 && o is JsArray arr && arr.Dense && len <= arr.Items.Length && arr.Extensible && arr.LengthWritable && !JsArray.ProtoChainMayHaveIndices(arr.Proto))
+            {
+                Array.Copy(arr.Items, from, arr.Items, to, count);   // overlap-safe
+                realm.Vm.Tick((int)Math.Min(count / 64, 1000));
+                return JsValue.FromObject(o);
+            }
             int dir = 1;
             if (from < to && to < from + count) { dir = -1; from += count - 1; to += count - 1; }
             while (count-- > 0)
@@ -530,10 +548,10 @@ internal static class ArrayBuiltins
             var realm = a.Realm;
             var o = Operations.ToObject(realm, a.This);
             long len = Operations.LengthOfArrayLike(realm, o);
-            var res = CreateArray(realm, len);
+            var res = CreateArrayForAppend(realm, len);
             for (long k = 0; k < len; k++)
             {
-                res.CreateDataPropertyOrThrow(Key(k), GetAt(o, len - k - 1, JsValue.FromObject(o)));
+                res.Push(GetAt(o, len - k - 1, JsValue.FromObject(o)));
                 realm.Vm.Tick();
             }
             return JsValue.FromObject(res);
@@ -551,11 +569,11 @@ internal static class ArrayBuiltins
             else skip = (long)Math.Min(Math.Max(Operations.ToIntegerOrInfinity(realm, a[1]), 0), len - start);
             double newLen = (double)len + insert - skip;
             if (newLen > 9007199254740991) throw JsErrors.TypeError(realm, "Invalid array length");
-            var res = CreateArray(realm, (long)newLen);
+            var res = CreateArrayForAppend(realm, (long)newLen);
             long i = 0;
-            for (; i < start; i++) { res.CreateDataPropertyOrThrow(Key(i), GetAt(o, i, JsValue.FromObject(o))); realm.Vm.Tick(); }
-            for (int j = 2; j < a.Length; j++) res.CreateDataPropertyOrThrow(Key(i++), a.Args[j]);
-            for (long r2 = start + skip; i < (long)newLen; i++, r2++) { res.CreateDataPropertyOrThrow(Key(i), GetAt(o, r2, JsValue.FromObject(o))); realm.Vm.Tick(); }
+            for (; i < start; i++) { res.Push(GetAt(o, i, JsValue.FromObject(o))); realm.Vm.Tick(); }
+            for (int j = 2; j < a.Length; j++) { res.Push(a.Args[j]); i++; }
+            for (long r2 = start + skip; i < (long)newLen; i++, r2++) { res.Push(GetAt(o, r2, JsValue.FromObject(o))); realm.Vm.Tick(); }
             return JsValue.FromObject(res);
         });
         r.Method(proto, "with", 2, static (in NativeArgs a) =>
@@ -566,10 +584,10 @@ internal static class ArrayBuiltins
             double rel = Operations.ToIntegerOrInfinity(realm, a[0]);
             double idx = rel >= 0 ? rel : len + rel;
             if (idx < 0 || idx >= len) throw JsErrors.RangeError(realm, "Invalid index");
-            var res = CreateArray(realm, len);
+            var res = CreateArrayForAppend(realm, len);
             for (long k = 0; k < len; k++)
             {
-                res.CreateDataPropertyOrThrow(Key(k), k == (long)idx ? a[1] : GetAt(o, k, JsValue.FromObject(o)));
+                res.Push(k == (long)idx ? a[1] : GetAt(o, k, JsValue.FromObject(o)));
                 realm.Vm.Tick();
             }
             return JsValue.FromObject(res);
@@ -629,6 +647,13 @@ internal static class ArrayBuiltins
         if (!Operations.IsConstructor(c)) throw JsErrors.TypeError(realm, "Array species is not a constructor");
         var lenV = new JsValue((double)length);
         return realm.Vm.Construct(c, new ReadOnlySpan<JsValue>(in lenV)).AsObjectUnchecked;
+    }
+
+    /// <summary>ArrayCreate(length) for results that are then filled front to back with Push: capacity reserved, length 0.</summary>
+    private static JsArray CreateArrayForAppend(Realm realm, long length)
+    {
+        if (length > uint.MaxValue) throw JsErrors.RangeError(realm, "Invalid array length");
+        return new JsArray(realm, (int)Math.Min(length, 1 << 16));
     }
 
     private static JsArray CreateArray(Realm realm, long length)
@@ -763,6 +788,7 @@ internal static class ArrayBuiltins
         var args = new JsValue[3];
         args[2] = JsValue.FromObject(o);
         var vm = realm.Vm;
+        vm.TryPrepareFastCalls(JsValue.FromObject(fn), out var fast);
         for (long i = 0; i < len; i++)
         {
             vm.Tick();
@@ -776,7 +802,7 @@ internal static class ArrayBuiltins
             }
             args[0] = v;
             args[1] = new JsValue(i);
-            var r = fn.Call(thisArg, args);
+            var r = fast != null ? vm.CallClosureFast(fast, thisArg, args) : fn.Call(thisArg, args);
             switch (kind)
             {
                 case 1:
@@ -806,14 +832,17 @@ internal static class ArrayBuiltins
         if (!cb.IsFunction) throw JsErrors.TypeError(realm, $"{JsErrors.Describe(cb)} is not a function");
         var args = new JsValue[3];
         args[2] = JsValue.FromObject(o);
+        var vm = realm.Vm;
+        vm.TryPrepareFastCalls(cb, out var fast);
         for (long n = 0; n < len; n++)
         {
             long i = fromEnd ? len - 1 - n : n;
             var v = GetAt(o, i, JsValue.FromObject(o));
             args[0] = v;
             args[1] = new JsValue(i);
-            if (Operations.ToBoolean(realm.Vm.Call(cb, a[1], args))) return index ? new JsValue(i) : v;
-            realm.Vm.Tick();
+            var r = fast != null ? vm.CallClosureFast(fast, a[1], args) : vm.Call(cb, a[1], args);
+            if (Operations.ToBoolean(r)) return index ? new JsValue(i) : v;
+            vm.Tick();
         }
         return index ? new JsValue(-1) : JsValue.Undefined;
     }
@@ -841,9 +870,11 @@ internal static class ArrayBuiltins
         if (!have) throw JsErrors.TypeError(realm, "Reduce of empty array with no initial value");
         var args = new JsValue[4];
         args[3] = self;
+        var vm = realm.Vm;
+        vm.TryPrepareFastCalls(cb, out var fast);
         for (; k < len; k++)
         {
-            realm.Vm.Tick();
+            vm.Tick();
             long i = right ? len - 1 - k : k;
             JsValue v;
             if (o is JsArray arr && arr.TryGetDense((uint)i, out v)) { }
@@ -856,7 +887,7 @@ internal static class ArrayBuiltins
             args[0] = acc;
             args[1] = v;
             args[2] = new JsValue(i);
-            acc = realm.Vm.Call(cb, JsValue.Undefined, args);
+            acc = fast != null ? vm.CallClosureFast(fast, JsValue.Undefined, args) : vm.Call(cb, JsValue.Undefined, args);
         }
         return acc;
     }
@@ -864,54 +895,105 @@ internal static class ArrayBuiltins
     private static void SortObject(Realm realm, JsObject o, JsValue cmp)
     {
         long len = Operations.LengthOfArrayLike(realm, o);
-        var items = new List<JsValue>((int)Math.Min(len, 1 << 20));
-        long holes = 0;
+        var vm = realm.Vm;
+        // SortIndexedProperties: collect the present values first (the comparator may mutate the object), sort the
+        // list, write back. The list is one exactly sized buffer for ordinary lengths; the merge buffer is the Vm's
+        // reusable scratch (taken out for the duration, so a comparator that sorts another array gets its own).
+        var items = new JsValue[(int)Math.Min(len, 1 << 20)];
+        int count = 0;
         for (long i = 0; i < len; i++)
         {
-            realm.Vm.Tick();
-            var key = Key(i);
-            if (o is JsArray arr && arr.TryGetDense((uint)i, out var dv)) items.Add(dv);
-            else if (o.HasProperty(key)) items.Add(o.Get(key));
-            else holes++;
-        }
-        var args = new JsValue[2];
-        Comparison<JsValue> comparison = (x, y) =>
-        {
-            if (x.IsUndefined) return y.IsUndefined ? 0 : 1;
-            if (y.IsUndefined) return -1;
-            realm.Vm.Tick();
-            if (!cmp.IsUndefined)
+            vm.Tick();
+            JsValue v;
+            if (o is JsArray arr && arr.TryGetDense((uint)i, out v)) { }
+            else
             {
-                args[0] = x; args[1] = y;
-                double v = Operations.ToNumber(realm, realm.Vm.Call(cmp, JsValue.Undefined, args));
-                return double.IsNaN(v) ? 0 : v < 0 ? -1 : v > 0 ? 1 : 0;
+                var key = Key(i);
+                if (!o.HasProperty(key)) continue;
+                v = o.Get(key);
             }
+            if (count == items.Length) Array.Resize(ref items, items.Length * 2);
+            items[count++] = v;
+        }
+        if (count > 1)
+        {
+            var tmp = vm.TakeSortScratch(count);
+            try
+            {
+                if (cmp.IsUndefined) { var c = new DefaultSortCmp(realm); MergeSort(items, tmp, count, ref c); }
+                else if (vm.TryPrepareFastCalls(cmp, out var closure)) { var c = new ClosureSortCmp(vm, closure, new JsValue[2]); MergeSort(items, tmp, count, ref c); }
+                else { var c = new GenericSortCmp(realm, cmp, new JsValue[2]); MergeSort(items, tmp, count, ref c); }
+            }
+            finally { vm.ReturnSortScratch(tmp, count); }
+        }
+        for (int i = 0; i < count; i++) { SetAt(o, i, items[i], JsValue.FromObject(o)); vm.Tick(); }
+        for (long i = count; i < len; i++) { o.Delete(Key(i)); vm.Tick(); }
+    }
+
+    private interface ISortCmp { int Compare(in JsValue x, in JsValue y); }
+
+    /// <summary>Undefined sorts last; returns false when both are defined (the comparator decides).</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static bool UndefinedOrder(in JsValue x, in JsValue y, out int r)
+    {
+        if (x.IsUndefined) { r = y.IsUndefined ? 0 : 1; return true; }
+        if (y.IsUndefined) { r = -1; return true; }
+        r = 0;
+        return false;
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static int Sign(double v) => double.IsNaN(v) ? 0 : v < 0 ? -1 : v > 0 ? 1 : 0;
+
+    /// <summary>A plain closure comparator: pushed and run directly (no delegate, no per-call native stack probe).</summary>
+    private struct ClosureSortCmp(Vm vm, JsClosure closure, JsValue[] args) : ISortCmp
+    {
+        public int Compare(in JsValue x, in JsValue y)
+        {
+            if (UndefinedOrder(x, y, out int r)) return r;
+            vm.Tick();
+            args[0] = x; args[1] = y;
+            var v = vm.CallClosureFast(closure, JsValue.Undefined, args);
+            return Sign(v.IsNumber ? v.Num : Operations.ToNumber(vm.Realm, v));
+        }
+    }
+
+    private struct GenericSortCmp(Realm realm, JsValue cmp, JsValue[] args) : ISortCmp
+    {
+        public int Compare(in JsValue x, in JsValue y)
+        {
+            if (UndefinedOrder(x, y, out int r)) return r;
+            realm.Vm.Tick();
+            args[0] = x; args[1] = y;
+            return Sign(Operations.ToNumber(realm, realm.Vm.Call(cmp, JsValue.Undefined, args)));
+        }
+    }
+
+    private struct DefaultSortCmp(Realm realm) : ISortCmp
+    {
+        public int Compare(in JsValue x, in JsValue y)
+        {
+            if (UndefinedOrder(x, y, out int r)) return r;
+            realm.Vm.Tick();
             if (x.IsNumber && y.IsNumber)
             {
                 // default sort compares string forms; fast path for integers keeps correct ordering only if equal strings
                 return string.CompareOrdinal(NumberFormatting.ToString(x.Num), NumberFormatting.ToString(y.Num));
             }
             return string.CompareOrdinal(Operations.ToString(realm, x), Operations.ToString(realm, y));
-        };
-        var arr2 = items.ToArray();
-        MergeSort(arr2, comparison);
-        for (int i = 0; i < arr2.Length; i++) { SetAt(o, i, arr2[i], JsValue.FromObject(o)); realm.Vm.Tick(); }
-        for (long i = arr2.Length; i < len; i++) { o.Delete(Key(i)); realm.Vm.Tick(); }
-        _ = holes;
+        }
     }
 
-    /// <summary>Stable merge sort tolerant of inconsistent comparators.</summary>
-    private static void MergeSort(JsValue[] a, Comparison<JsValue> cmp)
+    /// <summary>Stable bottom-up merge sort of <c>a[0..n)</c>, tolerant of inconsistent comparators.</summary>
+    private static void MergeSort<TCmp>(JsValue[] a, JsValue[] tmp, int n, ref TCmp cmp) where TCmp : struct, ISortCmp
     {
-        if (a.Length < 2) return;
-        var tmp = new JsValue[a.Length];
-        for (int width = 1; width < a.Length; width *= 2)
+        for (int width = 1; width < n; width *= 2)
         {
-            for (int lo = 0; lo < a.Length - width; lo += 2 * width)
+            for (int lo = 0; lo < n - width; lo += 2 * width)
             {
-                int mid = lo + width, hi = Math.Min(lo + 2 * width, a.Length);
+                int mid = lo + width, hi = Math.Min(lo + 2 * width, n);
                 int i = lo, j = mid, k = lo;
-                while (i < mid && j < hi) tmp[k++] = cmp(a[j], a[i]) < 0 ? a[j++] : a[i++];
+                while (i < mid && j < hi) tmp[k++] = cmp.Compare(a[j], a[i]) < 0 ? a[j++] : a[i++];
                 while (i < mid) tmp[k++] = a[i++];
                 while (j < hi) tmp[k++] = a[j++];
                 Array.Copy(tmp, lo, a, lo, hi - lo);
@@ -922,16 +1004,31 @@ internal static class ArrayBuiltins
     /// <summary>FlattenIntoArray (23.1.3.13.1).</summary>
     private static void Flatten(Realm realm, JsObject target, ref long targetIndex, JsObject source, long len, double depth, JsValue mapper, JsValue thisArg)
     {
-        var args = new JsValue[3];
+        var vm = realm.Vm;
+        JsValue[]? args = null;
+        JsClosure? fast = null;
+        if (!mapper.IsUndefined)
+        {
+            args = new JsValue[3];
+            args[2] = JsValue.FromObject(source);
+            vm.TryPrepareFastCalls(mapper, out fast);
+        }
         for (long i = 0; i < len; i++)
         {
-            var key = Key(i);
-            if (!source.HasProperty(key)) continue;
-            var v = source.Get(key);
-            if (!mapper.IsUndefined)
+            // a present own element of a dense array is exactly what HasProperty + Get would observe (re-checked per
+            // element: the mapper may change the array)
+            JsValue v;
+            if (source is JsArray sa && sa.TryGetDense((uint)i, out v)) { }
+            else
             {
-                args[0] = v; args[1] = new JsValue((double)i); args[2] = JsValue.FromObject(source);
-                v = realm.Vm.Call(mapper, thisArg, args);
+                var key = Key(i);
+                if (!source.HasProperty(key)) continue;
+                v = source.Get(key);
+            }
+            if (args != null)
+            {
+                args[0] = v; args[1] = new JsValue((double)i);
+                v = fast != null ? vm.CallClosureFast(fast, thisArg, args) : vm.Call(mapper, thisArg, args);
             }
             if (depth > 0 && IsArray(realm, v))
             {
@@ -944,10 +1041,9 @@ internal static class ArrayBuiltins
             else
             {
                 if (targetIndex >= 9007199254740991) throw JsErrors.TypeError(realm, "Array too long");
-                target.CreateDataPropertyOrThrow(Key(targetIndex), v);
-                targetIndex++;
+                AppendResult(target, ref targetIndex, v);
             }
-            realm.Vm.Tick();
+            vm.Tick();
         }
     }
 

@@ -1,6 +1,7 @@
 using System;
 using System.Buffers.Binary;
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using System.Collections.Generic;
 
 namespace Jaunt.Runtime;
@@ -170,14 +171,55 @@ internal sealed class JsTypedArray : JsObject
     }
 
     /// <summary>Interpreter fast path for <c>ta[key]</c> with a number key: an integer index inside a live view.</summary>
+    /// <summary>
+    /// Interpreter fast path for <c>ta[key]</c> with a number key on a fixed-length view: one bounds check against the
+    /// backing store and a direct read. False for anything else (fractional or out-of-range keys, length-tracking
+    /// views, detached buffers, big-endian hosts), which the generic path handles with the full semantics.
+    /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     internal bool TryGetElementFast(double key, out JsValue value)
     {
         int idx = (int)key;
+        if (idx == key && BitConverter.IsLittleEndian && !Buffer.Detached)
+        {
+            var data = Buffer.Data;
+            int shift = ElementShift(Kind);
+            // the whole view must be in bounds (a fixed-length view over a shrunk resizable buffer is out of bounds as
+            // a whole); a length-tracking view covers whatever the buffer currently holds past the offset
+            int len = _length;
+            if (len >= 0) { if ((long)ByteOffset + ((long)len << shift) > data.Length) goto Slow; }
+            else { if (ByteOffset > data.Length) goto Slow; len = (data.Length - ByteOffset) >> shift; }
+            if ((uint)idx < (uint)len)
+            {
+                ref byte b = ref Unsafe.Add(ref MemoryMarshal.GetArrayDataReference(data), (nint)(ByteOffset + ((long)idx << shift)));
+                switch (Kind)
+                {
+                    case TypedKind.Float64: value = JsValue.FromExternalDouble(Unsafe.ReadUnaligned<double>(ref b)); return true;
+                    case TypedKind.Int32: value = new JsValue(Unsafe.ReadUnaligned<int>(ref b)); return true;
+                    case TypedKind.Uint32: value = new JsValue(Unsafe.ReadUnaligned<uint>(ref b)); return true;
+                    case TypedKind.Uint8: case TypedKind.Uint8Clamped: value = new JsValue(b); return true;
+                    case TypedKind.Int8: value = new JsValue((sbyte)b); return true;
+                    case TypedKind.Int16: value = new JsValue(Unsafe.ReadUnaligned<short>(ref b)); return true;
+                    case TypedKind.Uint16: value = new JsValue(Unsafe.ReadUnaligned<ushort>(ref b)); return true;
+                    case TypedKind.Float32: value = JsValue.FromExternalDouble(Unsafe.ReadUnaligned<float>(ref b)); return true;
+                }
+            }
+        }
+    Slow:
+        // kinds without a direct case (Float16, BigInt views), length-tracking views: the checked element read
         if (idx == key && (uint)idx < (uint)Length) { value = GetElement(idx); return true; }
         value = default;
         return false;
     }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static int ElementShift(TypedKind k) => k switch
+    {
+        TypedKind.Int8 or TypedKind.Uint8 or TypedKind.Uint8Clamped => 0,
+        TypedKind.Int16 or TypedKind.Uint16 or TypedKind.Float16 => 1,
+        TypedKind.Int32 or TypedKind.Uint32 or TypedKind.Float32 => 2,
+        _ => 3,
+    };
 
     /// <summary>
     /// Interpreter fast path for <c>ta[key] = v</c> with number key and value on a non-BigInt view: a numeric key that is
@@ -189,6 +231,33 @@ internal sealed class JsTypedArray : JsObject
     {
         if (!v.IsNumber || Kind is TypedKind.BigInt64 or TypedKind.BigUint64 || Buffer.Immutable) return false;
         int idx = (int)key;
+        if (idx == key && BitConverter.IsLittleEndian && !Buffer.Detached)
+        {
+            var data = Buffer.Data;
+            int shift = ElementShift(Kind);
+            // the whole view must be in bounds (a fixed-length view over a shrunk resizable buffer is out of bounds as
+            // a whole); a length-tracking view covers whatever the buffer currently holds past the offset
+            int len = _length;
+            if (len >= 0) { if ((long)ByteOffset + ((long)len << shift) > data.Length) goto Slow; }
+            else { if (ByteOffset > data.Length) goto Slow; len = (data.Length - ByteOffset) >> shift; }
+            if ((uint)idx < (uint)len)
+            {
+                ref byte b = ref Unsafe.Add(ref MemoryMarshal.GetArrayDataReference(data), (nint)(ByteOffset + ((long)idx << shift)));
+                double d = v.Num;
+                switch (Kind)
+                {
+                    case TypedKind.Float64: Unsafe.WriteUnaligned(ref b, d); return true;
+                    case TypedKind.Int32: Unsafe.WriteUnaligned(ref b, Operations.DoubleToInt32(d)); return true;
+                    case TypedKind.Uint32: Unsafe.WriteUnaligned(ref b, (uint)Operations.DoubleToInt32(d)); return true;
+                    case TypedKind.Uint8: b = (byte)Operations.DoubleToInt32(d); return true;
+                    case TypedKind.Int8: b = (byte)(sbyte)Operations.DoubleToInt32(d); return true;
+                    case TypedKind.Int16: Unsafe.WriteUnaligned(ref b, (short)Operations.DoubleToInt32(d)); return true;
+                    case TypedKind.Uint16: Unsafe.WriteUnaligned(ref b, (ushort)Operations.DoubleToInt32(d)); return true;
+                    case TypedKind.Float32: Unsafe.WriteUnaligned(ref b, (float)d); return true;
+                }
+            }
+        }
+    Slow:
         if (idx == key && (uint)idx < (uint)Length) SetElement(idx, v.Num);
         return true;
     }

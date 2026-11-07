@@ -68,7 +68,7 @@ internal sealed class JsRegExp : JsObject
 
 internal static class RegExpBuiltins
 {
-    private sealed class CacheEntry { public SysRegex? Regex; public JsRegex? Native; public JsRegex? NativeIgnoreCase; public int Groups; public string[] Names = Array.Empty<string>(); public int[][] NameGroups = Array.Empty<int[]>(); public int DotnetMaxGroup; public JsRegex? SliceFallback; public int[]? SliceFallbackGroups; public long Bytes; }
+    private sealed class CacheEntry { public bool Cacheable; public SysRegex? Regex; public JsRegex? Native; public JsRegex? NativeIgnoreCase; public int Groups; public string[] Names = Array.Empty<string>(); public int[][] NameGroups = Array.Empty<int[]>(); public int DotnetMaxGroup; public JsRegex? SliceFallback; public int[]? SliceFallbackGroups; public long Bytes; }
     private static readonly Dictionary<(string, string), CacheEntry> s_cache = new();
     private const int CacheLimit = 512;
     private const int MaxCachedPatternLength = 16 * 1024;
@@ -339,7 +339,25 @@ internal static class RegExpBuiltins
         throw JsErrors.TypeError(a.Realm, $"RegExp.prototype.{name} called on incompatible receiver {a.This}");
     }
 
-    public static JsRegExp Create(Realm realm, string pattern, string flags, JsObject? proto = null)
+    public static JsRegExp Create(Realm realm, string pattern, string flags, JsObject? proto = null) =>
+        FromEntry(realm, GetEntry(realm, pattern, flags), pattern, flags, proto);
+
+    /// <summary>
+    /// A regular expression literal: the compiled program is cached at the evaluating site (<paramref name="siteCache"/>
+    /// is the site's feedback cell, Realm-private), so re-evaluating the literal skips the process-wide cache and its
+    /// lock. The object itself is new on every evaluation, as the specification requires.
+    /// </summary>
+    internal static JsRegExp CreateAtSite(Realm realm, string pattern, string flags, ref object? siteCache)
+    {
+        if (siteCache is not CacheEntry entry)
+        {
+            entry = GetEntry(realm, pattern, flags);
+            if (entry.Cacheable) siteCache = entry;   // same size limits as the process-wide cache
+        }
+        return FromEntry(realm, entry, pattern, flags, null);
+    }
+
+    private static CacheEntry GetEntry(Realm realm, string pattern, string flags)
     {
         foreach (char c in flags)
         {
@@ -445,7 +463,8 @@ internal static class RegExpBuiltins
             realm.ChargeBytes((nativeProgram?.CodeBytes ?? 0) + dotnetBytes);   // sets were charged as they were built
             entry.Bytes = programBytes;
             // the cache is process-wide and outlives engines: bounded by entries and by bytes, huge programs not kept
-            if (pattern.Length <= MaxCachedPatternLength && programBytes <= MaxCachedProgramBytes)
+            entry.Cacheable = pattern.Length <= MaxCachedPatternLength && programBytes <= MaxCachedProgramBytes;
+            if (entry.Cacheable)
             lock (s_cache)
             {
                 if (s_cache.Count >= CacheLimit || s_cacheBytes + programBytes > MaxCacheBytes) { s_cache.Clear(); s_cacheBytes = 0; }
@@ -454,6 +473,11 @@ internal static class RegExpBuiltins
                 s_cacheBytes += programBytes;
             }
         }
+        return entry;
+    }
+
+    private static JsRegExp FromEntry(Realm realm, CacheEntry entry, string pattern, string flags, JsObject? proto)
+    {
         var re = new JsRegExp(realm, proto ?? realm.RegExpPrototype)
         {
             Regex = entry.Regex,
