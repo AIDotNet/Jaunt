@@ -48,6 +48,9 @@ postponement rules) instead of through ICU, whose Hebrew calendar is wrong for y
 and `Intl.DateTimeFormat` shows ECMA-402's eras before a calendar's epoch, where ICU's differ — CLDR's "Before Hijrah"
 era for the Islamic calendars and the single "am" era with negative years for Coptic (`formatToParts/era.js`).
 
+Product decision (2026-11-07): Jaunt uses the operating system's ICU and does not bundle its own, so `intl402/`
+results follow the platform's locale data; the differences below are accepted and checked by CI to be the only ones.
+
 Nothing is skipped. With an older platform ICU (e.g. Ubuntu 24.04's ICU 74 / CLDR 44) about 21 more `intl402/` files
 fail because they encode newer locale data (including the Islamic "Before Hijrah" era name, new in CLDR 48), tzdata links
 or ICU 76+ Chinese calendar results (and one test comparing Intl's ICU Hebrew calendar with Temporal's exact one); they are listed
