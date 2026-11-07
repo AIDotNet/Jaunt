@@ -353,13 +353,17 @@ internal static class ArrayBuiltins
             var o = Operations.ToObject(realm, a.This);
             long len = Operations.LengthOfArrayLike(realm, o);
             var sb = new StringBuilder();
+            int charged = 0;
             for (long i = 0; i < len; i++)
             {
                 realm.Vm.Tick();
                 if (i > 0) sb.Append(',');
                 var v = GetAt(o, i, JsValue.FromObject(o));
                 if (!v.IsNullOrUndefined) sb.Append(Operations.ToString(realm, Operations.Invoke(realm, v, "toLocaleString", localeArgs)));
+                if (sb.Length > realm.MaxStringLength) throw JsErrors.RangeError(realm, "Invalid string length");
+                if (sb.Length - charged >= 4096) { realm.ChargeOutput(sb.Length - charged); charged = sb.Length; }
             }
+            realm.ChargeOutput(sb.Length - charged);
             return new JsValue(sb.ToString());
         });
         r.Method(proto, "reverse", 0, static (in NativeArgs a) =>

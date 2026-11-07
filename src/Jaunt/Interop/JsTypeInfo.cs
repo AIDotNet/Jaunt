@@ -53,6 +53,9 @@ public sealed class JsConversionContext
         if ((before >> 12) != (_nodes >> 12)) Realm.Vm.Tick((int)Math.Min(int.MaxValue, Math.Max(1, (_nodes - before) >> 12)));
     }
 
+    /// <summary>Charges one primitive value written to JS (strings are charged with their payload by <see cref="String"/>).</summary>
+    internal void CountValue() => Count();
+
     /// <summary>Charges a string read from or written to JS.</summary>
     internal void CountString(int length) => Count(ValueBytes + 2L * length);
 
@@ -237,7 +240,11 @@ public static class JsTypeInfo
         private readonly Func<JsConversionContext, T, JsValue> _write;
         public Prim(Func<JsConversionContext, JsValue, T> read, Func<JsConversionContext, T, JsValue> write) { _read = read; _write = write; }
         public override T Read(JsConversionContext context, JsValue value) => _read(context, value);
-        public override JsValue Write(JsConversionContext context, T value) => _write(context, value);
+        public override JsValue Write(JsConversionContext context, T value)
+        {
+            context.CountValue();   // every value written counts against the conversion's output budget
+            return _write(context, value);
+        }
     }
 
     private sealed class NullableInfo<T> : JsTypeInfo<T?> where T : struct

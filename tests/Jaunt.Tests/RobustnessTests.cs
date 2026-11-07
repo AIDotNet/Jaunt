@@ -161,6 +161,17 @@ public class RobustnessTests
     [InlineData("'ab'.repeat(5e6).replaceAll('a', 'xxxxxxxxxx').length")]
     [InlineData("Array(3e7).join('ab').length")]
     [InlineData("JSON.stringify(Array(3e6).fill('xxxxxxxx')).length")]
+    [InlineData("'x'.repeat(1e5).replace(/x/g, 'y'.repeat(2000)).length")]
+    [InlineData("'x'.repeat(1e5).replaceAll(/x/g, 'y'.repeat(2000)).length")]
+    [InlineData("'x'.repeat(1e5).replace(/x/g, () => 'y'.repeat(2000)).length")]
+    [InlineData("JSON.stringify('\\u0001'.repeat(5e6)).length")]
+    [InlineData("const a = []; a.length = 2 ** 32 - 1; JSON.stringify(a).length")]
+    [InlineData("const a = []; a.length = 2 ** 32 - 1; a.toLocaleString().length")]
+    [InlineData("encodeURIComponent('é'.repeat(1e7)).length")]
+    [InlineData("escape('é'.repeat(1e7)).length")]
+    [InlineData("new Uint8Array(1e7).join(',').length")]
+    [InlineData("let s = 'abc'.repeat(1e6), n = 0; for (let i = 0; i < 100; i++) n += s.toUpperCase().length; n")]
+    [InlineData("Iterator.from({ next() { return { done: false, value: 'xxxxxxxx' } } }).take(1e7).join('').length")]
     public void LargeStringOperationsAreChargedBeforeTheyAllocate(string source)
     {
         using var engine = new JsEngine(new JsEngineOptions { Limits = new JsLimits { MaxTrackedBytes = 16 * 1024 * 1024 } });
@@ -202,5 +213,61 @@ public class RobustnessTests
         var wellKnown = a.Evaluate("Symbol.iterator");
         b.SetValue("w", wellKnown);   // well-known symbols are shared by all engines
         Assert.Equal("true", b.Evaluate("w === Symbol.iterator").ToString());
+    }
+
+    [Fact]
+    public void ConcatenatedStringsCanBeSharedAcrossEnginesAndThreads()
+    {
+        // a concatenated string (a rope until first read) may be used by several engines and the host at once
+        using var a = new JsEngine();
+        var errors = new List<Exception>();
+        for (int round = 0; round < 200; round++)
+        {
+            var rope = a.Evaluate("'p'.repeat(300) + 'q'.repeat(300) + String(Math.random())");
+            var threads = Enumerable.Range(0, 4).Select(i => new Thread(() =>
+            {
+                try
+                {
+                    if (i % 2 == 0) { using var b = new JsEngine(); b.SetValue("s", rope); b.Evaluate("s.length + s.charCodeAt(5)"); }
+                    else _ = rope.AsString().Length;
+                }
+                catch (Exception ex) { lock (errors) errors.Add(ex); }
+            })).ToList();
+            threads.ForEach(t => t.Start());
+            threads.ForEach(t => t.Join());
+        }
+        Assert.Empty(errors);
+    }
+
+    [Fact]
+    public async Task DisposingAPluginDuringAnInvocationLetsItComplete()
+    {
+        var module = JsCompiler.CompileModule("export async function transform(i) { await wait(); return { text: i.prompt, count: i.count } }");
+        var release = new TaskCompletionSource();
+        var plugin = JsPlugin.Create(module, "transform", ApiTests.InputInfo, ApiTests.OutputInfo, new JsPluginOptions
+        {
+            ConfigureEngine = e => e.SetAsyncFunction("wait", async (CancellationToken ct) => { await release.Task; return 0; }),
+        });
+        var call = plugin.InvokeAsync(new ApiTests.PluginInput("x", 1)).AsTask();
+        await Task.Delay(50);
+        plugin.Dispose();
+        release.SetResult();
+        Assert.Equal(new ApiTests.PluginOutput("x", 1), await call);
+        await Assert.ThrowsAsync<ObjectDisposedException>(async () => await plugin.InvokeAsync(new ApiTests.PluginInput("y", 2)));
+    }
+
+    [Fact]
+    public void ConversionBudgetsCountPrimitiveValuesAndHostStrings()
+    {
+        using var engine = new JsEngine(new JsEngineOptions { Limits = new JsLimits { MaxOutputBytes = 1000, MaxTrackedBytes = 4 * 1024 * 1024 } });
+        using (var exec = engine.BeginExecution())
+        {
+            var ex = Assert.Throws<JsLimitExceededException>(() => exec.FromObject(Enumerable.Range(0, 100_000).ToList(), JsTypeInfo.List(JsTypeInfo.Int32)));
+            Assert.Equal(JsLimitKind.OutputBytes, ex.Kind);
+        }
+        using var e2 = new JsEngine(new JsEngineOptions { Limits = new JsLimits { MaxTrackedBytes = 4 * 1024 * 1024 } });
+        e2.SetFunction("big", () => new string('h', 5_000_000));
+        var ex2 = Assert.Throws<JsLimitExceededException>(() => e2.Evaluate("big().length"));
+        Assert.Equal(JsLimitKind.TrackedBytes, ex2.Kind);
     }
 }

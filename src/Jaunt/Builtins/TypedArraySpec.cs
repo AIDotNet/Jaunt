@@ -334,6 +334,7 @@ internal static class TypedArraySpec
             int len = t.Length;
             string sep = a[0].IsUndefined ? "," : Operations.ToString(realm, a[0]);
             var sb = new System.Text.StringBuilder();
+            int charged = 0;
             for (int k = 0; k < len; k++)
             {
                 if (k > 0) sb.Append(sep);
@@ -341,7 +342,9 @@ internal static class TypedArraySpec
                 if (!e.IsUndefined) sb.Append(Operations.ToString(realm, e));
                 if (sb.Length > realm.MaxStringLength) throw JsErrors.RangeError(realm, "Invalid string length");
                 realm.Vm.Tick();
+                if (sb.Length - charged >= 4096) { realm.ChargeOutput(sb.Length - charged); charged = sb.Length; }
             }
+            realm.ChargeOutput(sb.Length - charged);
             return new JsValue(sb.ToString());
         });
         r.Method(taProto, "indexOf", 1, static (in NativeArgs a) =>

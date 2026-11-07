@@ -109,7 +109,10 @@ exactly; patterns using property escapes, the `v` flag, modifiers, duplicate or 
 capturing groups inside quantifiers, or `u`+`i` case folding run on Jaunt's native backtracking engine
 (`src/Jaunt/Runtime/Regex`), whose steps are charged to the execution budget. .NET matching cannot observe that
 budget, so each .NET match gets a 100 ms time slice; a match that runs longer is redone on the native engine (same
-semantics, captures mapped to the same groups), where `Timeout`, cancellation and `Interrupt()` apply.
+semantics, captures mapped to the same groups), where `Timeout`, cancellation and `Interrupt()` apply. The rare
+patterns only .NET can run (e.g. nested more than 1,000 groups deep, which the native engine rejects) cannot be
+interrupted mid-match: they may use the execution's remaining time (then exceeding it is the `Timeout` limit), and
+without an execution timeout they stop after 5 s with a catchable `RangeError`.
 
 ## Not supported
 
@@ -139,13 +142,20 @@ semantics, captures mapped to the same groups), where `Timeout`, cancellation an
   compiling code during an execution (`Evaluate(string)`, `eval`, `Function`, `ShadowRealm`). Tracked bytes are one
   budget for all realms of an engine (`ShadowRealm`, `JsCallContext.CreateRealm`; creating a realm is charged too).
   It is cumulative over the engine's lifetime: garbage that has since become unreachable still counts, so it bounds
-  total allocation, not live memory. Builtins that produce large strings (`repeat`, `padStart`/`padEnd`, `concat`,
-  `replace`/`replaceAll`, `Array.prototype.join`, `JSON.stringify`) charge their output (and VM work) before or while
-  allocating it. Compile limits of `JsEngineOptions.CompileOptions` also apply to code compiled at run time (`eval`,
+  total allocation, not live memory. What is charged: objects, properties, array storage, ArrayBuffers, string
+  concatenation, and the output of string-producing builtins (`repeat`, `padStart`/`padEnd`, `concat`, `replace`/
+  `replaceAll` with strings or RegExps, `join` of arrays, typed arrays and iterators, `toLocaleString`, case mapping,
+  `normalize`, `toWellFormed`, URI and `escape` functions, `JSON.stringify`, strings returned by typed host functions),
+  before or while it is allocated. Transient internal garbage (temporary keys, intermediate builders) is not charged, so
+  the managed allocation of a script can exceed the counter by a small factor; it is a guard against runaway scripts,
+  not an exact meter. A process can still run out of memory before a limit trips (e.g. with `MaxTrackedBytes` unset or
+  very large); an `OutOfMemoryException` then faults the engine (`JsEngineFaultedException`), as V8 documents for its
+  heap limits too. Compile limits of `JsEngineOptions.CompileOptions` also apply to code compiled at run time (`eval`,
   `Function`, `ShadowRealm`, `JsCallContext.EvaluateScript`).
-  `MaxOutputBytes` counts UTF-8 bytes of JSON output; for DTO conversions (including typed host-function arguments and
-  results) it counts approximate bytes: 16 per value plus 2 per string character, and an array's whole length before
-  it is read.
+  `MaxOutputBytes` counts UTF-8 bytes of JSON output; for DTO conversions (`JsTypeInfo<T>`: `JsExecution.ToObject`/
+  `FromObject`, plugins, and host functions registered with `JsTypeInfo` overloads) it counts approximate bytes: 16 per
+  value plus 2 per string character, and an array's whole length before it is read. Typed host functions with plain
+  `double`/`int`/`string` parameters are not output conversions; strings they return are charged to tracked bytes.
   `JsPluginOptions.Execution` covers the whole invocation, module initialization included.
 * Native recursion (nested-array `join`/`toString`, `yield*` chains, Proxy/bind chains, re-entrant builtins, deeply
   nested regular expressions) is guarded: it ends in a `StackDepth` limit or a JS error, never a process crash, also

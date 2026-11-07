@@ -52,6 +52,7 @@ internal static class RegExpBuiltins
     private sealed class CacheEntry { public SysRegex? Regex; public JsRegex? Native; public JsRegex? NativeIgnoreCase; public int Groups; public string[] Names = Array.Empty<string>(); public int[][] NameGroups = Array.Empty<int[]>(); public int DotnetMaxGroup; public JsRegex? SliceFallback; public int[]? SliceFallbackGroups; }
     private static readonly Dictionary<(string, string), CacheEntry> s_cache = new();
     private const int CacheLimit = 512;
+    private const int MaxCachedPatternLength = 16 * 1024;
     /// <summary>
     /// Time slice of a .NET-backend match. .NET matching cannot observe the execution budget, so a match that runs longer
     /// is redone on the native engine, which does (see <see cref="JsRegExp.SliceFallback"/>).
@@ -410,6 +411,8 @@ internal static class RegExpBuiltins
                 }
                 entry = new CacheEntry { Native = native, Groups = native.CaptureCount - 1, Names = names.ToArray(), NameGroups = nameGroups.ToArray() };
             }
+            // the cache is process-wide and outlives engines: huge patterns (and their compiled programs) are not kept
+            if (pattern.Length <= MaxCachedPatternLength)
             lock (s_cache)
             {
                 if (s_cache.Count >= CacheLimit) s_cache.Clear();
@@ -478,15 +481,22 @@ internal static class RegExpBuiltins
         catch (System.Text.RegularExpressions.RegexMatchTimeoutException)
         {
             realm.Vm.CheckTimeLimits();
-            if (re.SliceFallback is not { } fb)
-            {
-                // a pattern only .NET can run (the native engine rejected it, e.g. nesting too deep) and no fallback: with
-                // an execution timeout this is that timeout; without one it is a catchable error, not an engine fault
-                if (realm.Vm.HasDeadline)
-                    throw new JsTerminationException(TerminationKind.Timeout, "Regular expression evaluation exceeded its time budget.");
+            if (re.SliceFallback is { } fb) return FallbackMatch(realm, re, fb, s, start);
+            // a pattern only .NET can run (the native engine rejected it, e.g. nesting too deep): with an execution
+            // deadline the match may use the time that is left (then exceeding it is that Timeout); without one the 5 s
+            // cap is a catchable RangeError, not an engine fault
+            if (!realm.Vm.HasDeadline)
                 throw JsErrors.RangeError(realm, $"Regular expression evaluation exceeded {s_longMatchTimeout.TotalSeconds:0} s");
+            var remaining = realm.Vm.RemainingTime;
+            try
+            {
+                if (remaining <= TimeSpan.Zero) throw new System.Text.RegularExpressions.RegexMatchTimeoutException();
+                dm = new SysRegex(re.Regex!.ToString(), re.Regex.Options, remaining).Match(s, start);
             }
-            return FallbackMatch(realm, re, fb, s, start);
+            catch (System.Text.RegularExpressions.RegexMatchTimeoutException)
+            {
+                throw new JsTerminationException(TerminationKind.Timeout, "Regular expression evaluation exceeded its time budget.");
+            }
         }
         if (!dm.Success) return s_noMatch;
         int top = Math.Max(re.GroupCount, re.DotnetMaxGroup);
@@ -769,6 +779,7 @@ internal static class RegExpBuiltins
             realm.Vm.Tick();
         }
         var sb = new StringBuilder();
+        int charged = 0;
         int nextSourcePosition = 0;
         foreach (var result in results)
         {
@@ -804,9 +815,12 @@ internal static class RegExpBuiltins
                 nextSourcePosition = position + matched.Length;
             }
             if (sb.Length > realm.MaxStringLength) throw JsErrors.RangeError(realm, "Invalid string length");
+            // the result is charged as it grows (tracked bytes + work), not after it is complete
+            if (sb.Length - charged >= 4096) { realm.ChargeOutput(sb.Length - charged); charged = sb.Length; }
         }
-        if (nextSourcePosition >= s.Length) return new JsValue(sb.ToString());
-        return new JsValue(sb.Append(s, nextSourcePosition, s.Length - nextSourcePosition).ToString());
+        if (nextSourcePosition < s.Length) sb.Append(s, nextSourcePosition, s.Length - nextSourcePosition);
+        realm.ChargeOutput(sb.Length - charged);
+        return new JsValue(sb.ToString());
     }
 
     /// <summary>GetSubstitution (22.1.3.19.1).</summary>

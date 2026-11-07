@@ -136,10 +136,12 @@ public sealed class JsPlugin<TInput, TOutput> : IAsyncDisposable, IDisposable
     }
 
     /// <inheritdoc />
-    public void Dispose()
-    {
-        if (Interlocked.Exchange(ref _disposed, 1) == 0) _gate.Dispose();
-    }
+    /// <remarks>
+    /// New invocations are rejected afterwards; invocations already running complete normally (their engines are their
+    /// own). The concurrency gate is not disposed, so an in-flight call can still release it; SemaphoreSlim holds no OS
+    /// handle unless its AvailableWaitHandle is used.
+    /// </remarks>
+    public void Dispose() => Interlocked.Exchange(ref _disposed, 1);
 
     /// <inheritdoc />
     public ValueTask DisposeAsync()

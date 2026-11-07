@@ -209,10 +209,10 @@ internal static class GlobalFunctions
         r.Method(g, "isNaN", 1, static (in NativeArgs a) => JsValue.FromBool(double.IsNaN(Operations.ToNumber(a.Realm, a[0]))));
         r.Method(g, "isFinite", 1, static (in NativeArgs a) => JsValue.FromBool(double.IsFinite(Operations.ToNumber(a.Realm, a[0]))));
         r.EvalFunction = r.MethodEager(g, "eval", 1, static (in NativeArgs a) => Eval(a.Realm, a[0]));
-        r.Method(g, "encodeURIComponent", 1, static (in NativeArgs a) => new JsValue(Encode(a.Realm, Operations.ToString(a.Realm, a[0]), UriUnreservedComponent)));
-        r.Method(g, "encodeURI", 1, static (in NativeArgs a) => new JsValue(Encode(a.Realm, Operations.ToString(a.Realm, a[0]), UriUnreservedFull)));
-        r.Method(g, "decodeURIComponent", 1, static (in NativeArgs a) => new JsValue(Decode(a.Realm, Operations.ToString(a.Realm, a[0]), "")));
-        r.Method(g, "decodeURI", 1, static (in NativeArgs a) => new JsValue(Decode(a.Realm, Operations.ToString(a.Realm, a[0]), ";/?:@&=+$,#")));
+        r.Method(g, "encodeURIComponent", 1, static (in NativeArgs a) => new JsValue(a.Realm.Charged(Encode(a.Realm, Operations.ToString(a.Realm, a[0]), UriUnreservedComponent))));
+        r.Method(g, "encodeURI", 1, static (in NativeArgs a) => new JsValue(a.Realm.Charged(Encode(a.Realm, Operations.ToString(a.Realm, a[0]), UriUnreservedFull))));
+        r.Method(g, "decodeURIComponent", 1, static (in NativeArgs a) => new JsValue(a.Realm.Charged(Decode(a.Realm, Operations.ToString(a.Realm, a[0]), ""))));
+        r.Method(g, "decodeURI", 1, static (in NativeArgs a) => new JsValue(a.Realm.Charged(Decode(a.Realm, Operations.ToString(a.Realm, a[0]), ";/?:@&=+$,#"))));
         // Annex B
         r.Method(g, "escape", 1, static (in NativeArgs a) =>
         {
@@ -224,7 +224,7 @@ internal static class GlobalFunctions
                 else if (c < 256) sb.Append('%').Append(((int)c).ToString("X2", CultureInfo.InvariantCulture));
                 else sb.Append("%u").Append(((int)c).ToString("X4", CultureInfo.InvariantCulture));
             }
-            return new JsValue(sb.ToString());
+            return new JsValue(a.Realm.Charged(sb.ToString()));
         });
         r.Method(g, "unescape", 1, static (in NativeArgs a) =>
         {
@@ -240,7 +240,7 @@ internal static class GlobalFunctions
                 }
                 sb.Append(c);
             }
-            return new JsValue(sb.ToString());
+            return new JsValue(a.Realm.Charged(sb.ToString()));
         });
     }
 

@@ -158,17 +158,17 @@ internal static class StringBuiltins
             long end = (long)Math.Min(start + Math.Max(len, 0), s.Length);
             return start >= end ? JsValue.EmptyString : new JsValue(Sub(a.Realm, s, (int)start, (int)(end - start)));
         });
-        r.Method(proto, "toUpperCase", 0, static (in NativeArgs a) => new JsValue(CaseMapping.ToUpper(Str(a))));
-        r.Method(proto, "toLowerCase", 0, static (in NativeArgs a) => new JsValue(CaseMapping.ToLower(Str(a))));
+        r.Method(proto, "toUpperCase", 0, static (in NativeArgs a) => new JsValue(a.Realm.Charged(CaseMapping.ToUpper(Str(a)))));
+        r.Method(proto, "toLowerCase", 0, static (in NativeArgs a) => new JsValue(a.Realm.Charged(CaseMapping.ToLower(Str(a)))));
         r.Method(proto, "toLocaleUpperCase", 0, static (in NativeArgs a) =>
         {
             var s = Str(a);
-            return new JsValue(a.Realm.Intl == null ? CaseMapping.ToUpper(s) : IntlCollator.TransformCase(a.Realm, s, a[0], upper: true));
+            return new JsValue(a.Realm.Charged(a.Realm.Intl == null ? CaseMapping.ToUpper(s) : IntlCollator.TransformCase(a.Realm, s, a[0], upper: true)));
         });
         r.Method(proto, "toLocaleLowerCase", 0, static (in NativeArgs a) =>
         {
             var s = Str(a);
-            return new JsValue(a.Realm.Intl == null ? CaseMapping.ToLower(s) : IntlCollator.TransformCase(a.Realm, s, a[0], upper: false));
+            return new JsValue(a.Realm.Charged(a.Realm.Intl == null ? CaseMapping.ToLower(s) : IntlCollator.TransformCase(a.Realm, s, a[0], upper: false)));
         });
         r.Method(proto, "trim", 0, static (in NativeArgs a) => new JsValue(NumberFormatting.TrimJs(Str(a))));
         r.Method(proto, "trimStart", 0, static (in NativeArgs a) => new JsValue(NumberFormatting.TrimStartJs(Str(a))));
@@ -276,7 +276,7 @@ internal static class StringBuiltins
                 "NFKD" => NormalizationForm.FormKD,
                 _ => throw JsErrors.RangeError(a.Realm, "The normalization form should be one of NFC, NFD, NFKC, NFKD."),
             };
-            try { return new JsValue(s.Normalize(form)); }
+            try { return new JsValue(a.Realm.Charged(s.Normalize(form))); }
             catch (ArgumentException) { return new JsValue(s); }
         });
         r.Method(proto, "isWellFormed", 0, static (in NativeArgs a) =>

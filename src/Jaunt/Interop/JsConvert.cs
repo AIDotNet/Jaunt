@@ -21,7 +21,7 @@ internal static class JsConvert<T>
         else if (t == typeof(int)) { From = (Func<Realm, JsValue, int, string, T>)(object)(Func<Realm, JsValue, int, string, int>)FromInt32; To = (Func<Realm, T, JsValue>)(object)(Func<Realm, int, JsValue>)((r, v) => new JsValue(v)); }
         else if (t == typeof(long)) { From = (Func<Realm, JsValue, int, string, T>)(object)(Func<Realm, JsValue, int, string, long>)FromInt64; To = (Func<Realm, T, JsValue>)(object)(Func<Realm, long, JsValue>)ToInt64; }
         else if (t == typeof(bool)) { From = (Func<Realm, JsValue, int, string, T>)(object)(Func<Realm, JsValue, int, string, bool>)FromBool; To = (Func<Realm, T, JsValue>)(object)(Func<Realm, bool, JsValue>)((r, v) => JsValue.FromBool(v)); }
-        else if (t == typeof(string)) { From = (Func<Realm, JsValue, int, string, T>)(object)(Func<Realm, JsValue, int, string, string?>)FromString; To = (Func<Realm, T, JsValue>)(object)(Func<Realm, string?, JsValue>)((r, v) => JsValue.From(v)); }
+        else if (t == typeof(string)) { From = (Func<Realm, JsValue, int, string, T>)(object)(Func<Realm, JsValue, int, string, string?>)FromString; To = (Func<Realm, T, JsValue>)(object)(Func<Realm, string?, JsValue>)((r, v) => JsValue.From(v is null ? null : r.Charged(v))); }   // host-made strings enter the tracked budget
         else if (t == typeof(JsValue)) { From = (Func<Realm, JsValue, int, string, T>)(object)(Func<Realm, JsValue, int, string, JsValue>)((r, v, i, n) => v); To = (Func<Realm, T, JsValue>)(object)(Func<Realm, JsValue, JsValue>)ToJsValue; }
     }
 

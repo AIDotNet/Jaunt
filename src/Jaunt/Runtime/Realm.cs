@@ -426,6 +426,13 @@ internal sealed partial class Realm
         if (b.Used > b.Max && _accounting) OverBudget();
     }
 
+    /// <summary>Charges a string a builtin has just created (see <see cref="ChargeOutput"/>) and returns it.</summary>
+    public string Charged(string created)
+    {
+        ChargeOutput(created.Length);
+        return created;
+    }
+
     /// <summary>
     /// Charges a builtin's output of <paramref name="chars"/> UTF-16 units before (or while) producing it: tracked bytes
     /// (2 per unit) and VM work (1 unit per 256 chars), so one large string operation is bounded by MaxTrackedBytes and

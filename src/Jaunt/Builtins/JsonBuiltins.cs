@@ -479,6 +479,23 @@ internal static class JsonBuiltins
 
         private int _charged;
 
+        /// <summary>Quotes a string, charging and checking a long one before escaping it (its output is at least as long).</summary>
+        private void QuoteChecked(string str)
+        {
+            if (str.Length > 4096)
+            {
+                // exact quoted length first (escapes can make it up to 6x longer), so limits trip before building it
+                long quoted = QuotedLength(str);
+                if (Sb.Length + quoted > _maxOutput)
+                    throw new JsTerminationException(TerminationKind.OutputBytes, $"JSON output exceeded its limit of {_maxOutput}.", Sb.Length + quoted, _maxOutput);
+                if (Sb.Length + quoted > Realm.MaxStringLength) throw JsErrors.RangeError(Realm, "Invalid string length");
+                Realm.ChargeOutput(quoted);
+                _charged += (int)quoted;
+            }
+            Quote(Sb, str);
+            CheckSize();
+        }
+
         private void CheckSize()
         {
             // output is charged to the tracked-bytes budget (and VM work) as it grows
@@ -526,7 +543,7 @@ internal static class JsonBuiltins
             {
                 case JsTag.Null: Sb.Append("null"); CheckSize(); return true;
                 case JsTag.Boolean: Sb.Append(value.IsTrue ? "true" : "false"); CheckSize(); return true;
-                case JsTag.String: Quote(Sb, value.AsStringUnchecked); CheckSize(); return true;
+                case JsTag.String: QuoteChecked(value.AsStringUnchecked); return true;
                 case JsTag.Number:
                 {
                     double d = value.Num;
@@ -648,6 +665,9 @@ internal static class JsonBuiltins
                 var self = JsValue.FromObject(o);
                 for (long i = 0; i < len; i++)
                 {
+                    // per element: a holey array of length 2**32-1 must hit the output/tracked-bytes limits as it grows
+                    CheckSize();
+                    Realm.Vm.Tick();
                     if (i > 0) Sb.Append(',');
                     if (Gap.Length > 0) Sb.Append('\n').Append(_indent);
                     var v = o.GetIndex((uint)i, self);
@@ -660,6 +680,24 @@ internal static class JsonBuiltins
             }
             finally { Exit(); }
         }
+    }
+
+    /// <summary>Length of <see cref="Quote"/>'s output for <paramref name="s"/>.</summary>
+    private static long QuotedLength(string s)
+    {
+        long n = s.Length + 2;
+        for (int i = 0; i < s.Length; i++)
+        {
+            char c = s[i];
+            if (c < 0x20) n += c is '\b' or '\f' or '\n' or '\r' or '\t' ? 1 : 5;
+            else if (c == '"' || c == '\\') n += 1;
+            else if (char.IsSurrogate(c))
+            {
+                if (char.IsHighSurrogate(c) && i + 1 < s.Length && char.IsLowSurrogate(s[i + 1])) i++;
+                else n += 5;   // lone surrogate: \uXXXX
+            }
+        }
+        return n;
     }
 
     public static void Quote(StringBuilder sb, string s)

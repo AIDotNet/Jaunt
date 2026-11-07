@@ -2,7 +2,7 @@
 # (see docs/test262.md, "Remaining failures"). CI subtracts these; anything else failing fails the build.
 # Apple's ICU (macOS libicucore) ships `EEE d. MMMM` for German MMMMEd; upstream CLDR 44-48 has `E, d. MMMM` and
 # the test passes with upstream ICU (Linux, Windows).
-test/intl402/DateTimeFormat/prototype/format/german-weekday-no-year.js
+macos test/intl402/DateTimeFormat/prototype/format/german-weekday-no-year.js
 
 # Older platform ICU (Ubuntu 24.04 ships ICU 74 / CLDR 44): locale data, tzdata links and Chinese
 # calendar computations that changed by ICU 78 / CLDR 48, which these tests encode.

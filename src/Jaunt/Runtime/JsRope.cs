@@ -1,3 +1,4 @@
+using System.Threading;
 using System;
 using System.Collections.Generic;
 
@@ -33,14 +34,19 @@ internal sealed class JsRope
 
     public static int LengthOf(object part) => part is string s ? s.Length : ((JsRope)part).Length;
 
+    /// <summary>
+    /// The characters as one string. Safe to call from several threads at once (a string value may be shared across
+    /// engines and read by the host): the flat string is published before the children are released, so a reader that
+    /// finds the children gone always finds the flat string; concurrent callers at worst build equal copies.
+    /// </summary>
     public string Flatten()
     {
-        var flat = _flat;
+        var flat = Volatile.Read(ref _flat);
         if (flat != null) return flat;
         flat = string.Create(Length, this, static (span, root) => Fill(span, root));
-        _flat = flat;
-        _left = null;
-        _right = null;
+        Volatile.Write(ref _flat, flat);
+        Volatile.Write(ref _left, null);
+        Volatile.Write(ref _right, null);
         return flat;
     }
 
@@ -61,15 +67,20 @@ internal sealed class JsRope
             else
             {
                 var r = (JsRope)node;
-                if (r._flat is { } f)
+                var left = Volatile.Read(ref r._left);
+                var right = Volatile.Read(ref r._right);
+                var f = Volatile.Read(ref r._flat);
+                if (f != null || left == null || right == null)
                 {
+                    // flattened (possibly by another thread just now): children are released only after _flat is set
+                    f ??= Volatile.Read(ref r._flat)!;
                     pos -= f.Length;
                     f.AsSpan().CopyTo(span.Slice(pos));
                 }
                 else
                 {
-                    stack.Push(r._left!);   // popped second
-                    stack.Push(r._right!);  // popped first: we fill from the end
+                    stack.Push(left);    // popped second
+                    stack.Push(right);   // popped first: we fill from the end
                 }
             }
         }

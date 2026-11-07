@@ -172,6 +172,16 @@ internal sealed partial class Vm
     /// <summary>Whether the active execution has a wall-clock deadline.</summary>
     public bool HasDeadline => _budgetActive && _deadline != long.MaxValue;
 
+    /// <summary>Time left until the active execution's deadline (meaningful only when <see cref="HasDeadline"/>).</summary>
+    public TimeSpan RemainingTime
+    {
+        get
+        {
+            long now = Stopwatch.GetTimestamp();
+            return _deadline > now ? TimeSpan.FromSeconds((_deadline - now) / (double)Stopwatch.Frequency) : TimeSpan.Zero;
+        }
+    }
+
     public void ThrowIfInterruptPending()
     {
         if (_interrupt != 0) throw new JsTerminationException(TerminationKind.Interrupted, "Execution was interrupted.");

@@ -27,7 +27,7 @@ internal static class Es2025Builtins
                 }
                 else sb?.Append(c);
             }
-            return new JsValue(sb?.ToString() ?? s);
+            return new JsValue(sb == null ? s : a.Realm.Charged(sb.ToString()));
         });
     }
 

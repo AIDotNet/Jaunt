@@ -200,6 +200,7 @@ internal static class IteratorHelpers
             catch (JsThrowException ex) { throw CloseWithError(realm, o, ex); }
         }
         var rec = GetIteratorDirect(realm, o);
+        int charged = 0;
         var sb = new System.Text.StringBuilder();
         bool first = true;
         while (rec.Step(realm, out var v))
@@ -216,9 +217,11 @@ internal static class IteratorHelpers
                 }
             }
             if (sb.Length > realm.MaxStringLength) { rec.CloseQuiet(realm); throw JsErrors.RangeError(realm, "Invalid string length"); }
+            // a budget termination ends the execution; the iterator is not closed (no further JS runs)
+            if (sb.Length - charged >= 4096) { realm.ChargeOutput(sb.Length - charged); charged = sb.Length; }
             realm.Vm.Tick();
         }
-        realm.ChargeBytes(sb.Length * 2L);
+        realm.ChargeOutput(sb.Length - charged);
         return new JsValue(sb.ToString());
     }
 
