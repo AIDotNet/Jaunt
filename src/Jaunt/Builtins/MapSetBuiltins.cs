@@ -15,7 +15,7 @@ internal sealed class SameValueZeroComparer : IEqualityComparer<JsValue>
         JsTag.BigInt => v.BigIntValue.GetHashCode(),
         JsTag.Boolean => (int)v.Bits + 7,
         JsTag.Undefined or JsTag.Null => (int)v.Tag,
-        _ => RuntimeHelpers.GetHashCode(v.Ref!),
+        _ => v.Ref is JsObject o ? o.IdentityHash : RuntimeHelpers.GetHashCode(v.Ref!),
     };
 }
 
@@ -270,11 +270,12 @@ internal static class MapSetBuiltins
         });
         var iterProto = new JsObject(r, r.IteratorPrototype);
         r.MapIteratorPrototype = iterProto;
-        r.Method(iterProto, "next", 0, static (in NativeArgs a) => IterNext(a));
+        r.MapIteratorNext = r.MethodEager(iterProto, "next", 0, static (in NativeArgs a) => IterNext(a));
         iterProto.AddOwnProperty(JsSymbol.ToStringTag, new JsValue("Map Iterator"), PropFlags.Configurable);
         r.Method(proto, "keys", 0, static (in NativeArgs a) => JsValue.FromObject(new JsMapIterator(a.Realm, a.Realm.MapIteratorPrototype, ThisMap(a, false, "keys").Table, 0)));
         r.Method(proto, "values", 0, static (in NativeArgs a) => JsValue.FromObject(new JsMapIterator(a.Realm, a.Realm.MapIteratorPrototype, ThisMap(a, false, "values").Table, 1)));
         var entries = r.MethodEager(proto, "entries", 0, static (in NativeArgs a) => JsValue.FromObject(new JsMapIterator(a.Realm, a.Realm.MapIteratorPrototype, ThisMap(a, false, "entries").Table, 2)));
+        r.MapProtoEntries = entries;
         proto.AddOwnProperty(JsSymbol.Iterator, JsValue.FromObject(entries), PropFlags.Hidden);
         proto.AddOwnProperty(JsSymbol.ToStringTag, new JsValue("Map"), PropFlags.Configurable);
     }
@@ -353,9 +354,10 @@ internal static class MapSetBuiltins
         });
         var iterProto = new JsObject(r, r.IteratorPrototype);
         r.SetIteratorPrototype = iterProto;
-        r.Method(iterProto, "next", 0, static (in NativeArgs a) => IterNext(a));
+        r.SetIteratorNext = r.MethodEager(iterProto, "next", 0, static (in NativeArgs a) => IterNext(a));
         iterProto.AddOwnProperty(JsSymbol.ToStringTag, new JsValue("Set Iterator"), PropFlags.Configurable);
         var values = r.MethodEager(proto, "values", 0, static (in NativeArgs a) => JsValue.FromObject(new JsMapIterator(a.Realm, a.Realm.SetIteratorPrototype, ThisMap(a, true, "values").Table, 1)));
+        r.SetProtoValues = values;
         proto.DefineHidden("keys", JsValue.FromObject(values));
         r.Method(proto, "entries", 0, static (in NativeArgs a) => JsValue.FromObject(new JsMapIterator(a.Realm, a.Realm.SetIteratorPrototype, ThisMap(a, true, "entries").Table, 2)));
         proto.AddOwnProperty(JsSymbol.Iterator, JsValue.FromObject(values), PropFlags.Hidden);

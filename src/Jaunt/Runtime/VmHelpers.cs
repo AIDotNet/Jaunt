@@ -13,7 +13,7 @@ internal sealed partial class Vm
     internal JsValue CallValue(in JsValue fv, in JsValue thisValue, ReadOnlySpan<JsValue> args)
     {
         if (fv.IsObject && fv.Ref is JsFunctionObject fo) return fo.Call(thisValue, args);
-        throw JsErrors.TypeError(Realm, $"{JsErrors.Describe(fv)} is not a function");
+        throw new JsThrowException(NotCallableError(fv));
     }
 
     private static string DescribeReceiver(in JsValue v) => v.Tag switch
@@ -96,7 +96,74 @@ internal sealed partial class Vm
             throw JsErrors.TypeError(realm, $"Cannot assign to read only property '{name}' of object");
     }
 
+    /// <summary>
+    /// Object spread / rest from an ordinary shaped object whose properties are all plain data properties in insertion
+    /// order (no accessors, index or symbol keys): nothing observable runs, so the keys and values are read straight from
+    /// the shape and slots. An empty target with the same prototype takes the source's shape and a copy of its slots.
+    /// </summary>
+    private bool TryCopyPlainDataProperties(JsObject target, JsObject so, ReadOnlySpan<JsValue> excluded)
+    {
+        if (so.GetType() != typeof(JsObject) || so.Dict != null) return false;
+        var shape = so.Shape;
+        if (shape.IsUnique || shape.HasSpecialProps || shape.HasIndexKeys || shape.HasSymbolKeys) return false;
+        int n = shape.Count;
+        var slots = so.Slots;
+        if (target.GetType() == typeof(JsObject) && target.Dict == null && target.Extensible && excluded.Length == 0)
+        {
+            var ts = target.Shape;
+            if (ts.Count == 0 && ts.Role == shape.Role && ReferenceEquals(ts.Prototype, shape.Prototype) && !ts.IsUnique)
+            {
+                bool allDefault = true;
+                var flags = shape.Flags;
+                for (int i = 0; i < n; i++) if (flags[i] != PropFlags.Default) { allDefault = false; break; }
+                if (allDefault)
+                {
+                    if (n > 0)
+                    {
+                        var copy = new JsValue[n];
+                        Array.Copy(slots, copy, n);
+                        target.Slots = copy;
+                        target.Shape = shape;
+                        Realm.ChargeProperties(n);
+                    }
+                    Tick(n + 1);
+                    return true;
+                }
+            }
+        }
+        for (int i = 0; i < n; i++)
+        {
+            if ((shape.Flags[i] & PropFlags.Enumerable) == 0) continue;
+            var key = shape.Keys[i];
+            bool skip = false;
+            foreach (var ex in excluded)
+            {
+                if (ex.IsString && key.Value is string ks && ks == ex.AsStringUnchecked) { skip = true; break; }
+                if (ex.IsSymbol && ReferenceEquals(ex.Ref, key.Value)) { skip = true; break; }
+            }
+            if (skip) continue;
+            target.CreateDataPropertyOrThrow(key, slots[i]);
+            Tick();
+        }
+        return true;
+    }
+
     // ------------------------------------------------------------------ named properties
+
+    // Error values for the faults the interpreter raises itself. Raising them with `thrown = ...; goto Unwind` avoids
+    // a .NET exception (several microseconds each); the same messages back the throwing slow paths below.
+    private JsValue ErrorValue(ErrorKind kind, string message) => JsValue.FromObject(JsError.Create(Realm, kind, message));
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    internal JsValue NullishReadError(in JsValue ov, in JsValue kv) =>
+        ErrorValue(ErrorKind.TypeError, $"Cannot read properties of {ov} (reading '{(kv.IsObject || kv.IsSymbol ? JsErrors.Describe(kv) : Operations.ToString(Realm, kv))}')");
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    internal JsValue NullishSetError(in JsValue ov, in JsValue kv) =>
+        ErrorValue(ErrorKind.TypeError, $"Cannot set properties of {ov} (setting '{Operations.ToString(Realm, kv)}')");
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    internal JsValue NotCallableError(in JsValue fv) => ErrorValue(ErrorKind.TypeError, $"{JsErrors.Describe(fv)} is not a function");
 
     internal JsValue GetPropSlow(in JsValue ov, in JsValue keyValue, ref IcEntry ic)
     {
@@ -104,7 +171,7 @@ internal sealed partial class Vm
         if (ov.IsNotObject)
         {
             if (ov.IsNullOrUndefined)
-                throw JsErrors.TypeError(Realm, $"Cannot read properties of {ov} (reading '{key}')");
+                throw new JsThrowException(NullishReadError(ov, keyValue));
             if (ov.IsString && ic.Kind != IcKind.Megamorphic)
             {
                 if (key.Value is string ks && ks == "length")
@@ -270,7 +337,7 @@ internal sealed partial class Vm
             if (idx == d && (uint)idx < (uint)s.Length) return new JsValue(Realm.CharString(s[idx]));
         }
         if (ov.IsNullOrUndefined)   // the key is not coerced first (no user code runs)
-            throw JsErrors.TypeError(Realm, $"Cannot read properties of {ov} (reading '{(kv.IsObject || kv.IsSymbol ? JsErrors.Describe(kv) : Operations.ToString(Realm, kv))}')");
+            throw new JsThrowException(NullishReadError(ov, kv));
         return Operations.GetPrimitiveProperty(Realm, ov, Operations.ToPropertyKey(Realm, kv));
     }
 
@@ -339,6 +406,7 @@ internal sealed partial class Vm
     internal void CopyDataProperties(JsObject target, in JsValue source, ReadOnlySpan<JsValue> excluded)
     {
         if (source.IsNullOrUndefined) return;
+        if (source.IsObject && source.Ref is JsObject so && TryCopyPlainDataProperties(target, so, excluded)) return;
         var from = Operations.ToObject(Realm, source);
         var keys = new List<PropertyKey>();
         from.OwnPropertyKeys(keys);

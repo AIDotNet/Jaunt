@@ -131,6 +131,8 @@ internal sealed partial class Realm
     public JsBuiltin ArrayProtoValues { get => _arrayProtoValues ?? Ensure(IntrinsicGroup.Array)._arrayProtoValues!; set => _arrayProtoValues = value; }
     private JsBuiltin? _arrayIteratorNext;
     public JsBuiltin ArrayIteratorNext { get => _arrayIteratorNext ?? Ensure(IntrinsicGroup.Iterator)._arrayIteratorNext!; set => _arrayIteratorNext = value; }
+    /// <summary>Original Map.prototype.entries / Set.prototype.values and the iterator prototypes' next (for-of fast path).</summary>
+    public JsBuiltin? MapProtoEntries, MapIteratorNext, SetProtoValues, SetIteratorNext;
     private JsBuiltin? _throwTypeErrorFunction;
     public JsBuiltin ThrowTypeErrorFunction { get => _throwTypeErrorFunction ?? Ensure(IntrinsicGroup.Function)._throwTypeErrorFunction!; set => _throwTypeErrorFunction = value; }
     private JsBuiltin? _evalFunction;
@@ -419,6 +421,35 @@ internal sealed partial class Realm
         if (b.Used > b.Max && _accounting) OverBudget();
     }
 
+    public void ChargeProperties(int count)
+    {
+        var b = Budget;
+        b.Used += 24L * count;
+        if (b.Used > b.Max && _accounting) OverBudget();
+    }
+
+    private int _identityHashCounter;
+
+    /// <summary>
+    /// Hash for an object used as a Map/Set key. Assigned on first use from a counter spread by a Fibonacci multiplier;
+    /// the runtime's identity hash (<see cref="System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(object)"/>) is
+    /// several times slower to assign on first use.
+    /// </summary>
+    internal int NextIdentityHash()
+    {
+        int h = unchecked(++_identityHashCounter * -1640531527);
+        return h == 0 ? 1 : h;
+    }
+
+    // RegExp fast-path guard (see RegExpBuiltins.IsRegExpPristine): original slot contents, their slot numbers, and the
+    // ProtoEpoch the slot numbers were resolved at
+    internal object?[]? RegExpPristineRefs;
+    internal int[]? RegExpPristineSlots;
+    internal int RegExpPristineEpoch = -1;
+
+    /// <summary>Shared time-budget callback for the native regex engine (one delegate per realm, not one per match).</summary>
+    internal Action? RegexTick;
+
     public void ChargeBytes(long bytes)
     {
         var b = Budget;
@@ -626,6 +657,36 @@ internal sealed partial class Realm
         if (_iterSlot < 0 || _nextSlot < 0) return false;
         return ReferenceEquals(ArrayPrototype.ReadSlot(_iterSlot).Ref, ArrayProtoValues)
             && ReferenceEquals(ArrayIteratorPrototype.ReadSlot(_nextSlot).Ref, ArrayIteratorNext);
+    }
+
+    private int _mapPristineEpoch = -1;
+    private int _mapIterSlot = -1, _mapNextSlot = -1, _setIterSlot = -1, _setNextSlot = -1;
+
+    /// <summary>
+    /// Whether iterating <paramref name="m"/> with for-of/spread observably equals walking its table: the object has no own
+    /// @@iterator, its prototype's @@iterator is the original entries/values and the iterator prototype's next is the original.
+    /// </summary>
+    public bool IsMapIterationPristine(JsMap m)
+    {
+        var proto = m.IsSet ? SetPrototype : MapPrototype;
+        if (!ReferenceEquals(m.Proto, proto) || m.Shape.HasSymbolKeys || m.Dict != null && m.Dict.IndexOf(JsSymbol.Iterator) >= 0) return false;
+        if (_mapPristineEpoch != ProtoEpoch)
+        {
+            _mapIterSlot = MapPrototype.FindOwn(JsSymbol.Iterator, out _);
+            _mapNextSlot = MapIteratorPrototype.FindOwn("next", out _);
+            _setIterSlot = SetPrototype.FindOwn(JsSymbol.Iterator, out _);
+            _setNextSlot = SetIteratorPrototype.FindOwn("next", out _);
+            _mapPristineEpoch = ProtoEpoch;
+        }
+        if (m.IsSet)
+        {
+            return _setIterSlot >= 0 && _setNextSlot >= 0 && SetProtoValues != null
+                && ReferenceEquals(SetPrototype.ReadSlot(_setIterSlot).Ref, SetProtoValues)
+                && ReferenceEquals(SetIteratorPrototype.ReadSlot(_setNextSlot).Ref, SetIteratorNext);
+        }
+        return _mapIterSlot >= 0 && _mapNextSlot >= 0 && MapProtoEntries != null
+            && ReferenceEquals(MapPrototype.ReadSlot(_mapIterSlot).Ref, MapProtoEntries)
+            && ReferenceEquals(MapIteratorPrototype.ReadSlot(_mapNextSlot).Ref, MapIteratorNext);
     }
 
     // ------------------------------------------------------------------ promise rejection tracking

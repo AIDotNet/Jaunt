@@ -15,9 +15,21 @@ internal enum FrameFlags : byte
     Construct = 1,
     OwnsRegs = 2,
     Coroutine = 4,
+    /// <summary>The callee's realm differs from the caller's: <see cref="Frame.CallerRealm"/> is set and restored on exit.</summary>
+    RealmSwitch = 8,
+    /// <summary>Entry frame of a <c>RunLoop</c> invocation: returning from or unwinding past it leaves the loop.</summary>
+    Entry = 16,
 }
 
 internal enum SuspendKind : byte { None, Yield, YieldRaw, Await, Initial }
+
+/// <summary>One captured stack frame: the function and the pc of the instruction it was executing.</summary>
+internal readonly struct StackFrameRecord
+{
+    public readonly FunctionTemplate Template;
+    public readonly int Pc;
+    public StackFrameRecord(FunctionTemplate template, int pc) { Template = template; Pc = pc; }
+}
 
 /// <summary>Activation record of a bytecode function. Frames are pooled except for coroutines.</summary>
 internal sealed class Frame
@@ -40,7 +52,11 @@ internal sealed class Frame
     public int RetIndex;
     public FrameFlags Flags;
     public int ChunkIndex;
-    /// <summary>Realm that was current when this frame was entered (restored on exit).</summary>
+    /// <summary>
+    /// Realm that was current when this frame was entered; only valid with <see cref="FrameFlags.RealmSwitch"/> (otherwise it
+    /// is the callee's own realm, see <see cref="Vm.CallerRealmOf"/>). Not written on same-realm calls: every reference store
+    /// into a pooled frame costs a GC write barrier, and calls are the hottest path of the VM.
+    /// </summary>
     public Realm CallerRealm = null!;
     // coroutine state
     public int ResumeSentReg = -1;
@@ -60,6 +76,8 @@ internal sealed partial class Vm
     public int ProtoEpoch;
     private readonly Realm _homeRealm;
     private readonly List<JsValue[]> _chunks = new();
+    /// <summary><c>_chunks[_chunkIndex]</c>, kept at hand so a call does not go through the list.</summary>
+    private JsValue[] _chunk = Array.Empty<JsValue>();
     private int _chunkIndex;
     private int _top;
     private const int InitialChunkSize = 128;
@@ -256,31 +274,41 @@ internal sealed partial class Vm
 
     // ------------------------------------------------------------------ register stack and frames
 
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private JsValue[] AllocRegs(int count, out int baseIndex, out int chunkIndex)
     {
-        var chunk = _chunks[_chunkIndex];
-        if (_top + count > chunk.Length)
-        {
-            int prevLen = chunk.Length;
-            if (_top == 0 && _chunkIndex == 0 && prevLen < MaxChunkSize)
-            {
-                // nothing live in the first chunk yet: just grow it
-                _chunks[0] = chunk = new JsValue[Math.Max(prevLen == 0 ? InitialChunkSize : Math.Min(prevLen * 4, MaxChunkSize), count)];
-                baseIndex = 0;
-                chunkIndex = 0;
-                _top = count;
-                return chunk;
-            }
-            _chunkIndex++;
-            int size = Math.Max(Math.Min(prevLen * 2, MaxChunkSize), count);
-            if (_chunkIndex == _chunks.Count) _chunks.Add(new JsValue[size]);
-            else if (_chunks[_chunkIndex].Length < count) _chunks[_chunkIndex] = new JsValue[size];
-            chunk = _chunks[_chunkIndex];
-            _top = 0;
-        }
-        baseIndex = _top;
+        var chunk = _chunk;
+        int top = _top;
+        if (top + count > chunk.Length) return AllocRegsSlow(count, out baseIndex, out chunkIndex);
+        baseIndex = top;
         chunkIndex = _chunkIndex;
-        _top += count;
+        _top = top + count;
+        return chunk;
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private JsValue[] AllocRegsSlow(int count, out int baseIndex, out int chunkIndex)
+    {
+        var chunk = _chunk;
+        int prevLen = chunk.Length;
+        if (_top == 0 && _chunkIndex == 0 && prevLen < MaxChunkSize)
+        {
+            // nothing live in the first chunk yet: just grow it
+            _chunks[0] = _chunk = chunk = new JsValue[Math.Max(prevLen == 0 ? InitialChunkSize : Math.Min(prevLen * 4, MaxChunkSize), count)];
+            baseIndex = 0;
+            chunkIndex = 0;
+            _top = count;
+            return chunk;
+        }
+        _chunkIndex++;
+        int size = Math.Max(Math.Min(prevLen * 2, MaxChunkSize), count);
+        if (_chunkIndex == _chunks.Count) _chunks.Add(new JsValue[size]);
+        else if (_chunks[_chunkIndex].Length < count) _chunks[_chunkIndex] = new JsValue[size];
+        _chunk = chunk = _chunks[_chunkIndex];
+        _top = 0;
+        baseIndex = 0;
+        chunkIndex = _chunkIndex;
+        _top = count;
         return chunk;
     }
 
@@ -310,11 +338,18 @@ internal sealed partial class Vm
         else
         {
             f = RentFrame();
-            f.Regs = AllocRegs(t.RegisterCount, out f.Base, out f.ChunkIndex);
+            var regs = AllocRegs(t.RegisterCount, out f.Base, out f.ChunkIndex);
+            if (!ReferenceEquals(f.Regs, regs)) f.Regs = regs;   // a pooled frame usually sits in the same chunk as last time
         }
         int n = Math.Min(args.Length, t.ParamCount);
-        args.Slice(0, n).CopyTo(f.Regs.AsSpan(f.Base, n));
-        f.Args = (t.Flags & FunctionFlags.NeedsArgsArray) != 0 ? args.ToArray() : null;
+        if (n <= 4)
+        {
+            // element stores beat the bulk copy helper for the usual one to four arguments
+            var regs = f.Regs; int b = f.Base;
+            for (int i = 0; i < n; i++) regs[b + i] = args[i];
+        }
+        else args.Slice(0, n).CopyTo(f.Regs.AsSpan(f.Base, n));
+        if ((t.Flags & FunctionFlags.NeedsArgsArray) != 0) f.Args = args.ToArray();   // otherwise still null from PopFrame
         SetupFrame(f, c, thisValue, newTarget, flags);
         return f;
     }
@@ -322,34 +357,50 @@ internal sealed partial class Vm
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private void SetupFrame(Frame f, JsClosure c, JsValue thisValue, JsValue newTarget, FrameFlags flags)
     {
+        // Reference stores into the (heap-allocated, pooled) frame each cost a GC write barrier, so a field is stored
+        // only when its value changes. A pooled frame keeps its callee, environment and this between calls (recursion
+        // and callbacks in loops re-enter the same closure at the same depth); ReleasePooledFrames drops them when the
+        // root execution ends. PopFrame clears Args, Caller and NewTarget, and a freshly allocated frame is clear.
         var t = c.Template;
-        f.T = t;
-        f.Code = t.Code;
+        if (!ReferenceEquals(f.Callee, c))
+        {
+            f.Callee = c;
+            f.T = t;
+            f.Code = t.Code;
+            f.Feedback = c.Feedback;
+        }
         f.Pc = 0;
-        f.Env = c.Env;
+        var env = c.Env;
+        if (!ReferenceEquals(f.Env, env)) f.Env = env;
         f.EnvDepth = 0;
-        f.Callee = c;
-        f.Feedback = c.Feedback;
-        f.Flags = flags;
         f.Caller = Current;
         f.Suspend = SuspendKind.None;
-        f.ThisBox = c.ThisBox;
-        f.CallerRealm = Realm;
-        Realm = c.Realm;
+        var box = c.ThisBox;
+        if (box != null || f.ThisBox != null) f.ThisBox = box;
+        var realm = Realm;
+        var calleeRealm = c.Realm;
+        if (!ReferenceEquals(realm, calleeRealm))
+        {
+            f.CallerRealm = realm;
+            Realm = calleeRealm;
+            flags |= FrameFlags.RealmSwitch;
+        }
+        f.Flags = flags;
         if ((t.Flags & FunctionFlags.Arrow) != 0)
         {
             f.This = c.BoundThis;
-            f.NewTarget = c.BoundNewTarget;
+            var nt = c.BoundNewTarget;
+            if (nt.Ref != null) f.NewTarget = nt;
         }
         else
         {
-            f.NewTarget = newTarget;
+            if (newTarget.Ref != null) f.NewTarget = newTarget;
             if ((t.Flags & FunctionFlags.Strict) == 0 && thisValue.IsNotObject)
             {
-                if (thisValue.IsNullOrUndefined) thisValue = JsValue.FromObject(Realm.GlobalObject);
-                else if (thisValue.IsNotEmpty) thisValue = JsValue.FromObject(Operations.ToObject(Realm, thisValue));
+                if (thisValue.IsNullOrUndefined) thisValue = JsValue.FromObject(calleeRealm.GlobalObject);
+                else if (thisValue.IsNotEmpty) thisValue = JsValue.FromObject(Operations.ToObject(calleeRealm, thisValue));
             }
-            f.This = thisValue;
+            if (!ReferenceEquals(f.This.Ref, thisValue.Ref) || f.This.Bits != thisValue.Bits) f.This = thisValue;
         }
         Depth++;
         Current = f;
@@ -364,27 +415,53 @@ internal sealed partial class Vm
     {
         Depth--;
         Current = f.Caller;
-        Realm = f.CallerRealm;
-        if ((f.Flags & FrameFlags.OwnsRegs) == 0)
+        var flags = f.Flags;
+        if ((flags & FrameFlags.RealmSwitch) != 0) Realm = f.CallerRealm;
+        if ((flags & FrameFlags.OwnsRegs) == 0)
         {
-            Array.Clear(f.Regs, f.Base, f.T.RegisterCount);
-            _chunkIndex = f.ChunkIndex;
-            _top = f.Base;
+            var regs = f.Regs; int b = f.Base, n = f.T.RegisterCount;
+            if (n <= 24) { for (int i = 0; i < n; i++) regs[b + i] = default; }
+            else Array.Clear(regs, b, n);
+            if (_chunkIndex != f.ChunkIndex) { _chunkIndex = f.ChunkIndex; _chunk = _chunks[_chunkIndex]; }
+            _top = b;
             f.Args = null;
-            f.Env = null;
-            f.Callee = null!;
             f.Caller = null;
-            f.This = default;
             f.NewTarget = default;
         }
     }
+
+    /// <summary>
+    /// Drops the references the pooled frames keep between calls (see <see cref="SetupFrame"/>), so an idle engine does not
+    /// retain the closures, environments and receivers of its last execution.
+    /// </summary>
+    internal void ReleasePooledFrames()
+    {
+        var pool = _framePool;
+        for (int i = 0; i < pool.Length; i++)
+        {
+            var f = pool[i];
+            if (f == null) break;
+            f.Callee = null!;
+            f.T = null!;
+            f.Code = null!;
+            f.Feedback = null!;
+            f.Env = null;
+            f.ThisBox = null;
+            f.Args = null;
+            f.CallerRealm = null!;
+            f.This = default;
+        }
+    }
+
+    /// <summary>The realm that was current when <paramref name="f"/> was entered.</summary>
+    internal static Realm CallerRealmOf(Frame f) => (f.Flags & FrameFlags.RealmSwitch) != 0 ? f.CallerRealm : f.Callee.Realm;
 
     /// <summary>Detaches a suspended coroutine frame from the active stack (registers are private).</summary>
     internal void DetachFrame(Frame f)
     {
         Depth--;
         Current = f.Caller;
-        Realm = f.CallerRealm;
+        if ((f.Flags & FrameFlags.RealmSwitch) != 0) Realm = f.CallerRealm;
         f.Caller = null;
     }
 
@@ -392,8 +469,15 @@ internal sealed partial class Vm
     {
         if (Depth + 1 > MaxDepth) StackOverflowFrame();
         f.Caller = Current;
-        f.CallerRealm = Realm;
-        Realm = f.Callee.Realm;
+        var realm = Realm;
+        var calleeRealm = f.Callee.Realm;
+        if (!ReferenceEquals(realm, calleeRealm))
+        {
+            f.CallerRealm = realm;
+            Realm = calleeRealm;
+            f.Flags |= FrameFlags.RealmSwitch;
+        }
+        else f.Flags &= ~FrameFlags.RealmSwitch;
         Depth++;
         Current = f;
     }
@@ -451,15 +535,27 @@ internal sealed partial class Vm
     /// <summary>Applies [[Construct]] return semantics.</summary>
     internal JsValue ConstructResult(Frame f, JsValue value)
     {
-        if (value.IsObject) return value;
+        if (!TryConstructResult(f, ref value, out var error)) throw new JsThrowException(error);
+        return value;
+    }
+
+    /// <summary>
+    /// Applies [[Construct]] return semantics without throwing: false with <paramref name="error"/> set when a derived
+    /// constructor returned a non-object or never called super() (the error belongs to the caller's realm, as it is raised
+    /// after the callee context is removed).
+    /// </summary>
+    internal bool TryConstructResult(Frame f, ref JsValue value, out JsValue error)
+    {
+        error = default;
+        if (value.IsObject) return true;
         if (f.This.IsEmpty && f.ThisBox != null) f.This = f.ThisBox.Value;
         if (f.Callee.IsDerived)
         {
-            // thrown after the callee context is removed: the caller's realm
-            if (!value.IsUndefined) throw JsErrors.TypeError(f.CallerRealm, "Derived constructors may only return object or undefined");
-            if (f.This.IsEmpty) throw JsErrors.ReferenceError(f.CallerRealm, "Must call super constructor in derived class before accessing 'this' or returning from derived constructor");
+            if (!value.IsUndefined) { error = JsValue.FromObject(JsError.Create(CallerRealmOf(f), ErrorKind.TypeError, "Derived constructors may only return object or undefined")); return false; }
+            if (f.This.IsEmpty) { error = JsValue.FromObject(JsError.Create(CallerRealmOf(f), ErrorKind.ReferenceError, "Must call super constructor in derived class before accessing 'this' or returning from derived constructor")); return false; }
         }
-        return f.This;
+        value = f.This;
+        return true;
     }
 
     // ------------------------------------------------------------------ closures
@@ -496,24 +592,69 @@ internal sealed partial class Vm
         return c;
     }
 
+    // ------------------------------------------------------------------ errors raised by builtins without a CLR throw
+
+    /// <summary>
+    /// Error value a builtin raised through <see cref="Raise"/>, waiting for the caller that observes the
+    /// <see cref="JsValue.Empty"/> return to take it (the interpreter unwinds to a handler; <see cref="JsBuiltin.Call"/>
+    /// throws it for native callers).
+    /// </summary>
+    internal JsValue Pending;
+
+    /// <summary>
+    /// Raises <paramref name="error"/> from a builtin without a CLR exception. The builtin returns this method's result
+    /// (<see cref="JsValue.Empty"/>, which no function ever returns as a value) and its caller dispatches the throw. A CLR
+    /// throw and catch costs microseconds; a JS <c>try/catch</c> around a failing builtin should cost what a JS throw does.
+    /// </summary>
+    internal JsValue Raise(JsValue error)
+    {
+        Pending = error;
+        return JsValue.Empty;
+    }
+
+    internal JsValue TakePending()
+    {
+        var v = Pending;
+        Pending = default;
+        return v;
+    }
+
     // ------------------------------------------------------------------ diagnostics
 
-    public string CaptureStackTrace(int maxFrames = 32)
+    /// <summary>
+    /// The active frames, innermost first, as (template, pc) pairs. Error objects capture this at creation and format the
+    /// trace only when <c>stack</c> is read: most errors are caught and never inspected.
+    /// </summary>
+    public StackFrameRecord[] CaptureStackFrames(int maxFrames = 32)
     {
-        var sb = new StringBuilder();
         int n = 0;
-        for (var f = Current; f != null && n < maxFrames; f = f.Caller, n++)
+        for (var f = Current; f != null && n < maxFrames; f = f.Caller) n++;
+        if (n == 0) return Array.Empty<StackFrameRecord>();
+        var frames = new StackFrameRecord[n];
+        n = 0;
+        for (var f = Current; f != null && n < frames.Length; f = f.Caller) frames[n++] = new StackFrameRecord(f.T, Math.Max(0, f.Pc - 1));
+        return frames;
+    }
+
+    public static string FormatStackTrace(StackFrameRecord[] frames)
+    {
+        if (frames.Length == 0) return "";
+        var sb = new StringBuilder();
+        foreach (var fr in frames)
         {
-            var (line, col) = f.T.GetPosition(Math.Max(0, f.Pc - 1));
-            string name = f.T.Name;
-            if ((f.T.Flags & (FunctionFlags.ScriptBody | FunctionFlags.ModuleBody)) != 0) name = "";
+            var t = fr.Template;
+            var (line, col) = t.GetPosition(fr.Pc);
+            string name = t.Name;
+            if ((t.Flags & (FunctionFlags.ScriptBody | FunctionFlags.ModuleBody)) != 0) name = "";
             sb.Append("\n    at ");
             if (name.Length > 0) sb.Append(name).Append(" (");
-            sb.Append(f.T.Script.SourceName).Append(':').Append(line).Append(':').Append(col);
+            sb.Append(t.Script.SourceName).Append(':').Append(line).Append(':').Append(col);
             if (name.Length > 0) sb.Append(')');
         }
         return sb.ToString();
     }
+
+    public string CaptureStackTrace(int maxFrames = 32) => FormatStackTrace(CaptureStackFrames(maxFrames));
 
     public (string source, int line, int column)? CurrentLocation()
     {
@@ -529,6 +670,7 @@ internal sealed partial class Vm
         for (int i = 0; i < _chunks.Count; i++) Array.Clear(_chunks[i]);
         for (int i = 0; i < _framePool.Length; i++) _framePool[i] = null;
         _chunkIndex = 0;
+        _chunk = _chunks[0];
         _top = 0;
         Current = null;
         Realm = _homeRealm;

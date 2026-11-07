@@ -302,7 +302,7 @@ public readonly struct JsValue : IEquatable<JsValue>
         JsTag.String => StringComparer.Ordinal.GetHashCode(AsStringUnchecked),
         JsTag.BigInt => BigIntValue.GetHashCode(),
         JsTag.Undefined or JsTag.Null or JsTag.Empty => (int)Tag,
-        _ => RuntimeHelpers.GetHashCode(Ref!),
+        _ => Ref is Runtime.JsObject o ? o.IdentityHash : RuntimeHelpers.GetHashCode(Ref!),
     };
 
     /// <summary>Equality operator (value equality for primitives, identity for objects).</summary>

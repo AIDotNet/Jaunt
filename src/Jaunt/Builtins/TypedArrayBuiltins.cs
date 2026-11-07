@@ -1,5 +1,6 @@
 using System;
 using System.Buffers.Binary;
+using System.Runtime.CompilerServices;
 using System.Collections.Generic;
 
 namespace Jaunt.Runtime;
@@ -166,6 +167,30 @@ internal sealed class JsTypedArray : JsObject
         if (!(char.IsAsciiDigit(c) || c == '-' || c == 'I' || c == 'N')) return false;
         double d = NumberFormatting.StringToNumber(s);
         return NumberFormatting.ToString(d) == s;
+    }
+
+    /// <summary>Interpreter fast path for <c>ta[key]</c> with a number key: an integer index inside a live view.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal bool TryGetElementFast(double key, out JsValue value)
+    {
+        int idx = (int)key;
+        if (idx == key && (uint)idx < (uint)Length) { value = GetElement(idx); return true; }
+        value = default;
+        return false;
+    }
+
+    /// <summary>
+    /// Interpreter fast path for <c>ta[key] = v</c> with number key and value on a non-BigInt view: a numeric key that is
+    /// not a valid integer index (fractional, negative, out of range) is ignored, exactly as the exotic [[Set]] does
+    /// after converting the value, which for a number has no effect. False leaves everything to the generic path.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal bool TrySetElementFast(double key, in JsValue v)
+    {
+        if (!v.IsNumber || Kind is TypedKind.BigInt64 or TypedKind.BigUint64 || Buffer.Immutable) return false;
+        int idx = (int)key;
+        if (idx == key && (uint)idx < (uint)Length) SetElement(idx, v.Num);
+        return true;
     }
 
     public JsValue GetElement(int index)

@@ -32,7 +32,23 @@ internal sealed class JsRegExp : JsObject
     public JsRegex? SliceFallback;
     public int[]? SliceFallbackGroups;
     public string Source = "";
-    public string Flags = "";
+    private string _flags = "";
+    private bool _global, _sticky, _unicode, _hasIndices;
+    /// <summary>The flags string; the individual flags are cached because every exec reads them.</summary>
+    public string Flags
+    {
+        get => _flags;
+        set
+        {
+            _flags = value;
+            _global = value.Contains('g');
+            _sticky = value.Contains('y');
+            _unicode = value.Contains('u') || value.Contains('v');
+            _hasIndices = value.Contains('d');
+        }
+    }
+    /// <summary>lastIndex is the first (and, being non-configurable, permanent) own property: its value lives in slot 0.</summary>
+    internal bool LastIndexInSlot0;
     public int GroupCount;
     public string[] GroupNames = Array.Empty<string>();
     /// <summary>[[LegacyFeaturesEnabled]]: false for instances allocated with a new.target other than %RegExp%.</summary>
@@ -41,10 +57,13 @@ internal sealed class JsRegExp : JsObject
     public JsRegExp(Realm realm, JsObject proto) : base(realm, proto) { }
     public override string ClassName => "RegExp";
 
-    public bool Global => Flags.Contains('g');
-    public bool Sticky => Flags.Contains('y');
-    public bool Unicode => Flags.Contains('u') || Flags.Contains('v');
-    public bool HasIndices => Flags.Contains('d');
+    public bool Global => _global;
+    public bool Sticky => _sticky;
+    public bool Unicode => _unicode;
+    public bool HasIndices => _hasIndices;
+
+    /// <summary>[[Get]] of lastIndex without a property lookup in the common case (an ordinary object with a data slot).</summary>
+    internal JsValue GetLastIndex() => LastIndexInSlot0 && Dict == null ? Slots[0] : Get("lastIndex");
 }
 
 internal static class RegExpBuiltins
@@ -116,7 +135,7 @@ internal static class RegExpBuiltins
             var realm = a.Realm;
             var s = Operations.ToString(realm, a[0]);
             if (a.This.Ref is JsRegExp re && IsPristineExec(realm, re))
-                return JsValue.FromBool(!Exec(realm, re, s).IsNull);
+                return JsValue.FromBool(ExecMatch(realm, re, s) != null);
             return JsValue.FromBool(!RegExpExec(realm, a.This, s).IsNull);
         });
         r.Method(proto, "toString", 0, static (in NativeArgs a) =>
@@ -280,6 +299,8 @@ internal static class RegExpBuiltins
             return JsValue.FromObject(res);
         });
         r.Method(proto, JsSymbol.Replace, "[Symbol.replace]", 2, static (in NativeArgs a) => SymbolReplace(a));
+
+        SnapshotPristine(r);
 
         var iterProto = new JsObject(r, r.IteratorPrototype);
         r.RegExpStringIteratorPrototype = iterProto;
@@ -448,6 +469,7 @@ internal static class RegExpBuiltins
             GroupNames = entry.Names,
         };
         re.AddOwnProperty("lastIndex", JsValue.Zero, PropFlags.Writable);
+        re.LastIndexInSlot0 = true;
         return re;
     }
 
@@ -486,7 +508,7 @@ internal static class RegExpBuiltins
             native = re.NativeIgnoreCase;
         if (native != null)
         {
-            var m = new JsRegex.Matcher(native, s, () => realm.Vm.Tick(64));
+            var m = new JsRegex.Matcher(native, s, realm.RegexTick ??= () => realm.Vm.Tick(64));
             if (!m.Search(start, sticky: false)) return s_noMatch;
             return new RegexMatch { Success = true, Caps = m.Caps, Input = s };
         }
@@ -515,7 +537,8 @@ internal static class RegExpBuiltins
         if (!dm.Success) return s_noMatch;
         int top = Math.Max(re.GroupCount, re.DotnetMaxGroup);
         var caps = new int[(top + 1) * 2];
-        for (int g = 0; g <= top; g++)
+        caps[0] = dm.Index; caps[1] = dm.Index + dm.Length;   // group 0 is the match itself: no GroupCollection needed
+        for (int g = 1; g <= top; g++)
         {
             var grp = dm.Groups[g];
             if (grp.Success) { caps[2 * g] = grp.Index; caps[2 * g + 1] = grp.Index + grp.Length; }
@@ -588,12 +611,47 @@ internal static class RegExpBuiltins
         return JsValue.FromObject(arr);
     }
 
-    private static bool IsPristineExec(Realm realm, JsRegExp re)
+    private static readonly string[] s_pristineKeys = { "exec", "flags", "global", "ignoreCase", "multiline", "dotAll", "unicode", "unicodeSets", "sticky", "hasIndices" };
+
+    private static void FindPristineSlots(Realm realm)
     {
-        if (!ReferenceEquals(re.Proto, realm.RegExpPrototype) || re.Dict != null) return false;
-        var exec = realm.RegExpPrototype.Get("exec");
-        return exec.Ref is JsBuiltin nf && nf.Name == "exec";
+        var slots = new int[s_pristineKeys.Length];
+        for (int i = 0; i < slots.Length; i++) slots[i] = realm.RegExpPrototype.FindOwn(s_pristineKeys[i], out _);
+        realm.RegExpPristineSlots = slots;
+        realm.RegExpPristineEpoch = realm.ProtoEpoch;
     }
+
+    /// <summary>Remembers the original <c>exec</c>, <c>flags</c> and flag accessors of %RegExp.prototype% (call after setup).</summary>
+    private static void SnapshotPristine(Realm realm)
+    {
+        var proto = realm.RegExpPrototype;
+        proto.IsPrototypeObject = true;   // so that adding or deleting a property bumps ProtoEpoch
+        FindPristineSlots(realm);
+        var refs = new object?[s_pristineKeys.Length];
+        for (int i = 0; i < refs.Length; i++) refs[i] = realm.RegExpPristineSlots![i] >= 0 ? proto.ReadSlot(realm.RegExpPristineSlots[i]).Ref : null;
+        realm.RegExpPristineRefs = refs;
+    }
+
+    /// <summary>
+    /// True when exec, flags and every flag accessor are the originals, so a built-in operation can skip the observable
+    /// property reads of the generic algorithms. The receiver must be an unmodified instance (nothing but lastIndex of its
+    /// own). Slot numbers are re-resolved when a prototype's shape changes (ProtoEpoch); the slot contents are compared on
+    /// every call, because assigning to <c>exec</c> or redefining an accessor with the same attributes bumps no epoch.
+    /// </summary>
+    private static bool IsRegExpPristine(Realm realm, JsRegExp re)
+    {
+        if (!ReferenceEquals(re.Proto, realm.RegExpPrototype) || re.Dict != null || re.Shape.Count != 1) return false;
+        if (realm.RegExpPristineEpoch != realm.ProtoEpoch) FindPristineSlots(realm);
+        var slots = realm.RegExpPristineSlots;
+        var refs = realm.RegExpPristineRefs;
+        if (slots == null || refs == null) return false;
+        var proto = realm.RegExpPrototype;
+        for (int i = 0; i < slots.Length; i++)
+            if (slots[i] < 0 || !ReferenceEquals(proto.ReadSlot(slots[i]).Ref, refs[i])) return false;
+        return true;
+    }
+
+    private static bool IsPristineExec(Realm realm, JsRegExp re) => IsRegExpPristine(realm, re);
 
     /// <summary>RegExpExec (22.2.7.1).</summary>
     public static JsValue RegExpExec(Realm realm, JsValue r, string s)
@@ -614,22 +672,33 @@ internal static class RegExpBuiltins
     /// <summary>RegExpBuiltinExec (22.2.7.2).</summary>
     public static JsValue Exec(Realm realm, JsRegExp re, string s)
     {
+        var m = ExecMatch(realm, re, s);
+        return m == null ? JsValue.Null : BuildExecResult(realm, re, m, s);
+    }
+
+    /// <summary>
+    /// RegExpBuiltinExec up to and including the lastIndex / legacy-static bookkeeping, without building the result
+    /// array: null when there is no match. <c>test</c> and similar callers stop here.
+    /// </summary>
+    internal static RegexMatch? ExecMatch(Realm realm, JsRegExp re, string s)
+    {
         bool global = re.Global, sticky = re.Sticky;
-        long lastIndex = Operations.ToLength(realm, re.Get("lastIndex")); // always read (observable)
+        var liv = re.GetLastIndex();   // always read (observable)
+        long lastIndex = liv.IsNumber && liv.Num >= 0 && liv.Num <= int.MaxValue ? (long)liv.Num : Operations.ToLength(realm, liv);
         if (!global && !sticky) lastIndex = 0;
         if (global || sticky)
         {
             if (lastIndex > s.Length)
             {
                 re.SetOrThrow("lastIndex", JsValue.Zero);
-                return JsValue.Null;
+                return null;
             }
         }
         var m = SafeMatch(realm, re, s, (int)lastIndex);
         if (!m.Success || (sticky && m.Index != lastIndex))
         {
             if (global || sticky) re.SetOrThrow("lastIndex", JsValue.Zero);
-            return JsValue.Null;
+            return null;
         }
         if (global || sticky) re.SetOrThrow("lastIndex", new JsValue(m.Index + m.Length));
         // legacy static properties: only the match is recorded here, the values are computed when read
@@ -638,6 +707,11 @@ internal static class RegExpBuiltins
             if (re.LegacyFeatures) RecordLegacy(realm, m, re.GroupCount);
             else { realm.LegacyInvalid = true; realm.LegacyMatch = null; realm.LegacyInput = null; }
         }
+        return m;
+    }
+
+    private static JsValue BuildExecResult(Realm realm, JsRegExp re, RegexMatch m, string s)
+    {
         var arr = new JsArray(realm, re.GroupCount + 1);
         arr.Push(new JsValue(m.Value));
         for (int g = 1; g <= re.GroupCount; g++) arr.Push(m.Group(g));
@@ -773,6 +847,7 @@ internal static class RegExpBuiltins
         var replaceValue = a[1];
         bool functional = replaceValue.IsFunction;
         string replaceStr = functional ? "" : Operations.ToString(realm, replaceValue);
+        if (rx is JsRegExp pre && IsRegExpPristine(realm, pre)) return FastReplace(realm, pre, s, replaceValue, functional, replaceStr);
         var flags = Operations.ToString(realm, rx.Get("flags"));
         bool global = flags.Contains('g');
         bool fullUnicode = flags.Contains('u') || flags.Contains('v');
@@ -838,6 +913,81 @@ internal static class RegExpBuiltins
     }
 
     /// <summary>GetSubstitution (22.1.3.19.1).</summary>
+    /// <summary>
+    /// RegExp.prototype[@@replace] for an unmodified regexp: the same matches, lastIndex updates and callback calls as the
+    /// generic algorithm, without the flags accessors or the intermediate result arrays.
+    /// </summary>
+    private static JsValue FastReplace(Realm realm, JsRegExp re, string s, JsValue replaceValue, bool functional, string replaceStr)
+    {
+        bool global = re.Global, fullUnicode = re.Unicode;
+        if (global) re.SetOrThrow("lastIndex", JsValue.Zero);
+        var matches = new List<RegexMatch>();
+        while (true)
+        {
+            var m = ExecMatch(realm, re, s);
+            if (m == null) break;
+            matches.Add(m);
+            if (!global) break;
+            if (m.Length == 0)
+            {
+                long li = Operations.ToLength(realm, re.GetLastIndex());
+                re.SetOrThrow("lastIndex", new JsValue(AdvanceIndex(s, li, fullUnicode)));
+            }
+            realm.Vm.Tick();
+        }
+        if (matches.Count == 0) return new JsValue(s);
+        bool plain = !functional && replaceStr.IndexOf('$') < 0;
+        var sb = new StringBuilder();
+        int charged = 0;
+        int nextSourcePosition = 0;
+        foreach (var m in matches)
+        {
+            int position = m.Index;
+            var matched = m.Value;
+            string replacement;
+            if (plain) replacement = replaceStr;
+            else
+            {
+                var captures = new JsValue[re.GroupCount];
+                for (int g = 1; g <= re.GroupCount; g++) captures[g - 1] = m.Group(g);
+                JsValue namedCaptures = JsValue.Undefined;
+                if (re.GroupNames.Length > 0)
+                {
+                    var go = new JsObject(realm, (JsObject?)null);
+                    for (int ni = 0; ni < re.GroupNames.Length; ni++)
+                    {
+                        JsValue gv = JsValue.Undefined;
+                        foreach (var g in re.NameGroups[ni]) if (m.Has(g)) { gv = m.Group(g); break; }
+                        go.CreateDataProperty(re.GroupNames[ni], gv);
+                    }
+                    namedCaptures = JsValue.FromObject(go);
+                }
+                if (functional)
+                {
+                    var args = new JsValue[captures.Length + 3 + (namedCaptures.IsUndefined ? 0 : 1)];
+                    args[0] = new JsValue(matched);
+                    Array.Copy(captures, 0, args, 1, captures.Length);
+                    args[captures.Length + 1] = new JsValue(position);
+                    args[captures.Length + 2] = new JsValue(s);
+                    if (!namedCaptures.IsUndefined) args[captures.Length + 3] = namedCaptures;
+                    replacement = Operations.ToString(realm, realm.Vm.Call(replaceValue, JsValue.Undefined, args));
+                }
+                else replacement = GetSubstitution(matched, s, position, captures, namedCaptures, replaceStr, realm);
+            }
+            if (position >= nextSourcePosition)
+            {
+                sb.Append(s, nextSourcePosition, position - nextSourcePosition).Append(replacement);
+                nextSourcePosition = position + matched.Length;
+            }
+            if (sb.Length > realm.MaxStringLength) throw JsErrors.RangeError(realm, "Invalid string length");
+            // the result is charged as it grows (tracked bytes + work), like the general path
+            if (sb.Length - charged >= 4096) { realm.ChargeOutput(sb.Length - charged); charged = sb.Length; }
+        }
+        if (nextSourcePosition < s.Length) sb.Append(s, nextSourcePosition, s.Length - nextSourcePosition);
+        realm.ChargeOutput(sb.Length - charged);
+        return new JsValue(sb.ToString());
+    }
+
     public static string GetSubstitution(string matched, string str, int position, JsValue[] captures, JsValue namedCaptures, string replacement, Realm realm)
     {
         if (replacement.IndexOf('$') < 0) return replacement;

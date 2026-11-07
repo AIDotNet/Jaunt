@@ -24,10 +24,18 @@ internal sealed partial class Vm
     /// delegated to <see cref="RareOp"/>, and slow paths are out-of-line calls. This keeps register pressure and
     /// the method's stack frame small. Invariant: the local <c>pc</c> is the start of the executing instruction
     /// until it completes; <c>f.Pc</c> is synchronized before any operation that can throw or call out.
+    /// <para>
+    /// The catch handler must not read any local of the loop: a local that is live into a handler is kept on the
+    /// stack by the JIT (every instruction would then load and store <c>pc</c>, <c>f</c> and <c>regs</c> through
+    /// memory). It parks the thrown value in a field and jumps to <c>Recover</c>, which rebuilds the locals from
+    /// <see cref="Current"/> and the <c>f.Pc</c> the faulting instruction recorded. The entry frame is marked with
+    /// <see cref="FrameFlags.Entry"/> for the same reason.
+    /// </para>
     /// </remarks>
     private JsValue RunLoop(Frame entry)
     {
         Frame f = entry;
+        f.Flags |= FrameFlags.Entry;
         int[] code = f.Code;
         JsValue[] regs = f.Regs;
         int bp = f.Base;
@@ -185,6 +193,7 @@ internal sealed partial class Vm
                                 continue;
                             }
                             f.Pc = pc + 1;
+                            if (ov.IsNullOrUndefined) { thrown = NullishReadError(ov, k[code[pc + 3]]); goto Unwind; }
                             regs[bp + code[pc + 1]] = GetPropSlow(ov, k[code[pc + 3]], ref ic);
                             pc += 5;
                             continue;
@@ -212,6 +221,7 @@ internal sealed partial class Vm
                                 }
                             }
                             f.Pc = pc + 1;
+                            if (ov.IsNullOrUndefined) { thrown = NullishSetError(ov, k[code[pc + 2]]); goto Unwind; }
                             SetPropSlow(ov, k[code[pc + 2]], regs[bp + code[pc + 3]], ref ic, f.T.IsStrict);
                             pc += 5;
                             continue;
@@ -220,13 +230,18 @@ internal sealed partial class Vm
                         {
                             var ov = regs[bp + code[pc + 2]];
                             var kv = regs[bp + code[pc + 3]];
-                            if (ov.IsObject && kv.IsNumber && ov.Ref is JsArray arr)
+                            if (ov.IsObject && kv.IsNumber)
                             {
-                                double dk = kv.Num;
-                                uint idx = (uint)dk;
-                                if (idx == dk && arr.TryGetDense(idx, out var ev)) { regs[bp + code[pc + 1]] = ev; pc += 4; continue; }
+                                if (ov.Ref is JsArray arr)
+                                {
+                                    double dk = kv.Num;
+                                    uint idx = (uint)dk;
+                                    if (idx == dk && arr.TryGetDense(idx, out var ev)) { regs[bp + code[pc + 1]] = ev; pc += 4; continue; }
+                                }
+                                else if (ov.Ref is JsTypedArray ta && ta.TryGetElementFast(kv.Num, out var tv)) { regs[bp + code[pc + 1]] = tv; pc += 4; continue; }
                             }
                             f.Pc = pc + 1;
+                            if (ov.IsNullOrUndefined) { thrown = NullishReadError(ov, kv); goto Unwind; }
                             regs[bp + code[pc + 1]] = GetElemSlow(ov, kv);
                             pc += 4;
                             continue;
@@ -255,7 +270,9 @@ internal sealed partial class Vm
                                     continue;
                                 }
                             }
+                            else if (ov.IsObject && kv.IsNumber && ov.Ref is JsTypedArray ta && ta.TrySetElementFast(kv.Num, regs[bp + code[pc + 3]])) { pc += 4; continue; }
                             f.Pc = pc + 1;
+                            if (ov.IsNullOrUndefined && (kv.IsString || kv.IsNumber)) { thrown = NullishSetError(ov, kv); goto Unwind; }
                             SetElemSlow(ov, kv, regs[bp + code[pc + 3]], f.T.IsStrict);
                             pc += 4;
                             continue;
@@ -584,13 +601,13 @@ internal sealed partial class Vm
                                 int nargs = targs.Length;
                                 if (_tailArgs.Length < nargs) _tailArgs = new JsValue[Math.Max(nargs, _tailArgs.Length * 2)];
                                 targs.CopyTo(_tailArgs);
-                                bool wasEntry = ReferenceEquals(f, entry);
+                                bool wasEntry = (f.Flags & FrameFlags.Entry) != 0;
                                 int retIndex = f.RetIndex;
                                 PopFrame(f);
                                 var nf = PushFrame(tc, thisV, new ReadOnlySpan<JsValue>(_tailArgs, 0, nargs), default, FrameFlags.None);
                                 Array.Clear(_tailArgs, 0, nargs);
                                 nf.RetIndex = retIndex;
-                                if (wasEntry) entry = nf;
+                                if (wasEntry) nf.Flags |= FrameFlags.Entry;
                                 f = nf;
                                 code = f.Code; regs = f.Regs; bp = f.Base; pc = 0; k = f.T.Constants;
                                 continue;
@@ -618,7 +635,15 @@ internal sealed partial class Vm
                                 code = f.Code; regs = f.Regs; bp = f.Base; pc = 0; k = f.T.Constants;
                                 continue;
                             }
-                            regs[dst] = CallValue(fv, tr < 0 ? default : regs[bp + tr], new ReadOnlySpan<JsValue>(regs, argStart, argc));
+                            if (fv.IsNotObject || fv.Ref is not JsFunctionObject fo) { thrown = NotCallableError(fv); goto Unwind; }
+                            {
+                                // a builtin is called directly so an error it raises (Vm.Raise) unwinds here without a CLR throw
+                                var r = fo is JsBuiltin b
+                                    ? b.Fn(new NativeArgs(b.Realm, tr < 0 ? default : regs[bp + tr], new ReadOnlySpan<JsValue>(regs, argStart, argc), JsValue.Undefined, b))
+                                    : fo.Call(tr < 0 ? default : regs[bp + tr], new ReadOnlySpan<JsValue>(regs, argStart, argc));
+                                if (r.IsEmpty) { f.Pc = pc + 1; thrown = TakePending(); goto Unwind; }
+                                regs[dst] = r;
+                            }
                             pc += 6;
                             continue;
                         }
@@ -645,6 +670,7 @@ internal sealed partial class Vm
                             if (!hit)
                             {
                                 f.Pc = pc + 1;
+                                if (ov.IsNullOrUndefined) { thrown = NullishReadError(ov, k[code[pc + 3]]); goto Unwind; }
                                 fv = GetPropSlow(ov, k[code[pc + 3]], ref ic);
                             }
                             f.Pc = pc + 7;
@@ -663,7 +689,8 @@ internal sealed partial class Vm
                             if (fv.IsNotObject || fv.Ref is not JsFunctionObject)
                             {
                                 f.Pc = pc + 1;
-                                throw NotAFunction(ov, k[code[pc + 3]]);
+                                thrown = NotAFunctionError(ov, k[code[pc + 3]]);
+                                goto Unwind;
                             }
                             // arr.push(v) on a plain array: append without building NativeArgs
                             if (argc == 1 && fv.Ref is JsBuiltin pb && ReferenceEquals(pb.Fn, ArrayBuiltins.PushFn) && ov.Ref is JsArray pa
@@ -674,7 +701,13 @@ internal sealed partial class Vm
                                 pc += 7;
                                 continue;
                             }
-                            regs[dst] = Unsafe.As<JsFunctionObject>(fv.Ref!).Call(ov, new ReadOnlySpan<JsValue>(regs, argStart, argc));
+                            {
+                                var r = fv.Ref is JsBuiltin b
+                                    ? b.Fn(new NativeArgs(b.Realm, ov, new ReadOnlySpan<JsValue>(regs, argStart, argc), JsValue.Undefined, b))
+                                    : Unsafe.As<JsFunctionObject>(fv.Ref!).Call(ov, new ReadOnlySpan<JsValue>(regs, argStart, argc));
+                                if (r.IsEmpty) { f.Pc = pc + 1; thrown = TakePending(); goto Unwind; }
+                                regs[dst] = r;
+                            }
                             pc += 7;
                             continue;
                         }
@@ -730,7 +763,7 @@ internal sealed partial class Vm
                         case Op.YieldRaw:
                         case Op.Await:
                         {
-                            if (!ReferenceEquals(f, entry)) throw new InvalidOperationException("Jaunt internal error: suspension outside coroutine entry frame.");
+                            if ((f.Flags & FrameFlags.Entry) == 0) throw new InvalidOperationException("Jaunt internal error: suspension outside coroutine entry frame.");
                             var op = (Op)code[pc];
                             result = regs[bp + code[pc + 1]];
                             f.ResumeSentReg = code[pc + 2];
@@ -761,30 +794,25 @@ internal sealed partial class Vm
             }
             catch (JsThrowException ex)
             {
-                thrown = ex.Value;
-                // pc is still the start of the faulting instruction of frame f (calls keep it until they return)
-                f.Pc = pc + 1;
-                goto Unwind;
+                // no loop local is read here (see remarks); the faulting frame is Current and recorded its pc
+                Pending = ex.Value;
+                goto Recover;
             }
 
         Return:
             {
                 var done = f;
-                if ((done.Flags & FrameFlags.Construct) != 0)
+                if ((done.Flags & FrameFlags.Construct) != 0 && !TryConstructResult(done, ref result, out var ctorError))
                 {
-                    try { result = ConstructResult(done, result); }
-                    catch (JsThrowException ex)
-                    {
-                        if (ReferenceEquals(done, entry)) { PopFrame(done); throw; }
-                        f = done.Caller!;
-                        PopFrame(done);
-                        code = f.Code; regs = f.Regs; bp = f.Base; k = f.T.Constants;
-                        pc = f.Pc - 1;
-                        thrown = ex.Value;
-                        goto Unwind;
-                    }
+                    // raised in the caller's context, after the callee frame is removed
+                    if ((done.Flags & FrameFlags.Entry) != 0) { PopFrame(done); throw new JsThrowException(ctorError); }
+                    f = done.Caller!;
+                    PopFrame(done);
+                    code = f.Code; regs = f.Regs; bp = f.Base; k = f.T.Constants;
+                    thrown = ctorError;
+                    goto Unwind;
                 }
-                if (ReferenceEquals(done, entry))
+                if ((done.Flags & FrameFlags.Entry) != 0)
                 {
                     if ((done.Flags & FrameFlags.Coroutine) != 0) { done.Suspend = SuspendKind.None; LastSuspend = SuspendKind.None; DetachFrame(done); }
                     else PopFrame(done);
@@ -797,6 +825,13 @@ internal sealed partial class Vm
                 code = f.Code; regs = f.Regs; bp = f.Base; pc = f.Pc; k = f.T.Constants;
                 continue;
             }
+
+        Recover:
+            // a CLR exception left the loop: every frame above the faulting one has already been popped by the
+            // nested loops that owned them, so Current is the frame executing the instruction at f.Pc - 1
+            f = Current!;
+            code = f.Code; regs = f.Regs; bp = f.Base; k = f.T.Constants;
+            thrown = TakePending();
 
         Unwind:
             while (true)
@@ -818,7 +853,7 @@ internal sealed partial class Vm
                     break;
                 }
                 var done = f;
-                if (ReferenceEquals(done, entry))
+                if ((done.Flags & FrameFlags.Entry) != 0)
                 {
                     if ((done.Flags & FrameFlags.Coroutine) != 0) { done.Suspend = SuspendKind.None; LastSuspend = SuspendKind.None; DetachFrame(done); }
                     else PopFrame(done);
@@ -845,8 +880,10 @@ internal sealed partial class Vm
         JsValue.FromObject(JsError.Create(Realm, ErrorKind.ReferenceError, "Must call super constructor in derived class before accessing 'this' or returning from derived constructor"));
 
     [MethodImpl(MethodImplOptions.NoInlining)]
-    private JsThrowException NotAFunction(JsValue receiver, JsValue name) =>
-        JsErrors.TypeError(Realm, $"{DescribeReceiver(receiver)}.{name.AsStringUnchecked} is not a function");
+    private JsValue NotAFunctionError(JsValue receiver, JsValue name) =>
+        ErrorValue(ErrorKind.TypeError, $"{DescribeReceiver(receiver)}.{name.AsStringUnchecked} is not a function");
+
+    private JsThrowException NotAFunction(JsValue receiver, JsValue name) => new(NotAFunctionError(receiver, name));
 
     [MethodImpl(MethodImplOptions.NoInlining)]
     private JsValue AddSlow(in JsValue a, in JsValue b) => Operations.Add(Realm, a, b);

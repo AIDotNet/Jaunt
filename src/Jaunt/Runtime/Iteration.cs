@@ -16,16 +16,30 @@ internal sealed class IteratorRecord
     // array fast path
     private JsArray? _array;
     private uint _index;
+    // Map/Set fast path: the table is walked directly, no iterator or result objects
+    private OrderedTable? _table;
+    private TableCursor? _cursor;
+    private bool _entries;
 
     private IteratorRecord(Realm realm) => _realm = realm;
 
     public static IteratorRecord Get(Realm realm, in JsValue iterable)
     {
         var rec = new IteratorRecord(realm);
-        if (iterable.IsObject && iterable.Ref is JsArray arr && realm.IsArrayIterationPristine(arr))
+        if (iterable.IsObject)
         {
-            rec._array = arr;
-            return rec;
+            if (iterable.Ref is JsArray arr && realm.IsArrayIterationPristine(arr))
+            {
+                rec._array = arr;
+                return rec;
+            }
+            if (iterable.Ref is JsMap m && realm.IsMapIterationPristine(m))
+            {
+                rec._table = m.Table;
+                rec._cursor = m.Table.CreateCursor();
+                rec._entries = !m.IsSet;
+                return rec;
+            }
         }
         var method = Operations.GetV(realm, iterable, JsSymbol.Iterator);
         if (!method.IsFunction) throw JsErrors.TypeError(realm, $"{JsErrors.Describe(iterable)} is not iterable");
@@ -54,6 +68,24 @@ internal sealed class IteratorRecord
             {
                 if (!a.TryGetDense(_index, out value)) value = a.GetIndex(_index, JsValue.FromObject(a));
                 _index++;
+                return true;
+            }
+            Done = true;
+            value = default;
+            return false;
+        }
+        if (_table != null)
+        {
+            if (_table.Next(_cursor!, out var key, out var val))
+            {
+                if (_entries)
+                {
+                    var pair = _realm.NewArray(2);
+                    pair.Push(key);
+                    pair.Push(val);
+                    value = JsValue.FromObject(pair);
+                }
+                else value = key;
                 return true;
             }
             Done = true;

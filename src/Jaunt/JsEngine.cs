@@ -172,6 +172,7 @@ public sealed partial class JsEngine : IDisposable
         if (ReferenceEquals(_root, root)) _root = null;
         _executions++;
         if (Vm.Depth != 0 || Vm.Current != null) Vm.ResetStack();
+        else Vm.ReleasePooledFrames();
         Interlocked.CompareExchange(ref _state, StateReady, StateExecuting);
         if (Volatile.Read(ref _disposeRequested) != 0) CompleteDispose();
     }

@@ -333,14 +333,25 @@ internal sealed class JsBuiltin : JsFunctionObject
     public override bool IsConstructor => Constructor;
     public override string DebugName => Name;
 
+    // A builtin that raised an error through Vm.Raise returns JsValue.Empty; the interpreter dispatches that to a JS
+    // handler directly, every other caller gets the CLR exception it expects.
     public override JsValue Call(JsValue thisValue, ReadOnlySpan<JsValue> args)
-        => Fn(new NativeArgs(Realm, thisValue, args, JsValue.Undefined, this));
+    {
+        var r = Fn(new NativeArgs(Realm, thisValue, args, JsValue.Undefined, this));
+        if (r.IsEmpty) ThrowPending();
+        return r;
+    }
 
     public override JsValue Construct(ReadOnlySpan<JsValue> args, JsObject newTarget)
     {
         if (!Constructor) throw JsErrors.TypeError(Realm, $"{Name} is not a constructor");
-        return Fn(new NativeArgs(Realm, JsValue.Undefined, args, JsValue.FromObject(newTarget), this));
+        var r = Fn(new NativeArgs(Realm, JsValue.Undefined, args, JsValue.FromObject(newTarget), this));
+        if (r.IsEmpty) ThrowPending();
+        return r;
     }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private void ThrowPending() => throw new JsThrowException(Realm.Vm.TakePending());
 }
 
 internal sealed class JsBoundFunction : JsFunctionObject

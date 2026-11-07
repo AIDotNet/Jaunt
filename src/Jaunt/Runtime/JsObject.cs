@@ -29,6 +29,18 @@ internal class JsObject
     internal bool IsPrototypeObject;
     /// <summary>True for exotic objects whose [[Get]]/[[Set]]/... are not purely shape-driven.</summary>
     internal readonly bool IsExotic;
+    private int _identityHash;
+
+    /// <summary>Stable per-object hash for Map/Set keys and other identity tables (see <see cref="Realm.NextIdentityHash"/>).</summary>
+    internal int IdentityHash
+    {
+        get
+        {
+            int h = _identityHash;
+            if (h == 0) h = _identityHash = Realm.NextIdentityHash();
+            return h;
+        }
+    }
     internal Shape? ChildRootShape;
     internal Shape? FunctionChildShape;
     /// <summary>Private class elements (#x), keyed by private name identity.</summary>

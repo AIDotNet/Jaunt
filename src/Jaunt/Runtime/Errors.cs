@@ -77,7 +77,11 @@ internal sealed class JsError : JsObject
 {
     public string Name;
     public string MessageText;
-    public string StackTrace = "";
+    private StackFrameRecord[]? _frames;
+    private string? _stackTrace;
+
+    /// <summary>The JS stack trace text (frames only), formatted on first use from the frames captured at creation.</summary>
+    public string StackTrace => _stackTrace ??= _frames == null ? "" : Vm.FormatStackTrace(_frames);
     /// <summary>Original CLR exception when this error was produced from a failing host function.</summary>
     public Exception? HostException;
 
@@ -99,7 +103,11 @@ internal sealed class JsError : JsObject
     }
 
     /// <summary>Records the JS stack trace; exposed through the Error.prototype.stack accessor (no own property).</summary>
-    public void CaptureStack() => StackTrace = Realm.Vm.CaptureStackTrace();
+    public void CaptureStack()
+    {
+        _frames = Realm.Vm.CaptureStackFrames();
+        _stackTrace = null;
+    }
 
     /// <summary>The string returned by the Error.prototype.stack getter.</summary>
     public string StackString => Name + (MessageText.Length > 0 ? ": " + MessageText : "") + StackTrace;

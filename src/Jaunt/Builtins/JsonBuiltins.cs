@@ -25,11 +25,13 @@ internal static class JsonBuiltins
                 var rec = p.LastRecord;
                 p.SkipWs();
                 if (p.Pos < text.Length) p.Fail($"Unexpected token '{text[p.Pos]}'");
+                if (p.Error != null) return realm.Vm.Raise(p.ErrorValue());
                 var root = realm.NewObject();
                 root.CreateDataProperty("", pv);
                 return Internalize(realm, root, "", a[1], rec, text);
             }
-            return Parse(realm, text, maxDepth: 512);
+            // a syntax error is raised without a CLR throw: JSON.parse of untrusted input inside try/catch is common
+            return TryParse(realm, text, 512, out var v, out var error) ? v : realm.Vm.Raise(error);
         });
         r.Method(json, "rawJSON", 1, static (in NativeArgs a) =>
         {
@@ -107,12 +109,24 @@ internal static class JsonBuiltins
 
     public static JsValue Parse(Realm realm, string text, int maxDepth)
     {
+        if (!TryParse(realm, text, maxDepth, out var v, out var error)) throw new JsThrowException(error);
+        return v;
+    }
+
+    /// <summary>
+    /// Parses <paramref name="text"/>; false with the SyntaxError in <paramref name="error"/> instead of a throw.
+    /// (Not a nullable JsValue: the implicit string conversion turns a bare <c>null</c> into <see cref="JsValue.Null"/>.)
+    /// </summary>
+    private static bool TryParse(Realm realm, string text, int maxDepth, out JsValue value, out JsValue error)
+    {
         var p = new JsonParser(realm, text, maxDepth);
         p.SkipWs();
-        var v = p.ParseValue(0);
+        value = p.ParseValue(0);
         p.SkipWs();
         if (p.Pos != text.Length) p.Fail("Unexpected non-whitespace character after JSON");
-        return v;
+        if (p.Error != null) { error = p.ErrorValue(); value = default; return false; }
+        error = default;
+        return true;
     }
 
     private struct JsonParser
@@ -132,7 +146,26 @@ internal static class JsonBuiltins
             _keyCache = null;
         }
 
-        public void Fail(string msg) => throw JsErrors.SyntaxError(_realm, $"{msg} in JSON at position {Pos}");
+        /// <summary>First syntax error seen, with its position; set by <see cref="Fail"/>.</summary>
+        public string? Error;
+        public int ErrorPos;
+
+        /// <summary>
+        /// Records the first syntax error and moves to the end of the input, after which every loop ends and every caller
+        /// returns on its own "unexpected end" check: the parse finishes without a CLR throw and its result is discarded.
+        /// Each caller returns right after calling this.
+        /// </summary>
+        public JsValue Fail(string msg)
+        {
+            if (Error == null) { Error = msg; ErrorPos = Pos; }
+            Pos = _s.Length;
+            return default;
+        }
+
+        private string FailString(string msg) { Fail(msg); return ""; }
+        private double FailNumber(string msg) { Fail(msg); return 0; }
+
+        public JsValue ErrorValue() => JsValue.FromObject(JsError.Create(_realm, ErrorKind.SyntaxError, $"{Error} in JSON at position {ErrorPos}"));
 
         public void SkipWs()
         {
@@ -168,7 +201,7 @@ internal static class JsonBuiltins
 
         private JsValue ParseValueCore(int depth)
         {
-            if (Pos >= _s.Length) Fail("Unexpected end of JSON input");
+            if (Pos >= _s.Length) return Fail("Unexpected end of JSON input");
             char c = _s[Pos];
             switch (c)
             {
@@ -180,14 +213,13 @@ internal static class JsonBuiltins
                 case 'n': Expect("null"); return JsValue.Null;
                 default:
                     if (c == '-' || (c >= '0' && c <= '9')) return new JsValue(ParseNumber());
-                    Fail($"Unexpected token '{c}'");
-                    return default;
+                    return Fail($"Unexpected token '{c}'");
             }
         }
 
         private void Expect(string word)
         {
-            if (string.CompareOrdinal(_s, Pos, word, 0, word.Length) != 0) Fail("Unexpected token");
+            if (string.CompareOrdinal(_s, Pos, word, 0, word.Length) != 0) { Fail("Unexpected token"); return; }
             Pos += word.Length;
         }
 
@@ -202,10 +234,10 @@ internal static class JsonBuiltins
             while (true)
             {
                 SkipWs();
-                if (Pos >= _s.Length || _s[Pos] != '"') Fail("Expected property name");
+                if (Pos >= _s.Length || _s[Pos] != '"') return Fail("Expected property name");
                 var key = ParseKey();
                 SkipWs();
-                if (Pos >= _s.Length || _s[Pos] != ':') Fail("Expected ':' after property name");
+                if (Pos >= _s.Length || _s[Pos] != ':') return Fail("Expected ':' after property name");
                 Pos++;
                 SkipWs();
                 var v = ParseValue(depth);
@@ -213,10 +245,10 @@ internal static class JsonBuiltins
                 o.CreateDataProperty(new PropertyKey(key), v);
                 _realm.Vm.Tick();
                 SkipWs();
-                if (Pos >= _s.Length) Fail("Unexpected end of JSON input");
+                if (Pos >= _s.Length) return Fail("Unexpected end of JSON input");
                 char c = _s[Pos++];
                 if (c == '}') break;
-                if (c != ',') { Pos--; Fail("Expected ',' or '}' after property value"); }
+                if (c != ',') { Pos--; return Fail("Expected ',' or '}' after property value"); }
             }
             _pendingEntries = entries;
             return JsValue.FromObject(o);
@@ -237,10 +269,10 @@ internal static class JsonBuiltins
                 elements?.Add(LastRecord);
                 _realm.Vm.Tick();
                 SkipWs();
-                if (Pos >= _s.Length) Fail("Unexpected end of JSON input");
+                if (Pos >= _s.Length) return Fail("Unexpected end of JSON input");
                 char c = _s[Pos++];
                 if (c == ']') break;
-                if (c != ',') { Pos--; Fail("Expected ',' or ']' after array element"); }
+                if (c != ',') { Pos--; return Fail("Expected ',' or ']' after array element"); }
             }
             _pendingElements = elements;
             return JsValue.FromObject(a);
@@ -285,19 +317,19 @@ internal static class JsonBuiltins
                 char c = s[Pos];
                 if (c == '"') { var r = s.Substring(start, Pos - start); Pos++; return Charge(r); }
                 if (c == '\\') break;
-                if (c < 0x20) Fail("Bad control character in string literal");
+                if (c < 0x20) return FailString("Bad control character in string literal");
                 Pos++;
             }
             var sb = new StringBuilder();
             sb.Append(s, start, Pos - start);
             while (true)
             {
-                if (Pos >= s.Length) Fail("Unterminated string");
+                if (Pos >= s.Length) return FailString("Unterminated string");
                 char c = s[Pos++];
                 if (c == '"') break;
-                if (c < 0x20) { Pos--; Fail("Bad control character in string literal"); }
+                if (c < 0x20) { Pos--; return FailString("Bad control character in string literal"); }
                 if (c != '\\') { sb.Append(c); continue; }
-                if (Pos >= s.Length) Fail("Bad escaped character");
+                if (Pos >= s.Length) return FailString("Bad escaped character");
                 char e = s[Pos++];
                 switch (e)
                 {
@@ -310,18 +342,18 @@ internal static class JsonBuiltins
                     case 'r': sb.Append('\r'); break;
                     case 't': sb.Append('\t'); break;
                     case 'u':
-                        if (Pos + 4 > s.Length) Fail("Bad Unicode escape");
+                        if (Pos + 4 > s.Length) return FailString("Bad Unicode escape");
                         int v = 0;
                         for (int i = 0; i < 4; i++)
                         {
                             int d = NumberFormatting.DigitValue(s[Pos + i]);
-                            if (d < 0 || d > 15) Fail("Bad Unicode escape");
+                            if (d < 0 || d > 15) return FailString("Bad Unicode escape");
                             v = v * 16 + d;
                         }
                         Pos += 4;
                         sb.Append((char)v);
                         break;
-                    default: Pos--; Fail("Bad escaped character"); break;
+                    default: Pos--; return FailString("Bad escaped character");
                 }
             }
             return Charge(sb.ToString());
@@ -335,16 +367,16 @@ internal static class JsonBuiltins
             int start = Pos;
             var s = _s;
             if (s[Pos] == '-') Pos++;
-            if (Pos >= s.Length) Fail("No number after minus sign");
+            if (Pos >= s.Length) return FailNumber("No number after minus sign");
             if (s[Pos] == '0') Pos++;
             else if (s[Pos] >= '1' && s[Pos] <= '9') { while (Pos < s.Length && char.IsAsciiDigit(s[Pos])) Pos++; }
-            else Fail("No number after minus sign");
+            else return FailNumber("No number after minus sign");
             bool simple = true;
             if (Pos < s.Length && s[Pos] == '.')
             {
                 simple = false;
                 Pos++;
-                if (Pos >= s.Length || !char.IsAsciiDigit(s[Pos])) Fail("Unterminated fractional number");
+                if (Pos >= s.Length || !char.IsAsciiDigit(s[Pos])) return FailNumber("Unterminated fractional number");
                 while (Pos < s.Length && char.IsAsciiDigit(s[Pos])) Pos++;
             }
             if (Pos < s.Length && (s[Pos] == 'e' || s[Pos] == 'E'))
@@ -352,7 +384,7 @@ internal static class JsonBuiltins
                 simple = false;
                 Pos++;
                 if (Pos < s.Length && (s[Pos] == '+' || s[Pos] == '-')) Pos++;
-                if (Pos >= s.Length || !char.IsAsciiDigit(s[Pos])) Fail("Exponent part is missing a number");
+                if (Pos >= s.Length || !char.IsAsciiDigit(s[Pos])) return FailNumber("Exponent part is missing a number");
                 while (Pos < s.Length && char.IsAsciiDigit(s[Pos])) Pos++;
             }
             int len = Pos - start;
@@ -509,22 +541,23 @@ internal static class JsonBuiltins
         }
 
         /// <summary>SerializeJSONProperty; returns false when the result is undefined (nothing appended).</summary>
-        public bool SerializeProperty(JsObject holder, string key, JsValue value)
+        public bool SerializeProperty(JsObject holder, string? key, JsValue value, uint index = 0)
         {
+            // an array element's key string ("0", "1", ...) is only built when toJSON or a replacer asks for it
             var realm = Realm;
             realm.Vm.Tick();
             if (value.IsObject)
             {
                 var toJson = GetToJson(value.AsObjectUnchecked, value);
-                if (toJson.IsFunction) value = realm.Vm.Call(toJson, value, new[] { new JsValue(key) });
+                if (toJson.IsFunction) value = realm.Vm.Call(toJson, value, new[] { new JsValue(key ?? PropertyKey.IndexToString(index)) });
             }
             else if (value.IsBigInt)
             {
                 var toJson = realm.BigIntPrototype.Get("toJSON", value);
-                if (toJson.IsFunction) value = realm.Vm.Call(toJson, value, new[] { new JsValue(key) });
+                if (toJson.IsFunction) value = realm.Vm.Call(toJson, value, new[] { new JsValue(key ?? PropertyKey.IndexToString(index)) });
             }
             if (!ReplacerFn.IsUndefined)
-                value = realm.Vm.Call(ReplacerFn, JsValue.FromObject(holder), new[] { new JsValue(key), value });
+                value = realm.Vm.Call(ReplacerFn, JsValue.FromObject(holder), new[] { new JsValue(key ?? PropertyKey.IndexToString(index)), value });
             if (value.Ref is JsRawJson raw)
             {
                 // raw JSON text is emitted verbatim
@@ -673,8 +706,9 @@ internal static class JsonBuiltins
                     Realm.Vm.Tick();
                     if (i > 0) Sb.Append(',');
                     if (Gap.Length > 0) Sb.Append('\n').Append(_indent);
-                    var v = o.GetIndex((uint)i, self);
-                    if (!SerializeProperty(o, PropertyKey.IndexToString((uint)i), v)) Sb.Append("null");
+                    JsValue v;
+                    if (!(o is JsArray da && da.TryGetDense((uint)i, out v))) v = o.GetIndex((uint)i, self);
+                    if (!SerializeProperty(o, null, v, (uint)i)) Sb.Append("null");
                 }
                 if (len > 0 && Gap.Length > 0) Sb.Append('\n').Append(stepback);
                 Sb.Append(']');
@@ -705,6 +739,13 @@ internal static class JsonBuiltins
 
     public static void Quote(StringBuilder sb, string s)
     {
+        // Printable ASCII without quote or backslash (nearly every key and most values) needs no escaping: one append.
+        var span = s.AsSpan();
+        if (span.IndexOfAnyExceptInRange((char)0x20, (char)0x7E) < 0 && span.IndexOfAny('"', '\\') < 0)
+        {
+            sb.Append('"').Append(s).Append('"');
+            return;
+        }
         sb.Append('"');
         int start = 0;
         for (int i = 0; i < s.Length; i++)

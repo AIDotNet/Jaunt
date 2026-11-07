@@ -71,6 +71,26 @@ internal sealed class JsArray : JsObject
         Items[Length++] = v;
     }
 
+    /// <summary>
+    /// Appends every element of <paramref name="src"/> in one copy (array spread of a pristine array). False when the
+    /// element-by-element path is needed: either array is not dense, or <paramref name="src"/> has holes, which read
+    /// through the prototype chain.
+    /// </summary>
+    internal bool TryAppendDense(JsArray src)
+    {
+        if (!Dense || !LengthWritable || !Extensible || !src.Dense) return false;
+        uint n = src.Length;
+        var items = src.Items;
+        if (n > (uint)items.Length || (ulong)Length + n >= uint.MaxValue - 1) return false;
+        for (uint i = 0; i < n; i++) if (items[i].IsEmpty) return false;
+        if (n == 0) return true;
+        uint start = Length;
+        if (start + n > (uint)Items.Length) EnsureCapacity(start + n);
+        Array.Copy(items, 0, Items, start, n);
+        Length = start + n;
+        return true;
+    }
+
     internal void PushHole()
     {
         if (!Dense) { SetLength(Length + 1); return; }

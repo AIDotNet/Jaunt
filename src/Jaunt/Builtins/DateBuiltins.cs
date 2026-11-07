@@ -31,8 +31,31 @@ internal static class DateBuiltins
     private static double DayFromYear(double y) => 365 * (y - 1970) + Math.Floor((y - 1969) / 4) - Math.Floor((y - 1901) / 100) + Math.Floor((y - 1601) / 400);
     private static double TimeFromYear(double y) => MsPerDay * DayFromYear(y);
 
+    /// <summary>Largest |time value| the integer calendar conversion handles (about 3 million years: far beyond the Date range).</summary>
+    private const double CivilLimit = 1e17;
+
+    /// <summary>Year, month (1-12) and day of month (1-31) of a count of days since 1970-01-01 (proleptic Gregorian).</summary>
+    private static void CivilFromDays(long z, out long y, out int m, out int d)
+    {
+        z += 719468;
+        long era = (z >= 0 ? z : z - 146096) / 146097;
+        long doe = z - era * 146097;
+        long yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+        y = yoe + era * 400;
+        long doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+        long mp = (5 * doy + 2) / 153;
+        d = (int)(doy - (153 * mp + 2) / 5 + 1);
+        m = (int)(mp < 10 ? mp + 3 : mp - 9);
+        if (m <= 2) y++;
+    }
+
     public static double YearFromTime(double t)
     {
+        if (Math.Abs(t) < CivilLimit)
+        {
+            CivilFromDays((long)Math.Floor(t / MsPerDay), out long cy, out _, out _);
+            return cy;
+        }
         double y = Math.Floor(t / (MsPerDay * 365.2425)) + 1970;
         while (TimeFromYear(y) > t) y--;
         while (TimeFromYear(y + 1) <= t) y++;
@@ -46,6 +69,11 @@ internal static class DateBuiltins
 
     public static double MonthFromTime(double t)
     {
+        if (Math.Abs(t) < CivilLimit)
+        {
+            CivilFromDays((long)Math.Floor(t / MsPerDay), out _, out int cm, out _);
+            return cm - 1;
+        }
         double d = DayWithinYear(t);
         int leap = InLeapYear(t) ? 1 : 0;
         for (int m = 0; m < 12; m++)
@@ -58,6 +86,11 @@ internal static class DateBuiltins
 
     public static double DateFromTime(double t)
     {
+        if (Math.Abs(t) < CivilLimit)
+        {
+            CivilFromDays((long)Math.Floor(t / MsPerDay), out _, out _, out int cd);
+            return cd;
+        }
         double d = DayWithinYear(t);
         int m = (int)MonthFromTime(t);
         int leap = InLeapYear(t) && m >= 2 ? 1 : 0;
@@ -351,10 +384,32 @@ internal static class DateBuiltins
 
     public static string IsoString(double t)
     {
-        double y = YearFromTime(t);
-        string ys = y >= 0 && y <= 9999 ? ((int)y).ToString("0000", CultureInfo.InvariantCulture)
-            : (y < 0 ? "-" : "+") + ((int)Math.Abs(y)).ToString("000000", CultureInfo.InvariantCulture);
-        return $"{ys}-{Pad2(MonthFromTime(t) + 1)}-{Pad2(DateFromTime(t))}T{Pad2(HourFromTime(t))}:{Pad2(MinFromTime(t))}:{Pad2(SecFromTime(t))}.{((int)MsFromTime(t)).ToString("000", CultureInfo.InvariantCulture)}Z";
+        double tod = TimeWithinDay(t);
+        CivilFromDays((long)Math.Floor(t / MsPerDay), out long y, out int mo, out int d);
+        int msOfDay = (int)tod;
+        int h = msOfDay / 3600000, mi = msOfDay / 60000 % 60, sec = msOfDay / 1000 % 60, ms = msOfDay % 1000;
+        bool extended = y < 0 || y > 9999;
+        int yearChars = extended ? 7 : 4;
+        return string.Create(yearChars + 20, (y, mo, d, h, mi, sec, ms, extended), static (span, v) =>
+        {
+            int p = 0;
+            long ay = Math.Abs(v.y);
+            if (v.extended) { span[p++] = v.y < 0 ? '-' : '+'; Digits(span, ref p, (int)ay, 6); }
+            else Digits(span, ref p, (int)ay, 4);
+            span[p++] = '-'; Digits(span, ref p, v.mo, 2);
+            span[p++] = '-'; Digits(span, ref p, v.d, 2);
+            span[p++] = 'T'; Digits(span, ref p, v.h, 2);
+            span[p++] = ':'; Digits(span, ref p, v.mi, 2);
+            span[p++] = ':'; Digits(span, ref p, v.sec, 2);
+            span[p++] = '.'; Digits(span, ref p, v.ms, 3);
+            span[p] = 'Z';
+        });
+    }
+
+    private static void Digits(Span<char> span, ref int p, int value, int width)
+    {
+        for (int i = width - 1; i >= 0; i--) { span[p + i] = (char)('0' + value % 10); value /= 10; }
+        p += width;
     }
 
     private static string DatePart(double lt) => $"{DayNames[(int)WeekDay(lt)]} {MonthNames[(int)MonthFromTime(lt)]} {Pad2(DateFromTime(lt))} {YearString(YearFromTime(lt))}";
@@ -396,9 +451,94 @@ internal static class DateBuiltins
         @"^([+-]\d{6}|\d{4})(?:-(\d{2})(?:-(\d{2}))?)?(?:T(\d{2}):(\d{2})(?::(\d{2})(?:[.,](\d{1,9}))?)?(Z|[+-]\d{2}:\d{2})?)?$",
         RegexOptions.CultureInvariant);
 
+    private static bool Dig(string s, int p, int n, out int v)
+    {
+        v = 0;
+        if (p + n > s.Length) return false;
+        for (int i = 0; i < n; i++)
+        {
+            int c = s[p + i] - '0';
+            if ((uint)c > 9) return false;
+            v = v * 10 + c;
+        }
+        return true;
+    }
+
+    /// <summary>
+    /// The ECMAScript date-time string format, matched by hand (ASCII digits only), equivalent to <see cref="IsoRegex"/> but
+    /// without a regex match and a dozen small allocations per parse. Returns false when <paramref name="s"/> is not in
+    /// that format; the milliseconds are the exact first three fraction digits.
+    /// </summary>
+    private static bool TryParseIso(string s, out double y, out double mo, out double d, out double h, out double mi, out double sec, out double ms, out int zone, out double zoneMinutes, out bool hasTime, out bool negativeZeroYear)
+    {
+        y = 0; mo = 0; d = 1; h = 0; mi = 0; sec = 0; ms = 0; zone = 0; zoneMinutes = 0; hasTime = false; negativeZeroYear = false;
+        int p = 0, n = s.Length, v;
+        if (n < 4) return false;
+        if (s[0] is '+' or '-')
+        {
+            if (!Dig(s, 1, 6, out v)) return false;
+            negativeZeroYear = s[0] == '-' && v == 0;
+            y = s[0] == '-' ? -v : v;
+            p = 7;
+        }
+        else
+        {
+            if (!Dig(s, 0, 4, out v)) return false;
+            y = v;
+            p = 4;
+        }
+        if (p < n && s[p] == '-')
+        {
+            if (!Dig(s, p + 1, 2, out v)) return false;
+            mo = v - 1; p += 3;
+            if (p < n && s[p] == '-')
+            {
+                if (!Dig(s, p + 1, 2, out v)) return false;
+                d = v; p += 3;
+            }
+        }
+        if (p < n && s[p] == 'T')
+        {
+            hasTime = true;
+            if (!Dig(s, p + 1, 2, out v)) return false;
+            h = v; p += 3;
+            if (p >= n || s[p] != ':' || !Dig(s, p + 1, 2, out v)) return false;
+            mi = v; p += 3;
+            if (p < n && s[p] == ':')
+            {
+                if (!Dig(s, p + 1, 2, out v)) return false;
+                sec = v; p += 3;
+                if (p < n && (s[p] == '.' || s[p] == ','))
+                {
+                    int q = p + 1, digits = 0, frac = 0;
+                    while (q < n && (uint)(s[q] - '0') <= 9 && digits < 9) { if (digits < 3) frac = frac * 10 + (s[q] - '0'); digits++; q++; }
+                    if (digits == 0) return false;
+                    for (int i = digits; i < 3; i++) frac *= 10;
+                    ms = frac; p = q;
+                }
+            }
+            if (p < n && s[p] == 'Z') { zone = 1; p++; }
+            else if (p < n && (s[p] == '+' || s[p] == '-'))
+            {
+                if (!Dig(s, p + 1, 2, out int oh) || p + 3 >= n || s[p + 3] != ':' || !Dig(s, p + 4, 2, out int om)) return false;
+                zone = 2; zoneMinutes = (s[p] == '-' ? -1 : 1) * (oh * 60 + om); p += 6;
+            }
+        }
+        return p == n;
+    }
+
     public static double Parse(Realm realm, string s)
     {
         s = s.Trim();
+        if (TryParseIso(s, out var fy, out var fmo, out var fd, out var fh, out var fmi, out var fsec, out var fms, out int fzone, out double fzm, out bool fTime, out bool fNegZero))
+        {
+            if (fNegZero) return double.NaN;
+            if (fmo < 0 || fmo > 11 || fd < 1 || fd > 31 || fh > 24 || fmi > 59 || fsec > 59 || (fh == 24 && (fmi > 0 || fsec > 0 || fms > 0))) return double.NaN;
+            double ft = MakeDate(MakeDay(fy, fmo, fd), MakeTime(fh, fmi, fsec, fms));
+            if (fzone == 2) ft -= fzm * 60000;
+            else if (fzone == 0 && fTime) ft = Utc(realm, ft);   // date-time without offset is local time
+            return TimeClip(ft);
+        }
         var m = IsoRegex.Match(s);
         if (m.Success)
         {
@@ -410,7 +550,7 @@ internal static class DateBuiltins
             double mi = m.Groups[5].Success ? double.Parse(m.Groups[5].Value, CultureInfo.InvariantCulture) : 0;
             double sec = m.Groups[6].Success ? double.Parse(m.Groups[6].Value, CultureInfo.InvariantCulture) : 0;
             double ms = m.Groups[7].Success ? Math.Floor(double.Parse("0." + m.Groups[7].Value, CultureInfo.InvariantCulture) * 1000) : 0;
-            if (mo > 11 || d < 1 || d > 31 || h > 24 || mi > 59 || sec > 59 || (h == 24 && (mi > 0 || sec > 0 || ms > 0))) return double.NaN;
+            if (mo < 0 || mo > 11 || d < 1 || d > 31 || h > 24 || mi > 59 || sec > 59 || (h == 24 && (mi > 0 || sec > 0 || ms > 0))) return double.NaN;
             double t = MakeDate(MakeDay(y, mo, d), MakeTime(h, mi, sec, ms));
             if (m.Groups[8].Success)
             {

@@ -121,7 +121,13 @@ internal sealed partial class Vm
             case Op.ArraySpread:
             {
                 var arr = ((JsArray)regs[bp + code[pc + 1]].Ref!);
-                var rec = IteratorRecord.Get(realm, regs[bp + code[pc + 2]]);
+                var src = regs[bp + code[pc + 2]];
+                if (src.IsObject && src.Ref is JsArray sa && realm.IsArrayIterationPristine(sa) && arr.TryAppendDense(sa))
+                {
+                    Tick((int)Math.Min(sa.Length, int.MaxValue));
+                    return pc + 3;
+                }
+                var rec = IteratorRecord.Get(realm, src);
                 while (rec.Step(out var v)) { arr.Push(v); Tick(); }
                 return pc + 3;
             }
