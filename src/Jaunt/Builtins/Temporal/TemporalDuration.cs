@@ -222,7 +222,9 @@ internal static partial class Temporal
     {
         var parts = TemporalCalendars.ISOToDate(cal, date);
         double y0d = parts.Year + d.Years;
-        if (Math.Abs(y0d) > 400_000 || Math.Abs(d.Months) > 5_000_000 || Math.Abs(d.Days + 7 * d.Weeks) > 1e9)
+        // coarse guards against absurd inputs before walking months; the whole Temporal range is ~548k years, i.e. at most
+        // ~7.1M months even with a leap month every year, so 10M never rejects a result that is in range
+        if (Math.Abs(y0d) > 400_000 || Math.Abs(d.Months) > 10_000_000 || Math.Abs(d.Days + 7 * d.Weeks) > 1e9)
             throw JsErrors.RangeError(realm, "date is outside the supported range");
         int y0 = (int)y0d;
         var code = TemporalCalendars.ConstrainMonthCode(cal, y0, parts.MonthCode, overflow)

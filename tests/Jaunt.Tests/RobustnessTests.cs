@@ -418,6 +418,9 @@ public class RobustnessTests
             const far = Temporal.PlainDate.from('+100000-03-01').withCalendar(cal);
             if (far.day > 30 || Math.abs(far.year - 100000) > 1) bad.push('far ' + far);
             Temporal.PlainDate.from({ year: 275000, month: 1, day: 1, calendar: cal });   // in range: must not throw
+            // a month count larger than 5M with an in-range result (the Temporal range holds ~6.8M lunar months)
+            const back6m = Temporal.PlainDate.from('+275760-09-13').withCalendar(cal).subtract({ months: 6000000 });
+            if (back6m.year > -200000 || back6m.year < -271821) bad.push('6M months ' + back6m);
             bad.join()
             """);
         Assert.Equal("", r.ToString());
