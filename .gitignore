@@ -9,3 +9,5 @@ tools/unicode/.cache/
 # patch/merge leftovers
 *.orig
 *.rej
+__pycache__/
+*.pyc

@@ -100,7 +100,11 @@ canonicalized with UTS 35 using CLDR alias tables generated into the assembly (`
 invariant culture. Temporal additionally supports the calendars `buddhist`, `chinese`, `coptic`, `dangi`, `ethioaa`,
 `ethiopic`, `gregory`, `hebrew`, `indian`, `islamic-civil`, `islamic-tbla`, `islamic-umalqura`, `japanese`, `persian`,
 `roc` (eras, leap-month codes, non-ISO arithmetic) and takes named-zone offsets and transitions from ICU's time zone
-data (second-precision historical offsets).
+data (second-precision historical offsets). `chinese` and `dangi` follow ICU's astronomical calculation for years
+−20,000 to 20,000; beyond that (where ICU's computation degenerates) years are arithmetic — mean lunar months, as many
+per year as fit the mean Gregorian year, the leap month after the sixth — anchored to ICU's dates at the boundary
+(Temporal allows approximating lunisolar calendars outside the astronomically meaningful range). `Intl.DateTimeFormat`
+still formats such far dates with ICU, whose output there is not meaningful.
 
 ### RegExp backends
 
@@ -168,8 +172,12 @@ without an execution timeout they stop after 5 s with a catchable `RangeError`.
 * Long single builtin operations stay interruptible: BigInt ↔ string conversions of large values are divide-and-conquer
   and check the execution's timeout/cancellation/`Interrupt()` between steps (a million-digit `toString` takes ~0.5 s);
   compiling a RegExp, year-by-year arithmetic in non-ISO Temporal calendars and eval setup charge work as they go, so
-  they reach the same checkpoints. (A single multiplication of two multi-megabit BigInts is still one uninterruptible
-  step of about a second.)
+  they reach the same checkpoints. (A single `*`, `**` or `/` of multi-megabit BigInts is still one uninterruptible
+  step of one to a few seconds; BigInts are capped at 2^24 bits, which bounds it.)
+* Implementation limits (also when no `JsLimits` are set): arrays, ArrayBuffers and typed arrays hold at most
+  100,000,000 elements/bytes (larger requests are a `RangeError`); strings at most `JsLimits.MaxStringLength`
+  (2^29 − 24 UTF-16 units by default); BigInts at most 2^24 bits; RegExp group nesting 1,000 levels; JSON nesting 512
+  levels; compile limits per `JsCompileOptions`.
 * ICU failures (e.g. `formatRange` with dates outside ICU's range) are catchable `RangeError`s, not engine faults.
 * Process-wide caches are bounded: compiled RegExp patterns (512 entries and 32 MB of programs; patterns over 16K
   characters or programs over 1 MB are not cached), ICU date pattern generators (64, native handles closed on

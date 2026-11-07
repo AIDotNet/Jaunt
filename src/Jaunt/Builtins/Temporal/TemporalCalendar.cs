@@ -297,9 +297,9 @@ internal static unsafe class TemporalCalendars
         var vm = Vm.OnThread;
         if (s_years.TryGetValue((cal, year), out var info)) { vm?.Tick(); return info; }
         vm?.Tick(64);
-        if (cal == "hebrew")
+        if (cal == "hebrew" || IsLunisolarArith(cal, year))
         {
-            info = HebrewYear(year);
+            info = cal == "hebrew" ? HebrewYear(year) : LunisolarArithYear(cal, year);
             if (s_years.Count > 20_000) s_years.Clear();
             s_years[(cal, year)] = info;
             return info;
@@ -351,10 +351,83 @@ internal static unsafe class TemporalCalendars
         }
     }
 
+    // ------------------------------------------------------------------ Chinese / Dangi far from the present
+    // ICU's astronomical lunisolar computation degenerates tens of thousands of years away (wrong month boundaries,
+    // impossible day numbers). Outside [LunisolarLo, LunisolarHi] years are arithmetic instead: mean lunar months, as many
+    // per year as fit the mean Gregorian year (12 or 13, the leap month after the sixth), anchored to ICU's dates at the
+    // boundary years, so the calendar stays consistent and invertible (Temporal permits approximating lunisolar
+    // calendars outside the astronomically meaningful range).
+
+    private const int LunisolarLo = -20000, LunisolarHi = 20000;
+    private const double MeanLunation = 29.530588853;
+    private static readonly ConcurrentDictionary<string, (long Lo, long Hi)> s_lunisolarAnchors = new();
+
+    private static bool IsLunisolarArith(string cal, int year) => cal is "chinese" or "dangi" && (year < LunisolarLo || year > LunisolarHi);
+
+    /// <summary>First day of year <see cref="LunisolarLo"/> and first day after year <see cref="LunisolarHi"/> (from ICU).</summary>
+    private static (long Lo, long Hi) LunisolarAnchors(string cal)
+        => s_lunisolarAnchors.GetOrAdd(cal, static c => (GetYear(c, LunisolarLo).MonthStart[0], GetYear(c, LunisolarHi).NextYearStart));
+
+    /// <summary>
+    /// Months in the first <paramref name="k"/> years: the mean Gregorian year in mean lunations (≈12.3683, i.e. about 7
+    /// leap months in 19 years), so the lunar new year keeps its place in the solar year instead of drifting.
+    /// </summary>
+    private static long CycleMonths(long k) => (long)Math.Floor(k * MonthsPerYear + 0.5);
+    private const double MonthsPerYear = 365.2425 / MeanLunation;
+
+    private static long LunarMonthStart(long anchor, long n) => anchor + (long)Math.Floor(n * MeanLunation + 0.5);
+
+    private static YearInfo LunisolarArithYear(string cal, int year)
+    {
+        var (lo, hi) = LunisolarAnchors(cal);
+        long anchor, first, count;
+        if (year > LunisolarHi)
+        {
+            long k = (long)year - (LunisolarHi + 1);
+            anchor = hi; first = CycleMonths(k); count = CycleMonths(k + 1) - first;
+        }
+        else
+        {
+            long j = (long)LunisolarLo - year;
+            anchor = lo; first = -CycleMonths(j); count = CycleMonths(j) - CycleMonths(j - 1);
+        }
+        var starts = new long[count];
+        var codes = new string[count];
+        for (int i = 0; i < count; i++)
+        {
+            starts[i] = LunarMonthStart(anchor, first + i);
+            codes[i] = count == 12 || i < 6 ? CreateMonthCode(i + 1, false) : i == 6 ? "M06L" : CreateMonthCode(i, false);
+        }
+        return new YearInfo { MonthStart = starts, NextYearStart = LunarMonthStart(anchor, first + count), MonthCodes = codes };
+    }
+
+    /// <summary>The year of an epoch day outside ICU's range, or null when ICU's range applies.</summary>
+    private static int? LunisolarArithYearOfEpochDay(string cal, long epochDay)
+    {
+        var (lo, hi) = LunisolarAnchors(cal);
+        if (epochDay >= lo && epochDay < hi) return null;
+        long anchor = epochDay >= hi ? hi : lo;
+        long n = (long)Math.Floor((epochDay - anchor) / MeanLunation);
+        while (LunarMonthStart(anchor, n + 1) <= epochDay) n++;
+        while (LunarMonthStart(anchor, n) > epochDay) n--;
+        if (epochDay >= hi)
+        {
+            long k = (long)(n / MonthsPerYear);
+            while (CycleMonths(k + 1) <= n) k++;
+            while (k > 0 && CycleMonths(k) > n) k--;
+            return checked((int)(LunisolarHi + 1 + k));
+        }
+        long need = -n, jj = Math.Max(1, (long)Math.Ceiling(need / MonthsPerYear));
+        while (CycleMonths(jj) < need) jj++;
+        while (jj > 1 && CycleMonths(jj - 1) >= need) jj--;
+        return checked((int)(LunisolarLo - jj));
+    }
+
     private static int YearOfEpochDay(string cal, long epochDay, IsoDate iso)
     {
         _ = iso;
         if (cal == "hebrew") return HebrewYearOfEpochDay(epochDay);
+        if (cal is "chinese" or "dangi" && LunisolarArithYearOfEpochDay(cal, epochDay) is { } arithYear) return arithYear;
         lock (s_locks.GetOrAdd(cal, _ => new object()))
         {
             var c = Cal(cal);

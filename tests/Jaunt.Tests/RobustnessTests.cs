@@ -393,4 +393,33 @@ public class RobustnessTests
         var ex = Assert.Throws<JsLimitExceededException>(() => engine.Evaluate("let d = 'x'; while (true) d += d;"));
         Assert.Equal(JsLimitKind.TrackedBytes, ex.Kind);
     }
+
+    [Theory]
+    [InlineData("chinese")]
+    [InlineData("dangi")]
+    public void LunisolarCalendarsStayConsistentFarFromThePresent(string cal)
+    {
+        using var engine = new JsEngine();
+        engine.SetValue("cal", JsValue.From(cal));
+        var r = engine.Evaluate("""
+            const bad = [];
+            for (const y of [-271820, -100000, -50001, -20001, -20000, 2024, 20000, 20001, 100000, 275000, 275759])
+              for (const md of ['-01-15', '-06-30', '-12-31']) {
+                const iso = (y < 0 ? '-' : '+') + String(Math.abs(y)).padStart(6, '0') + md;
+                let d; try { d = Temporal.PlainDate.from(iso).withCalendar(cal); } catch { continue; }
+                if (d.day < 1 || d.day > d.daysInMonth || d.month > d.monthsInYear || d.dayOfYear > d.daysInYear) bad.push(iso + ' fields');
+                const back = Temporal.PlainDate.from({ calendar: cal, year: d.year, monthCode: d.monthCode, day: d.day });
+                if (back.toString() !== d.toString()) bad.push(iso + ' roundtrip');
+              }
+            for (const y of [-20001, -20000, 20000, 20001]) {   // contiguous across the ICU / arithmetic seams
+              const last = Temporal.PlainDate.from({ calendar: cal, year: y + 1, monthCode: 'M01', day: 1 }).subtract({ days: 1 });
+              if (last.year !== y || last.day !== last.daysInMonth || last.month !== last.monthsInYear) bad.push('seam ' + y);
+            }
+            const far = Temporal.PlainDate.from('+100000-03-01').withCalendar(cal);
+            if (far.day > 30 || Math.abs(far.year - 100000) > 1) bad.push('far ' + far);
+            Temporal.PlainDate.from({ year: 275000, month: 1, day: 1, calendar: cal });   // in range: must not throw
+            bad.join()
+            """);
+        Assert.Equal("", r.ToString());
+    }
 }
