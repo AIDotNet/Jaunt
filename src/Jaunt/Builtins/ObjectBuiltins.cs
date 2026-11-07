@@ -438,7 +438,8 @@ internal static class FunctionBuiltins
             }
             bf.AddOwnProperty("length", new JsValue(len), PropFlags.Configurable);
             var tn = target.Get("name");
-            bf.AddOwnProperty("name", new JsValue("bound " + (tn.IsString ? tn.AsStringUnchecked : "")), PropFlags.Configurable);
+            // charged: a chain of binds makes these names grow quadratically
+            bf.AddOwnProperty("name", new JsValue(realm.Charged("bound " + (tn.IsString ? tn.AsStringUnchecked : ""))), PropFlags.Configurable);
             return JsValue.FromObject(bf);
         });
         r.Method(proto, "toString", 0, static (in NativeArgs a) =>
@@ -449,7 +450,7 @@ internal static class FunctionBuiltins
                 var src = c.Template.Script.Source;
                 if (src != null && c.Template.SourceEnd <= src.Length && c.Template.SourceEnd > c.Template.SourceStart
                     && (c.Template.Flags & (FunctionFlags.ScriptBody | FunctionFlags.ModuleBody | FunctionFlags.FieldInitializer)) == 0)
-                    return new JsValue(src.Substring(c.Template.SourceStart, c.Template.SourceEnd - c.Template.SourceStart));
+                    return new JsValue(realm.Charged(src.Substring(c.Template.SourceStart, c.Template.SourceEnd - c.Template.SourceStart)));
                 return new JsValue("function " + c.Template.Name + "() { [native code] }");
             }
             if (a.This.Ref is JsFunctionObject fo) return new JsValue("function " + (fo is JsBuiltin nf ? NativeFunctionName(nf.Name) : "") + "() { [native code] }");

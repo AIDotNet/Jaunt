@@ -172,6 +172,13 @@ public class RobustnessTests
     [InlineData("new Uint8Array(1e7).join(',').length")]
     [InlineData("let s = 'abc'.repeat(1e6), n = 0; for (let i = 0; i < 100; i++) n += s.toUpperCase().length; n")]
     [InlineData("Iterator.from({ next() { return { done: false, value: 'xxxxxxxx' } } }).take(1e7).join('').length")]
+    [InlineData("const u = new Uint8Array(1e6); let n = 0; for (let i = 0; i < 500; i++) n += u.toHex().length; n")]
+    [InlineData("const u = new Uint8Array(1e6); let n = 0; for (let i = 0; i < 500; i++) n += u.toBase64().length; n")]
+    [InlineData("const r = new RegExp('/'.repeat(1e6)); let n = 0; for (let i = 0; i < 200; i++) n += r.source.length; n")]
+    [InlineData("const j = JSON.stringify('z'.repeat(1e6)); let n = 0; for (let i = 0; i < 200; i++) n += JSON.parse(j).length; n")]
+    [InlineData("const f = new Function('return \"' + 'b'.repeat(1e5) + '\"'); let n = 0; for (let i = 0; i < 500; i++) n += f.toString().length; n")]
+    [InlineData("let f = function aaaaaaaaaaaaaaaa() {}; for (let i = 0; i < 30000; i++) f = f.bind(null); f.name.length")]
+    [InlineData("let n = 0; for (let i = 0; i < 100; i++) n += (7n ** 200000n).toString().length; n")]
     public void LargeStringOperationsAreChargedBeforeTheyAllocate(string source)
     {
         using var engine = new JsEngine(new JsEngineOptions { Limits = new JsLimits { MaxTrackedBytes = 16 * 1024 * 1024 } });
@@ -269,5 +276,44 @@ public class RobustnessTests
         e2.SetFunction("big", () => new string('h', 5_000_000));
         var ex2 = Assert.Throws<JsLimitExceededException>(() => e2.Evaluate("big().length"));
         Assert.Equal(JsLimitKind.TrackedBytes, ex2.Kind);
+    }
+
+    [Fact]
+    public void BigIntConversionsAreCorrectAndObeyTheTimeout()
+    {
+        using var engine = new JsEngine();
+        var r = engine.Evaluate("""
+            let bad = 0;
+            for (let t = 0; t < 12; t++) {
+              let x = 1n; for (let i = 0; i < 400 + t * 50; i++) x = x * 1000000007n + BigInt(i);
+              if (t % 2) x = -x;
+              for (const radix of [2, 3, 8, 10, 16, 36]) {
+                let m = x < 0n ? -x : x, ref = ''; const R = BigInt(radix);
+                while (m > 0n) { ref = '0123456789abcdefghijklmnopqrstuvwxyz'[Number(m % R)] + ref; m /= R; }
+                if (x.toString(radix) !== (x < 0n ? '-' : '') + ref) bad++;
+              }
+              if (BigInt(String(x)) !== x || `${x}` !== String(x)) bad++;
+            }
+            bad
+            """);
+        Assert.Equal(0, r.AsInt32());
+        using var limited = new JsEngine(new JsEngineOptions { Limits = new JsLimits { Timeout = TimeSpan.FromMilliseconds(300) } });
+        var sw = Stopwatch.StartNew();
+        var ex = Assert.Throws<JsLimitExceededException>(() => limited.Evaluate("BigInt('9'.repeat(4e6)) > 0n"));
+        Assert.Equal(JsLimitKind.Timeout, ex.Kind);
+        Assert.True(sw.Elapsed < TimeSpan.FromSeconds(10), $"took {sw.Elapsed}");
+    }
+
+    [Fact]
+    public void HugeRegExpPatternsAreNotRetainedAfterTheEngine()
+    {
+        static long Live() { for (int i = 0; i < 3; i++) { GC.Collect(); GC.WaitForPendingFinalizers(); } return GC.GetTotalMemory(true); }
+        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+        static void Run() { using var e = new JsEngine(); e.Evaluate("new RegExp('a'.repeat(4e6)).test('b')"); }
+        Run();   // warm-up (type loading)
+        long before = Live();
+        Run();
+        long retained = Live() - before;
+        Assert.True(retained < 16L * 1024 * 1024, $"{retained / 1048576} MB retained after the engine was disposed");
     }
 }

@@ -136,6 +136,18 @@ internal static class BigIntOps
         return fl < d ? -1 : 0;
     }
 
+    /// <summary>The VM whose time limits long conversions check (set by <see cref="StringToBigInt(string, Vm?)"/>).</summary>
+    [ThreadStatic] private static Vm? t_vm;
+
+    /// <summary>StringToBigInt with the execution's time limits checked during long conversions.</summary>
+    public static BigInteger? StringToBigInt(string s, Vm? vm)
+    {
+        var saved = t_vm;
+        t_vm = vm;
+        try { return StringToBigInt(s); }
+        finally { t_vm = saved; }
+    }
+
     /// <summary>StringToBigInt (7.1.14). Returns null when the string is not a valid StringIntegerLiteral.</summary>
     public static BigInteger? StringToBigInt(string s)
     {
@@ -168,16 +180,14 @@ internal static class BigIntOps
         if (radix == 10)
         {
             foreach (var c in t) if (c < '0' || c > '9') return null;
-            return BigInteger.Parse(t, NumberStyles.None, CultureInfo.InvariantCulture);
+            return t.Length > 1000 ? ParseLarge(t, 10, t_vm) : BigInteger.Parse(t, NumberStyles.None, CultureInfo.InvariantCulture);
         }
-        var r = BigInteger.Zero;
         foreach (var c in t)
         {
             int d = c >= '0' && c <= '9' ? c - '0' : (c | 0x20) >= 'a' && (c | 0x20) <= 'z' ? (c | 0x20) - 'a' + 10 : 99;
             if (d >= radix) return null;
-            r = r * radix + d;
         }
-        return r;
+        return ParseLarge(t, radix, t_vm);
     }
 
     /// <summary>ToBigInt (7.1.13).</summary>
@@ -189,7 +199,7 @@ internal static class BigIntOps
             case JsTag.BigInt: return p.BigIntValue;
             case JsTag.Boolean: return p.IsTrue ? BigInteger.One : BigInteger.Zero;
             case JsTag.String:
-                return StringToBigInt(p.AsStringUnchecked) ?? throw JsErrors.SyntaxError(realm, $"Cannot convert {p.AsStringUnchecked} to a BigInt");
+                return StringToBigInt(p.AsStringUnchecked, realm.Vm) ?? throw JsErrors.SyntaxError(realm, $"Cannot convert {p.AsStringUnchecked} to a BigInt");
             case JsTag.Number: throw JsErrors.TypeError(realm, $"Cannot convert {p} to a BigInt");
             case JsTag.Symbol: throw JsErrors.TypeError(realm, "Cannot convert a Symbol value to a BigInt");
             default: throw JsErrors.TypeError(realm, $"Cannot convert {p} to a BigInt");
@@ -224,8 +234,17 @@ internal static class BigIntOps
         return v.Sign < 0 ? -r : r;
     }
 
-    public static string ToString(BigInteger v, int radix)
+    public static string ToString(BigInteger v, int radix) => ToString(v, radix, null);
+
+    /// <summary>
+    /// Number → string in <paramref name="radix"/>. Large values (more than ~4,000 bits) are converted divide-and-conquer
+    /// (split by precomputed powers of the radix): far faster than digit-by-digit or the runtime's quadratic formatter,
+    /// and <paramref name="vm"/>'s time limits (Timeout, cancellation, Interrupt) are checked between the large divisions,
+    /// so converting a million-digit BigInt cannot run unbounded.
+    /// </summary>
+    public static string ToString(BigInteger v, int radix, Vm? vm)
     {
+        if (v.GetBitLength() > 4096) return ToStringLarge(v, radix, vm);
         if (radix == 10) return v.ToString(CultureInfo.InvariantCulture);
         if (v.IsZero) return "0";
         bool neg = v.Sign < 0;
@@ -242,6 +261,70 @@ internal static class BigIntOps
         Array.Reverse(arr);
         return new string(arr);
     }
+
+    private const string DigitChars = "0123456789abcdefghijklmnopqrstuvwxyz";
+
+    private static string ToStringLarge(BigInteger v, int radix, Vm? vm)
+    {
+        bool neg = v.Sign < 0;
+        var m = BigInteger.Abs(v);
+        // leaf chunk: the largest power of the radix below 2^62, so a leaf fits in a long
+        int chunkDigits = 0;
+        long chunk = 1;
+        while (chunk <= long.MaxValue / radix / 2) { chunk *= radix; chunkDigits++; }
+        // powers[i] = chunk^(2^i), with digit counts, until a power exceeds sqrt(m)
+        var powers = new System.Collections.Generic.List<BigInteger> { chunk };
+        var powerDigits = new System.Collections.Generic.List<int> { chunkDigits };
+        long bits = (long)m.GetBitLength();
+        while ((long)powers[^1].GetBitLength() * 2 <= bits + 64)
+        {
+            vm?.CheckTimeLimits();
+            powers.Add(powers[^1] * powers[^1]);
+            powerDigits.Add(powerDigits[^1] * 2);
+        }
+        var sb = new System.Text.StringBuilder();
+        if (neg) sb.Append('-');
+        Convert(m, powers.Count - 1, false);
+        return sb.ToString();
+
+        void Convert(BigInteger n, int level, bool pad)
+        {
+            if (level < 0)
+            {
+                long leaf = (long)n;
+                Span<char> buf = stackalloc char[64];
+                int len = 0;
+                do { buf[len++] = DigitChars[(int)(leaf % radix)]; leaf /= radix; } while (leaf != 0);
+                if (pad) for (int i = len; i < chunkDigits; i++) sb.Append('0');
+                for (int i = len - 1; i >= 0; i--) sb.Append(buf[i]);
+                return;
+            }
+            if (!pad && n < powers[level]) { Convert(n, level - 1, false); return; }
+            if (n.GetBitLength() > 20_000) vm?.CheckTimeLimits();
+            var hi = BigInteger.DivRem(n, powers[level], out var lo);
+            Convert(hi, level - 1, pad);
+            Convert(lo, level - 1, true);
+        }
+    }
+
+    /// <summary>Digits → number, divide and conquer for long inputs (see <see cref="ToString(BigInteger, int, Vm?)"/>).</summary>
+    private static BigInteger ParseLarge(ReadOnlySpan<char> t, int radix, Vm? vm)
+    {
+        if (t.Length <= 1000)
+        {
+            if (radix == 10) return BigInteger.Parse(t, NumberStyles.None, CultureInfo.InvariantCulture);
+            var r = BigInteger.Zero;
+            foreach (var c in t) r = r * radix + Digit(c);
+            return r;
+        }
+        int lowLen = t.Length / 2;
+        var high = ParseLarge(t[..^lowLen], radix, vm);
+        var low = ParseLarge(t[^lowLen..], radix, vm);
+        vm?.CheckTimeLimits();
+        return high * BigInteger.Pow(radix, lowLen) + low;
+    }
+
+    private static int Digit(char c) => c >= '0' && c <= '9' ? c - '0' : (c | 0x20) - 'a' + 10;
 
     public static BigInteger AsIntN(int bits, BigInteger v)
     {

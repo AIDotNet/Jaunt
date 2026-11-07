@@ -148,7 +148,7 @@ internal static class RegExpBuiltins
         });
         r.Getter(proto, "source", "source", static (in NativeArgs a) =>
         {
-            if (a.This.Ref is JsRegExp re) return new JsValue(re.Source.Length == 0 ? "(?:)" : EscapeSource(re.Source));
+            if (a.This.Ref is JsRegExp re) return new JsValue(re.Source.Length == 0 ? "(?:)" : a.Realm.Charged(EscapeSource(re.Source)));
             if (ReferenceEquals(a.This.Ref, a.Realm.RegExpPrototype)) return new JsValue("(?:)");
             throw JsErrors.TypeError(a.Realm, "RegExp.prototype.source getter called on non-RegExp");
         });
@@ -333,7 +333,7 @@ internal static class RegExpBuiltins
             RegExpParseResult result;
             try
             {
-                result = Tokenizer.AdaptRegExp(pattern, flags, false, MatchTimeout, false, EcmaVersion.Latest, ExperimentalESFeatures.All);
+                result = AdaptRegExp(pattern, flags);
             }
             catch (ParseErrorException pe)
             {
@@ -462,6 +462,27 @@ internal static class RegExpBuiltins
             if (c is 'u' or 'x' || (c >= '0' && c <= '9')) return true;
         }
         return false;
+    }
+
+    /// <summary>
+    /// Acornima's pattern adaptation keeps per-thread buffers sized by the largest pattern it has seen; a huge pattern is
+    /// therefore adapted on a short-lived thread, so those buffers do not outlive it on (possibly pooled) host threads.
+    /// </summary>
+    private static RegExpParseResult AdaptRegExp(string pattern, string flags)
+    {
+        if (pattern.Length <= MaxCachedPatternLength)
+            return Tokenizer.AdaptRegExp(pattern, flags, false, MatchTimeout, false, EcmaVersion.Latest, ExperimentalESFeatures.All);
+        RegExpParseResult result = default;
+        System.Runtime.ExceptionServices.ExceptionDispatchInfo? error = null;
+        var t = new System.Threading.Thread(() =>
+        {
+            try { result = Tokenizer.AdaptRegExp(pattern, flags, false, MatchTimeout, false, EcmaVersion.Latest, ExperimentalESFeatures.All); }
+            catch (Exception ex) { error = System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(ex); }
+        }, 16 * 1024 * 1024);
+        t.Start();
+        t.Join();
+        error?.Throw();
+        return result;
     }
 
     private static RegexMatch SafeMatch(Realm realm, JsRegExp re, string s, int start)

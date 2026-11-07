@@ -145,7 +145,9 @@ without an execution timeout they stop after 5 s with a catchable `RangeError`.
   total allocation, not live memory. What is charged: objects, properties, array storage, ArrayBuffers, string
   concatenation, and the output of string-producing builtins (`repeat`, `padStart`/`padEnd`, `concat`, `replace`/
   `replaceAll` with strings or RegExps, `join` of arrays, typed arrays and iterators, `toLocaleString`, case mapping,
-  `normalize`, `toWellFormed`, URI and `escape` functions, `JSON.stringify`, strings returned by typed host functions),
+  `normalize`, `toWellFormed`, URI and `escape` functions, `JSON.stringify`, string values created by `JSON.parse` and
+  host `ParseJson`, `toHex`/`toBase64`, `RegExp.prototype.source`, `Function.prototype.toString`, `bind` names, BigInt
+  `toString`, strings returned by typed host functions),
   before or while it is allocated. Transient internal garbage (temporary keys, intermediate builders) is not charged, so
   the managed allocation of a script can exceed the counter by a small factor; it is a guard against runaway scripts,
   not an exact meter. A process can still run out of memory before a limit trips (e.g. with `MaxTrackedBytes` unset or
@@ -158,8 +160,14 @@ without an execution timeout they stop after 5 s with a catchable `RangeError`.
   `double`/`int`/`string` parameters are not output conversions; strings they return are charged to tracked bytes.
   `JsPluginOptions.Execution` covers the whole invocation, module initialization included.
 * Native recursion (nested-array `join`/`toString`, `yield*` chains, Proxy/bind chains, re-entrant builtins, deeply
-  nested regular expressions) is guarded: it ends in a `StackDepth` limit or a JS error, never a process crash, also
-  on small thread stacks and under NativeAOT.
+  nested regular expressions and `v`-flag class sets) is guarded: it ends in a `StackDepth` limit or a JS error, never
+  a process crash, also on small thread stacks and under NativeAOT. (Long `bind` chains also grow their names
+  quadratically; that memory is charged to tracked bytes.)
+* Long single builtin operations stay interruptible: BigInt ↔ string conversions of large values are divide-and-conquer
+  and check the execution's timeout/cancellation/`Interrupt()` between steps (a million-digit `toString` takes ~0.5 s).
+* Process-wide caches are bounded: compiled RegExp patterns (512 entries, patterns over 16K characters not cached; huge
+  patterns are adapted on a short-lived thread so the parser's per-thread buffers do not outlive them), ICU date
+  pattern generators (64, native handles closed on eviction), date patterns and other Intl formatters.
 * Host APIs reject objects of another engine wherever a value can enter the engine's object graph (arguments,
   `SetValue`, host-function results, `JsCallContext.SetProperty`/`CreateArray`/`Call`, DTO conversion contexts).
   `Interrupt()` stops the execution that is active when it is called (at the latest when it completes, even if it was

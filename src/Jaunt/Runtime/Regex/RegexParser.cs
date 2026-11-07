@@ -712,6 +712,15 @@ internal sealed class RegexParser
     // v-mode: ClassSetExpression (22.2.1 ClassContents[+UnicodeSetsMode])
     private VClass ParseClassSetExpression()
     {
+        // nested class sets ([[[...]]] with the v flag) recurse like groups: same nesting limit
+        if (++_nesting > MaxNesting || !System.Runtime.CompilerServices.RuntimeHelpers.TryEnsureSufficientExecutionStack())
+            throw new RegexSyntaxException("Regular expression is nested too deeply");
+        try { return ParseClassSetExpressionCore(); }
+        finally { _nesting--; }
+    }
+
+    private VClass ParseClassSetExpressionCore()
+    {
         if (Peek() == ']') return new VClass();
         var first = ParseClassSetOperand(out bool firstIsChar, out int firstChar);
         if (Peek() == '&' && Peek(1) == '&')

@@ -111,12 +111,12 @@ internal static class Es2026Builtins
                 sb.Append(alphabet[n >> 18]).Append(alphabet[(n >> 12) & 63]).Append(alphabet[(n >> 6) & 63]);
                 if (!omitPadding) sb.Append('=');
             }
-            return new JsValue(sb.ToString());
+            return new JsValue(a.Realm.Charged(sb.ToString()));
         });
         r.Method(proto, "toHex", 0, static (in NativeArgs a) =>
         {
             var bytes = Bytes(a.Realm, ThisUint8(a));
-            return new JsValue(Convert.ToHexString(bytes).ToLowerInvariant());
+            return new JsValue(a.Realm.Charged(Convert.ToHexString(bytes).ToLowerInvariant()));
         });
         r.Method(proto, "setFromBase64", 1, static (in NativeArgs a) =>
         {

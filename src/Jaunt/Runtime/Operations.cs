@@ -64,7 +64,7 @@ internal static class Operations
             case JsTag.Null: return "null";
             case JsTag.Boolean: return v.IsTrue ? "true" : "false";
             case JsTag.Symbol: throw JsErrors.TypeError(realm, "Cannot convert a Symbol value to a string");
-            case JsTag.BigInt: return v.BigIntValue.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            case JsTag.BigInt: return BigIntOps.ToString(v.BigIntValue, 10, realm.Vm);
             case JsTag.Object: return ToString(realm, ToPrimitive(realm, v, PreferredType.String));
             default: return "";
         }

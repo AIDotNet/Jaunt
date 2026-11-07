@@ -739,7 +739,11 @@ internal static unsafe partial class IntlDateTimeFormat
         if (HourChar(p) == 'K') hc12 = "h11";
         if (def is "h11" or "h12") def = hc12;
         var result = new HcData(def, hc12);
-        lock (s_hcData) s_hcData[icuBase] = result;
+        lock (s_hcData)
+        {
+            if (s_hcData.Count >= MaxPatterns) s_hcData.Clear();
+            s_hcData[icuBase] = result;
+        }
         return result;
     }
 
@@ -747,11 +751,18 @@ internal static unsafe partial class IntlDateTimeFormat
 
     private static readonly Dictionary<string, nint> s_generators = new(StringComparer.Ordinal);
     private static readonly Dictionary<string, string> s_patternCache = new(StringComparer.Ordinal);
+    private const int MaxGenerators = 64, MaxPatterns = 4096;
 
     /// <summary>The (cached) pattern generator of an ICU locale; callers hold the lock on s_generators.</summary>
     private static nint Generator(string icuLocale)
     {
         if (s_generators.TryGetValue(icuLocale, out var g)) return g;
+        // process-wide and bounded: every user of a generator holds this lock, so evicted handles can be closed here
+        if (s_generators.Count >= MaxGenerators)
+        {
+            foreach (var h in s_generators.Values) IcuDtf.udatpg_close(h);
+            s_generators.Clear();
+        }
         int err = 0;
         var loc = Icu.Utf8Z(icuLocale);
         fixed (byte* l = loc) g = IcuDtf.udatpg_open(l, &err);
@@ -777,7 +788,11 @@ internal static unsafe partial class IntlDateTimeFormat
             }) ?? skeleton;
         }
         result = WebCompatSpaces(result);
-        lock (s_patternCache) s_patternCache[key] = result;
+        lock (s_patternCache)
+        {
+            if (s_patternCache.Count >= MaxPatterns) s_patternCache.Clear();
+            s_patternCache[key] = result;
+        }
         return result;
     }
 

@@ -42,15 +42,15 @@ internal static class BigIntBuiltins
                 if (rd < 2 || rd > 36) throw JsErrors.RangeError(a.Realm, "toString() radix must be between 2 and 36");
                 radix = (int)rd;
             }
-            return new JsValue(BigIntOps.ToString(x, radix));
+            return new JsValue(a.Realm.Charged(BigIntOps.ToString(x, radix, a.Realm.Vm)));
         });
         r.Method(proto, "toLocaleString", 0, static (in NativeArgs a) =>
         {
             var x = ThisBigInt(a, "BigInt.prototype.toLocaleString");
             // ECMA-402 20.3.1: format the exact value with a new %Intl.NumberFormat%(locales, options)
             if (a.Realm.Intl != null)
-                return new JsValue(IntlNumberFormat.CreateRecord(a.Realm, a[0], a[1]).Format(new IntlMathValue(BigIntOps.ToString(x, 10))));
-            return new JsValue(BigIntOps.ToString(x, 10));
+                return new JsValue(IntlNumberFormat.CreateRecord(a.Realm, a[0], a[1]).Format(new IntlMathValue(BigIntOps.ToString(x, 10, a.Realm.Vm))));
+            return new JsValue(a.Realm.Charged(BigIntOps.ToString(x, 10, a.Realm.Vm)));
         });
         r.Method(proto, "valueOf", 0, static (in NativeArgs a) => JsValue.FromBigInteger(ThisBigInt(a, "BigInt.prototype.valueOf")));
         proto.AddOwnProperty(JsSymbol.ToStringTag, new JsValue("BigInt"), PropFlags.Configurable);

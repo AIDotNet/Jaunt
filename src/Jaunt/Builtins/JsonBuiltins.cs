@@ -283,7 +283,7 @@ internal static class JsonBuiltins
             while (Pos < s.Length)
             {
                 char c = s[Pos];
-                if (c == '"') { var r = s.Substring(start, Pos - start); Pos++; return r; }
+                if (c == '"') { var r = s.Substring(start, Pos - start); Pos++; return Charge(r); }
                 if (c == '\\') break;
                 if (c < 0x20) Fail("Bad control character in string literal");
                 Pos++;
@@ -324,8 +324,11 @@ internal static class JsonBuiltins
                     default: Pos--; Fail("Bad escaped character"); break;
                 }
             }
-            return sb.ToString();
+            return Charge(sb.ToString());
         }
+
+        /// <summary>Parsed string payloads count against the tracked-bytes budget (JSON.parse and host ParseJson).</summary>
+        private string Charge(string str) => str.Length < 64 ? str : _realm.Charged(str);
 
         private double ParseNumber()
         {
