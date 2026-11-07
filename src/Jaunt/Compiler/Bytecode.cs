@@ -94,12 +94,12 @@ internal static class OpInfo
         S(Op.LdEnv, R, I, I); S(Op.LdEnvChk, R, I, I, K); S(Op.StEnv, I, I, R); S(Op.StEnvChk, I, I, R, K);
         S(Op.PushEnv, I); S(Op.PopEnv); S(Op.CopyEnv);
         S(Op.GetGlobal, R, K, C); S(Op.GetGlobalTypeof, R, K, C); S(Op.SetGlobal, K, R, C); S(Op.InitGlobalLex, K, R);
-        S(Op.GetProp, R, R, K, C); S(Op.SetProp, R, K, R, C); S(Op.GetElem, R, R, R); S(Op.SetElem, R, R, R);
+        S(Op.GetProp, R, R, K, C); S(Op.SetProp, R, K, R, C); S(Op.GetElem, R, R, R, C); S(Op.SetElem, R, R, R, C);
         S(Op.DelProp, R, R, K); S(Op.DelElem, R, R, R);
         S(Op.GetSuper, R, R, R, R); S(Op.SetSuper, R, R, R, R); S(Op.LoadSuperBase, R);
         S(Op.DefineProp, R, R, R); S(Op.DefinePropK, R, K, R); S(Op.DefineAccessor, R, R, R, I); S(Op.DefineMethod, R, R, R); S(Op.SetProto, R, R);
         S(Op.CopyDataProps, R, R); S(Op.ObjectRest, R, R, O, N);
-        S(Op.NewObject, R); S(Op.NewArray, R, I); S(Op.ArrayPush, R, R); S(Op.ArrayPushHole, R); S(Op.ArraySpread, R, R);
+        S(Op.NewObject, R); S(Op.NewArray, R, I); S(Op.ArrayPush, R, R); S(Op.ArrayPushHole, R); S(Op.ArraySpread, R, R, I);
         foreach (var op in new[] { Op.Add, Op.Sub, Op.Mul, Op.Div, Op.Mod, Op.Exp, Op.BitAnd, Op.BitOr, Op.BitXor, Op.Shl, Op.Shr, Op.UShr,
                      Op.Eq, Op.Ne, Op.StrictEq, Op.StrictNe, Op.Lt, Op.Le, Op.Gt, Op.Ge, Op.InstanceOf, Op.In })
             S(op, R, R, R);
@@ -142,7 +142,7 @@ internal static class OpInfo
         S(Op.CreateMappedArguments, R, B); S(Op.ParseJsonConst, R, K);
         S(Op.NewDisposeStack, R); S(Op.AddDisposable, R, R, I); S(Op.DisposeSync, R, R, R); S(Op.DisposeNext, R, R, R, J); S(Op.DisposeMerge, R, R, R); S(Op.ResolveRef, R, K); S(Op.LdRef, R, R); S(Op.StRef, R, R, I);
         S(Op.GetTemplateObject, R, B, I);
-        S(Op.NewRegExp, R, K, K);
+        S(Op.NewRegExp, R, K, K, C);
         S(Op.CreateArguments, R);
         S(Op.CreateRestArray, R, I);
         S(Op.LdImport, R, I, K);
@@ -219,6 +219,9 @@ internal sealed class FunctionTemplate
     public string Name = "";
     public int Length;            // formal parameter count for .length
     public int ParamCount;        // register slots used by incoming arguments
+    /// <summary>Registers [args, InitUndefEnd) start as undefined on entry (function-scope bindings such as hoisted vars
+    /// and missing parameters); every register at or above it is written before it is read. -1: initialize all.</summary>
+    public int InitUndefEnd = -1;
     public int RegisterCount;
     public int[] Code = Array.Empty<int>();
     public JsValue[] Constants = Array.Empty<JsValue>();

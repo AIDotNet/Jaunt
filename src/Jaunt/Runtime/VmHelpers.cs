@@ -140,6 +140,7 @@ internal sealed partial class Vm
             {
                 if (ex.IsString && key.Value is string ks && ks == ex.AsStringUnchecked) { skip = true; break; }
                 if (ex.IsSymbol && ReferenceEquals(ex.Ref, key.Value)) { skip = true; break; }
+                if (ex.IsNumber && key.Value is string kn && kn == NumberFormatting.ToString(ex.Num)) { skip = true; break; }   // array-index keys stay numeric
             }
             if (skip) continue;
             target.CreateDataPropertyOrThrow(key, slots[i]);
@@ -341,6 +342,114 @@ internal sealed partial class Vm
         return Operations.GetPrimitiveProperty(Realm, ov, Operations.ToPropertyKey(Realm, kv));
     }
 
+    // ------------------------------------------------------------------ computed-key (keyed) access cache
+    //
+    // obj[k] on an ordinary object: the site IC remembers one (shape, key) → slot; a site that cycles through many
+    // keys (obj[d.g] in a loop, objects used as maps) would miss on every access, so behind it sits a Vm-wide
+    // direct-mapped cache of (shape, key) → slot, like V8's megamorphic stub cache. A shape is an immutable key→slot
+    // layout, so an entry can never go stale; keys are matched by reference (the same string instance, or the same
+    // array index), anything else takes the generic lookup and refreshes the entry.
+
+    private const int KeyedCacheSize = 1024;
+    private readonly Shape?[] _kcShape = new Shape?[KeyedCacheSize];
+    private readonly object?[] _kcKey = new object?[KeyedCacheSize];
+    private readonly int[] _kcIndex = new int[KeyedCacheSize];
+    private readonly int[] _kcSlot = new int[KeyedCacheSize];
+    private readonly bool[] _kcWritable = new bool[KeyedCacheSize];
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static int KeyedHash(Shape shape, object? keyRef, int index)
+    {
+        int h = RuntimeHelpers.GetHashCode(shape) * 31;
+        h += keyRef != null ? RuntimeHelpers.GetHashCode(keyRef) : index;
+        return h & (KeyedCacheSize - 1);
+    }
+
+    /// <summary>The cacheable form of a computed key: a string instance, or an array index (keyRef null). False otherwise.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static bool KeyedForm(in JsValue kv, out object? keyRef, out int index)
+    {
+        keyRef = null; index = -1;
+        if (kv.IsNumber)
+        {
+            double d = kv.Num;
+            int i = (int)d;
+            if (i == d && i >= 0) { index = i; return true; }
+            return false;
+        }
+        if (kv.IsString && kv.Ref is string s) { keyRef = s; return true; }
+        return false;
+    }
+
+    /// <summary>Finds the own data slot for (obj, key) through the Vm-wide cache, falling back to the shape lookup; -1 when not an own data property.</summary>
+    private int KeyedSlot(JsObject obj, object? keyRef, int index, out bool writable)
+    {
+        var shape = obj.Shape;
+        int h = KeyedHash(shape, keyRef, index);
+        if (ReferenceEquals(_kcShape[h], shape) && ReferenceEquals(_kcKey[h], keyRef) && _kcIndex[h] == index)
+        {
+            writable = _kcWritable[h];
+            return _kcSlot[h];
+        }
+        var key = keyRef != null ? new PropertyKey((string)keyRef) : PropertyKey.FromIndex((uint)index);
+        int slot = obj.FindOwn(key, out var flags);
+        writable = (flags & PropFlags.Writable) != 0;
+        if (slot < 0 || (flags & PropFlags.Accessor) != 0) return -1;
+        _kcShape[h] = shape; _kcKey[h] = keyRef; _kcIndex[h] = index; _kcSlot[h] = slot; _kcWritable[h] = writable;
+        return slot;
+    }
+
+    private void FillKeyedIc(ref IcEntry ic, JsObject obj, object? keyRef, int index, int slot)
+    {
+        if (ic.Kind == IcKind.Megamorphic) return;
+        if (ic.Kind != IcKind.None && (!ReferenceEquals(ic.Shape, obj.Shape) || !ReferenceEquals(ic.Cell, keyRef) || ic.Epoch != index))
+        {
+            if (++ic.Misses > MaxIcMisses) { ic.Kind = IcKind.Megamorphic; ic.Shape = null; ic.Holder = null; ic.Cell = null; return; }
+        }
+        ic.Kind = IcKind.KeyedOwnData;
+        ic.Shape = obj.Shape;
+        ic.Holder = null;
+        ic.Slot = slot;
+        ic.Cell = keyRef;
+        ic.Epoch = index;
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static bool KeyedCacheable(JsObject obj) => obj.GetType() == typeof(JsObject) && obj.Dict == null && !obj.Shape.IsUnique;
+
+    /// <summary>GetElem on an object receiver: cached own-data read when possible, the generic read otherwise.</summary>
+    internal JsValue GetElemKeyed(in JsValue ov, in JsValue kv, ref IcEntry ic)
+    {
+        var obj = ov.AsObjectUnchecked;
+        if (KeyedCacheable(obj) && KeyedForm(kv, out var keyRef, out int index))
+        {
+            int slot = KeyedSlot(obj, keyRef, index, out _);
+            if (slot >= 0)
+            {
+                var v = obj.Slots[slot];
+                if (v.IsNotEmpty) { FillKeyedIc(ref ic, obj, keyRef, index, slot); return v; }
+            }
+        }
+        return GetElemSlow(ov, kv);
+    }
+
+    /// <summary>SetElem on an object receiver: cached own writable data write when possible, the generic write otherwise.</summary>
+    internal void SetElemKeyed(in JsValue ov, in JsValue kv, JsValue value, bool strict, ref IcEntry ic)
+    {
+        var obj = ov.AsObjectUnchecked;
+        if (KeyedCacheable(obj) && KeyedForm(kv, out var keyRef, out int index))
+        {
+            int slot = KeyedSlot(obj, keyRef, index, out bool writable);
+            if (slot >= 0 && writable)
+            {
+                FillKeyedIc(ref ic, obj, keyRef, index, slot);
+                obj.Slots[slot] = value;
+                return;
+            }
+        }
+        SetElemSlow(ov, kv, value, strict);
+    }
+
     internal void SetElemSlow(in JsValue ov, in JsValue kv, JsValue value, bool strict)
     {
         if (ov.IsObject)
@@ -417,6 +526,7 @@ internal sealed partial class Vm
             {
                 if (ex.IsString && key.Value is string ks && ks == ex.AsStringUnchecked) { skip = true; break; }
                 if (ex.IsSymbol && ReferenceEquals(ex.Ref, key.Value)) { skip = true; break; }
+                if (ex.IsNumber && key.Value is string kn && kn == NumberFormatting.ToString(ex.Num)) { skip = true; break; }   // array-index keys stay numeric
             }
             if (skip) continue;
             if (from.GetOwnProperty(key, out var desc) && desc.Enumerable)

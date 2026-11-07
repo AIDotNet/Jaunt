@@ -259,6 +259,7 @@ internal sealed partial class CodeGen
         FinalizeEnvLayout(scope);
         // storage for function-scope bindings
         AssignFunctionScopeStorage(scope, simple);
+        t.InitUndefEnd = _fb.NextReg;
         _scope = scope;
         if (scope.HasEnv)
         {

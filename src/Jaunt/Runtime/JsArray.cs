@@ -76,7 +76,7 @@ internal sealed class JsArray : JsObject
     /// element-by-element path is needed: either array is not dense, or <paramref name="src"/> has holes, which read
     /// through the prototype chain.
     /// </summary>
-    internal bool TryAppendDense(JsArray src)
+    internal bool TryAppendDense(JsArray src, uint reserve = 0)
     {
         if (!Dense || !LengthWritable || !Extensible || !src.Dense) return false;
         uint n = src.Length;
@@ -85,7 +85,10 @@ internal sealed class JsArray : JsObject
         for (uint i = 0; i < n; i++) if (items[i].IsEmpty) return false;
         if (n == 0) return true;
         uint start = Length;
-        if (start + n > (uint)Items.Length) EnsureCapacity(start + n);
+        // reserve: elements the caller will append right after (an array literal's trailing elements), so the
+        // append does not grow an exactly sized backing store a second time
+        ulong want = (ulong)start + n + reserve;
+        if (want > (uint)Items.Length) EnsureCapacity((uint)Math.Min(want, uint.MaxValue - 1));
         Array.Copy(items, 0, Items, start, n);
         Length = start + n;
         return true;

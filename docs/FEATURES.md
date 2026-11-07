@@ -134,6 +134,7 @@ without an execution timeout they stop after 5 s with a catchable `RangeError`.
 | Intl output | exact strings follow the platform ICU/CLDR version (ICU 78 / CLDR 48 on the reference machine); one intl402 test encodes upstream CLDR data that Apple's ICU changes (German `MMMMEd` punctuation); Jaunt computes the Hebrew calendar arithmetically and maps ICU's pre-epoch Islamic/Coptic eras to ECMA-402's. (`format`, `formatToParts`, `formatRange` and `formatRangeToParts` alike) |
 | Default locale | `en-US` (`Realm.DefaultLocale`) |
 | error messages / `stack` | V8-like text, not guaranteed identical to any engine |
+| `o[k] op= v`, `o[k] ||= v` | the computed key is converted (`ToPropertyKey`, i.e. `toString`/`valueOf` of an object key) once, before the read; the current specification text converts it again for the write (V8 calls `toString` twice). Not covered by test262 at the pinned revision |
 
 ## Host-facing behaviour (not ECMAScript)
 
@@ -165,6 +166,11 @@ without an execution timeout they stop after 5 s with a catchable `RangeError`.
   value plus 2 per string character, and an array's whole length before it is read. Typed host functions with plain
   `double`/`int`/`string` parameters are not output conversions; strings they return are charged to tracked bytes.
   `JsPluginOptions.Execution` covers the whole invocation, module initialization included.
+* Registers of returned frames are not cleared on return (clearing per call cost more than it saved); the register
+  stack is cleared when the root execution ends, so an idle engine retains no script objects through it. Within one
+  execution, a value left in a dead frame may stay reachable until the stack grows over it or the execution ends.
+  (`JAUNT_POISON_REGISTERS=1` fills uninitialized registers with a marker string: a debugging aid for the invariant that
+  every register a function reads is initialized first.)
 * Native recursion (nested-array `join`/`toString`, `yield*` chains, Proxy/bind chains, re-entrant builtins, deeply
   nested regular expressions and `v`-flag class sets) is guarded: it ends in a `StackDepth` limit or a JS error, never
   a process crash, also on small thread stacks and under NativeAOT. (Long `bind` chains also grow their names

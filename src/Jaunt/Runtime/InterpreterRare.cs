@@ -122,14 +122,14 @@ internal sealed partial class Vm
             {
                 var arr = ((JsArray)regs[bp + code[pc + 1]].Ref!);
                 var src = regs[bp + code[pc + 2]];
-                if (src.IsObject && src.Ref is JsArray sa && realm.IsArrayIterationPristine(sa) && arr.TryAppendDense(sa))
+                if (src.IsObject && src.Ref is JsArray sa && realm.IsArrayIterationPristine(sa) && arr.TryAppendDense(sa, (uint)code[pc + 3]))
                 {
                     Tick((int)Math.Min(sa.Length, int.MaxValue));
-                    return pc + 3;
+                    return pc + 4;
                 }
                 var rec = IteratorRecord.Get(realm, src);
                 while (rec.Step(out var v)) { arr.Push(v); Tick(); }
-                return pc + 3;
+                return pc + 4;
             }
 
             // ------------------------------------------------------------ operators
@@ -329,8 +329,8 @@ internal sealed partial class Vm
                 return pc + 4;
             }
             case Op.NewRegExp:
-                regs[bp + code[pc + 1]] = JsValue.FromObject(RegExpBuiltins.Create(realm, k[code[pc + 2]].AsStringUnchecked, k[code[pc + 3]].AsStringUnchecked));
-                return pc + 4;
+                regs[bp + code[pc + 1]] = JsValue.FromObject(RegExpBuiltins.CreateAtSite(realm, k[code[pc + 2]].AsStringUnchecked, k[code[pc + 3]].AsStringUnchecked, ref f.Feedback.Ics[code[pc + 4]].Cell));
+                return pc + 5;
             case Op.CreateArguments:
                 regs[bp + code[pc + 1]] = JsValue.FromObject(CreateArgumentsObject(f));
                 return pc + 2;

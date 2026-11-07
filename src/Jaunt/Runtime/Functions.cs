@@ -98,6 +98,11 @@ internal static class IcKind
     public const byte StringProtoData = 9;
     /// <summary>`length` of an Array exotic object (an own, non-shape property).</summary>
     public const byte ArrayLength = 10;
+    /// <summary>
+    /// Computed-key access on an ordinary object: Shape + key (Cell = the string key, or null with Epoch = the array
+    /// index) → own data slot. Filled by the GetElem/SetElem slow paths; SetElem fills only writable properties.
+    /// </summary>
+    public const byte KeyedOwnData = 11;
     public const byte Megamorphic = 255;
 }
 

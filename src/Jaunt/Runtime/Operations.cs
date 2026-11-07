@@ -85,12 +85,21 @@ internal static class Operations
         return new PropertyKey(ToString(realm, p));
     }
 
-    /// <summary>Converts to a property-key value (string or symbol JsValue).</summary>
+    /// <summary>
+    /// Converts to a property-key value: a string or symbol, or a number that is a valid array index (kept numeric so
+    /// the element fast paths of GetElem/SetElem still apply; every consumer converts it the same way ToPropertyKey
+    /// would, and a number has no observable conversion side effects).
+    /// </summary>
     public static JsValue ToPropertyKeyValue(Realm realm, in JsValue v)
     {
         if (v.Tag is JsTag.String or JsTag.Symbol) return v;
+        if (v.IsNumber && IsArrayIndexNumber(v.Num)) return v;
         return ToPropertyKey(realm, v).ToJsValue();
     }
+
+    /// <summary>Whether <paramref name="d"/> is an integer in [0, 2^32 - 2] (an array index as a double).</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static bool IsArrayIndexNumber(double d) { uint u = (uint)d; return u == d && u != uint.MaxValue; }
 
     public enum PreferredType { Default, Number, String }
 

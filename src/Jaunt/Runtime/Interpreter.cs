@@ -230,51 +230,87 @@ internal sealed partial class Vm
                         {
                             var ov = regs[bp + code[pc + 2]];
                             var kv = regs[bp + code[pc + 3]];
-                            if (ov.IsObject && kv.IsNumber)
+                            if (ov.IsObject)
                             {
-                                if (ov.Ref is JsArray arr)
+                                if (kv.IsNumber)
                                 {
-                                    double dk = kv.Num;
-                                    uint idx = (uint)dk;
-                                    if (idx == dk && arr.TryGetDense(idx, out var ev)) { regs[bp + code[pc + 1]] = ev; pc += 4; continue; }
+                                    if (ov.Ref is JsArray arr)
+                                    {
+                                        double dk = kv.Num;
+                                        uint idx = (uint)dk;
+                                        if (idx == dk && arr.TryGetDense(idx, out var ev)) { regs[bp + code[pc + 1]] = ev; pc += 5; continue; }
+                                    }
+                                    else if (ov.Ref is JsTypedArray ta && ta.TryGetElementFast(kv.Num, out var tv)) { regs[bp + code[pc + 1]] = tv; pc += 5; continue; }
                                 }
-                                else if (ov.Ref is JsTypedArray ta && ta.TryGetElementFast(kv.Num, out var tv)) { regs[bp + code[pc + 1]] = tv; pc += 4; continue; }
+                                // ordinary object with a computed key: cached (shape, key) → slot
+                                ref var ic = ref f.Feedback.Ics[code[pc + 4]];
+                                if (ic.Kind == IcKind.KeyedOwnData)
+                                {
+                                    var obj = Unsafe.As<JsObject>(ov.Ref!);
+                                    if (ReferenceEquals(obj.Shape, ic.Shape) && (kv.IsNumber ? ic.Cell == null && kv.Num == ic.Epoch : ReferenceEquals(ic.Cell, kv.Ref)))
+                                    {
+                                        var v = obj.Slots[ic.Slot];
+                                        if (v.IsNotEmpty) { regs[bp + code[pc + 1]] = v; pc += 5; continue; }
+                                    }
+                                }
+                                f.Pc = pc + 1;
+                                regs[bp + code[pc + 1]] = GetElemKeyed(ov, kv, ref ic);
+                                pc += 5;
+                                continue;
                             }
                             f.Pc = pc + 1;
                             if (ov.IsNullOrUndefined) { thrown = NullishReadError(ov, kv); goto Unwind; }
                             regs[bp + code[pc + 1]] = GetElemSlow(ov, kv);
-                            pc += 4;
+                            pc += 5;
                             continue;
                         }
                         case Op.SetElem:
                         {
                             var ov = regs[bp + code[pc + 1]];
                             var kv = regs[bp + code[pc + 2]];
-                            if (ov.IsObject && kv.IsNumber && ov.Ref is JsArray arr && arr.Dense)
+                            if (ov.IsObject)
                             {
-                                double dk = kv.Num;
-                                uint idx = (uint)dk;
-                                if (idx == dk && idx < arr.Length && idx < (uint)arr.Items.Length && arr.Items[idx].IsNotEmpty)
+                                if (kv.IsNumber && ov.Ref is JsArray arr && arr.Dense)
                                 {
-                                    arr.Items[idx] = regs[bp + code[pc + 3]];
-                                    pc += 4;
-                                    continue;
+                                    double dk = kv.Num;
+                                    uint idx = (uint)dk;
+                                    if (idx == dk && idx < arr.Length && idx < (uint)arr.Items.Length && arr.Items[idx].IsNotEmpty)
+                                    {
+                                        arr.Items[idx] = regs[bp + code[pc + 3]];
+                                        pc += 5;
+                                        continue;
+                                    }
+                                    // append (a[a.length] = v): no setters/indices can intercept on a clean prototype chain
+                                    if (idx == dk && idx == arr.Length && idx < uint.MaxValue - 1 && arr.LengthWritable && arr.Extensible
+                                        && !JsArray.ProtoChainMayHaveIndices(arr.Proto))
+                                    {
+                                        f.Pc = pc + 1;
+                                        arr.Push(regs[bp + code[pc + 3]]);
+                                        pc += 5;
+                                        continue;
+                                    }
                                 }
-                                // append (a[a.length] = v): no setters/indices can intercept on a clean prototype chain
-                                if (idx == dk && idx == arr.Length && idx < uint.MaxValue - 1 && arr.LengthWritable && arr.Extensible
-                                    && !JsArray.ProtoChainMayHaveIndices(arr.Proto))
+                                else if (kv.IsNumber && ov.Ref is JsTypedArray ta && ta.TrySetElementFast(kv.Num, regs[bp + code[pc + 3]])) { pc += 5; continue; }
+                                ref var ic = ref f.Feedback.Ics[code[pc + 4]];
+                                if (ic.Kind == IcKind.KeyedOwnData)
                                 {
-                                    f.Pc = pc + 1;
-                                    arr.Push(regs[bp + code[pc + 3]]);
-                                    pc += 4;
-                                    continue;
+                                    var obj = Unsafe.As<JsObject>(ov.Ref!);
+                                    if (ReferenceEquals(obj.Shape, ic.Shape) && (kv.IsNumber ? ic.Cell == null && kv.Num == ic.Epoch : ReferenceEquals(ic.Cell, kv.Ref)))
+                                    {
+                                        obj.Slots[ic.Slot] = regs[bp + code[pc + 3]];
+                                        pc += 5;
+                                        continue;
+                                    }
                                 }
+                                f.Pc = pc + 1;
+                                SetElemKeyed(ov, kv, regs[bp + code[pc + 3]], f.T.IsStrict, ref ic);
+                                pc += 5;
+                                continue;
                             }
-                            else if (ov.IsObject && kv.IsNumber && ov.Ref is JsTypedArray ta && ta.TrySetElementFast(kv.Num, regs[bp + code[pc + 3]])) { pc += 4; continue; }
                             f.Pc = pc + 1;
                             if (ov.IsNullOrUndefined && (kv.IsString || kv.IsNumber)) { thrown = NullishSetError(ov, kv); goto Unwind; }
                             SetElemSlow(ov, kv, regs[bp + code[pc + 3]], f.T.IsStrict);
-                            pc += 4;
+                            pc += 5;
                             continue;
                         }
                         case Op.DefinePropK:
@@ -455,6 +491,15 @@ internal sealed partial class Vm
                             regs[bp + code[pc + 1]] = TypeofValue(regs[bp + code[pc + 2]]);
                             pc += 3;
                             continue;
+                        case Op.ToPropertyKey:
+                        {
+                            // strings, symbols and array-index numbers are already keys (see Operations.ToPropertyKeyValue)
+                            var a = regs[bp + code[pc + 2]];
+                            if (a.IsString || a.IsSymbol || (a.IsNumber && Operations.IsArrayIndexNumber(a.Num))) regs[bp + code[pc + 1]] = a;
+                            else { f.Pc = pc + 1; regs[bp + code[pc + 1]] = Operations.ToPropertyKeyValue(Realm, a); }
+                            pc += 3;
+                            continue;
+                        }
 
                         // ---------------------------------------------------------- fused compare-and-branch
                         case Op.LtJmpFalse:
@@ -629,7 +674,7 @@ internal sealed partial class Vm
                             if (fv.IsObject && fv.Ref is JsClosure c && (c.Template.Flags & InlineCallMask) == 0 && !c.IsClassConstructor)
                             {
                                 if (--_ticks <= 0) Checkpoint();
-                                var nf = PushFrame(c, tr < 0 ? default : regs[bp + tr], new ReadOnlySpan<JsValue>(regs, argStart, argc), default, FrameFlags.None);
+                                var nf = PushCallFrame(c, regs, tr < 0 ? -1 : bp + tr, argStart, argc);
                                 nf.RetIndex = dst;
                                 f = nf;
                                 code = f.Code; regs = f.Regs; bp = f.Base; pc = 0; k = f.T.Constants;
@@ -680,7 +725,7 @@ internal sealed partial class Vm
                             if (fv.IsObject && fv.Ref is JsClosure c && (c.Template.Flags & InlineCallMask) == 0 && !c.IsClassConstructor)
                             {
                                 if (--_ticks <= 0) Checkpoint();
-                                var nf = PushFrame(c, ov, new ReadOnlySpan<JsValue>(regs, argStart, argc), default, FrameFlags.None);
+                                var nf = PushCallFrame(c, regs, bp + code[pc + 2], argStart, argc);
                                 nf.RetIndex = dst;
                                 f = nf;
                                 code = f.Code; regs = f.Regs; bp = f.Base; pc = 0; k = f.T.Constants;
