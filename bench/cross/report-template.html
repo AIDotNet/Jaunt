@@ -57,9 +57,9 @@ code{font-size:12px}
   <section class="card verdict">
     <h2>结论</h2>
     <ul>
-      <li><b>Jaunt 和 MoeJS 综合速度基本相当</b>,两者都明显快于 Jint(约快一倍)。</li>
-      <li><b>按赢的测试数,Jaunt 领先</b>(<span id="v-wins">…</span>);但 MoeJS 在字符串类测试上比 Jaunt 快十几到二十多倍,把综合速度拉平了。所以「赢得多」和「综合速度」是两回事,请两个都看。</li>
-      <li><b>计算、对象、迭代器、BigInt</b> 这类代码,Jaunt 通常更快;<b>字符串拼接、切分、哈希</b> 这类代码,Jaunt 明显落后 MoeJS 和 Jint,这是最需要优化的地方。</li>
+      <li><b>Jaunt 与 MoeJS 综合接近,Jaunt 明显快于 Jint(约两倍)</b>。Jaunt 和 MoeJS 的差距在一成到三成之间,随测试时机器负载浮动,不能当作精确值。</li>
+      <li><b>按赢的测试数</b>:<span id="v-wins">…</span>。差距集中在高级特性(JSON 往返、eval/new Function、Proxy、模板字符串、抛出错误),这些上 MoeJS 快几倍;其余类型两者互有胜负,Jaunt 在对象与类、字符串与正则、函数式、异步上略快。</li>
+      <li>对 Jint,Jaunt 在绝大多数测试上更快;例外是 eval/new Function、JSON 往返、迭代器 helpers 等少数几项,Jint 反而更快。</li>
       <li>MoeJS 目前不支持 Temporal、迭代器 helpers、<code>Intl.Collator</code>;Jaunt 和 Jint 都支持。</li>
     </ul>
     <p class="muted small">下面所有数字都来自测量数据。条形越长表示越快,每组里最快的一个标有「最快」。</p>
@@ -102,7 +102,7 @@ code{font-size:12px}
 
   <section class="card">
     <h2>完整数据</h2>
-    <p class="muted small">已预热后的单次调用耗时(毫秒,越小越快),三轮取最好成绩。点表头排序。</p>
+    <p class="muted small">已预热后的单次调用耗时(毫秒,越小越快),多轮取最好成绩。点表头排序。</p>
     <div class="tools"><input id="q" type="search" placeholder="筛选测试名" aria-label="筛选测试名"></div>
     <div class="tablebox"><table><thead><tr>
       <th><button type="button" data-sort="name">测试</button></th>
@@ -117,7 +117,7 @@ code{font-size:12px}
     <summary>测试方法与注意事项</summary>
     <ul>
       <li>三个引擎运行同一批脚本,每个脚本定义 <code>main()</code> 并返回校验值,与 Node 的输出对照,保证结果正确。</li>
-      <li>引擎依次运行,从不同时运行。「已预热」耗时是预热后多批计时的中位数;页面展示的是三轮里最好的一次,因为测试机器上同时有其他任务在占用 CPU。</li>
+      <li>引擎依次运行,从不同时运行。「已预热」耗时是预热后多批计时的中位数;页面展示的是多轮里最好的一次,因为测试机器上可能同时有其他任务在占用 CPU;三个引擎是在同一时段测的。</li>
       <li>不同语言运行时(.NET 与 Go)的内存管理不同,绝对耗时不能完全等同,请主要看相对快慢。</li>
       <li>综合速度只统计三个引擎都支持的测试;MoeJS 不支持的三个测试不计入。</li>
       <li>Jint 在两个测试(函数源码文本、日期格式)上的输出与 Node 不一致,耗时仍然显示。</li>

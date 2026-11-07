@@ -3,10 +3,14 @@
 usage: report.py out.json in1.jsonl [in2.jsonl ...]  (several passes of the same engine => per-field minimum)"""
 import json, sys, math
 out, ins = sys.argv[1], sys.argv[2:]
+import os
+CPU = os.environ.get('METRIC') == 'cpu'   # METRIC=cpu: compare CPU time per call (robust when the machine is busy)
 rows = {}
 for p in ins:
     for line in open(p):
-        r = json.loads(line); cur = rows.setdefault(r['name'], {}).get(r['engine'])
+        r = json.loads(line)
+        if CPU and r.get('cpuUs'): r['medianUs'] = r['minUs'] = r['cpuUs']
+        cur = rows.setdefault(r['name'], {}).get(r['engine'])
         if cur is None or cur['status'] not in ('ok', 'mismatch'): rows[r['name']][r['engine']] = r; continue
         if r['status'] in ('ok', 'mismatch'):  # best-of-passes: keep the minimum of every timing field (robust to background load)
             for k in ('medianUs', 'minUs', 'coldUs', 'compileUs', 'allocB'): cur[k] = min(cur[k], r[k])

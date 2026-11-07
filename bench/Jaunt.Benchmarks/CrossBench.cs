@@ -37,7 +37,8 @@ public static class CrossBench
         string filter = Opt(args, "--filter", "");
         double targetMs = double.Parse(Opt(args, "--target-ms", "60"));
         int samples = int.Parse(Opt(args, "--samples", "7"));
-        double warmMs = double.Parse(Opt(args, "--warm-ms", "150"));
+        double warmMs = double.Parse(Opt(args, "--warm-ms", "800"));
+        double warmMaxMs = double.Parse(Opt(args, "--warm-max-ms", "4000"));
         string? outPath = Opt(args, "--json", null!);
         var expected = JsonSerializer.Deserialize<Dictionary<string, string>>(File.ReadAllText(expectedPath))!;
         var files = Directory.GetFiles(dir, "*.js", SearchOption.AllDirectories).OrderBy(f => f, StringComparer.Ordinal).ToList();
@@ -49,7 +50,7 @@ public static class CrossBench
                 string name = Path.ChangeExtension(Path.GetRelativePath(dir, file), null)!.Replace('\\', '/');
                 if (filter.Length > 0 && !name.Contains(filter)) continue;
                 string src = File.ReadAllText(file);
-                var rec = Measure(engine, name, src, expected.GetValueOrDefault(name), targetMs, samples, warmMs);
+                var rec = Measure(engine, name, src, expected.GetValueOrDefault(name), targetMs, samples, warmMs, warmMaxMs);
                 string line = JsonSerializer.Serialize(rec);
                 writer?.WriteLine(line); writer?.Flush();
                 Console.WriteLine($"{engine,-6} {name,-34} {rec["status"],-9} {(rec.TryGetValue("medianUs", out var m) ? $"{m:F1} µs" : "")}");
@@ -60,7 +61,7 @@ public static class CrossBench
 
     private static string Opt(string[] a, string key, string def) { int i = Array.IndexOf(a, key); return i >= 0 && i + 1 < a.Length ? a[i + 1] : def; }
 
-    private static Dictionary<string, object> Measure(string engine, string name, string src, string? expected, double targetMs, int samples, double warmMs)
+    private static Dictionary<string, object> Measure(string engine, string name, string src, string? expected, double targetMs, int samples, double warmMs, double warmMaxMs)
     {
         var rec = new Dictionary<string, object> { ["engine"] = engine, ["name"] = name };
         try
@@ -86,22 +87,39 @@ public static class CrossBench
             rec["coldUs"] = sw.Elapsed.TotalMicroseconds;
             rec["result"] = first;
             rec["ok"] = expected is null || first == expected;
-            // warm-up
-            sw.Restart(); int w = 0;
-            while (w < 3 || sw.Elapsed.TotalMilliseconds < warmMs) { r.Call(); w++; }
-            double est = sw.Elapsed.TotalMilliseconds / w;
-            int k = Math.Max(1, (int)(targetMs / Math.Max(est, 0.001)));
-            var per = new double[samples]; long alloc = 0;
+            // Warm-up until the JIT has settled. .NET tiers code up (tier-0, instrumented, tier-1) behind timers of ~100 ms, so a
+            // fixed short warm-up measures half-optimized code. Run batches of ~targetMs until at least warmMs have passed and
+            // the best of the last three batches is within 4% of the best of the three before.
+            var warm = Stopwatch.StartNew(); var batches = new List<double>(); int k = 1;
+            while (true)
+            {
+                var bs = Stopwatch.StartNew();
+                for (int j = 0; j < k; j++) r.Call();
+                double t = bs.Elapsed.TotalMilliseconds / k;
+                batches.Add(t);
+                k = Math.Max(1, (int)(targetMs / Math.Max(t, 0.001)));
+                if (warm.Elapsed.TotalMilliseconds >= warmMaxMs) break;
+                if (warm.Elapsed.TotalMilliseconds >= warmMs && batches.Count >= 6)
+                {
+                    double last = batches.TakeLast(3).Min(), prev = batches.Skip(batches.Count - 6).Take(3).Min();
+                    if (Math.Abs(last - prev) <= 0.04 * prev) break;
+                }
+            }
+            var per = new double[samples]; var cpu = new double[samples]; long alloc = 0;
+            var proc = Process.GetCurrentProcess();
             for (int i = 0; i < samples; i++)
             {
                 GC.Collect(); GC.WaitForPendingFinalizers();
                 long a0 = GC.GetAllocatedBytesForCurrentThread();
+                proc.Refresh(); var c0 = proc.TotalProcessorTime;
                 sw.Restart();
                 for (int j = 0; j < k; j++) r.Call();
                 per[i] = sw.Elapsed.TotalMicroseconds / k;
+                proc.Refresh(); cpu[i] = (proc.TotalProcessorTime - c0).TotalMicroseconds / k;
                 alloc += GC.GetAllocatedBytesForCurrentThread() - a0;
             }
-            Array.Sort(per);
+            Array.Sort(per); Array.Sort(cpu);
+            rec["cpuUs"] = cpu[samples / 2];
             rec["medianUs"] = per[samples / 2]; rec["minUs"] = per[0]; rec["allocB"] = alloc / ((long)samples * k); rec["inner"] = k;
             rec["status"] = (bool)rec["ok"] ? "ok" : "mismatch";
         }
