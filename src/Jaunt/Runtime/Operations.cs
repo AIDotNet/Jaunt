@@ -306,11 +306,15 @@ internal static class Operations
         if (len > realm.MaxStringLength) throw JsErrors.RangeError(realm, "Invalid string length");
         if (la == 0) return FromPart(b);
         if (lb == 0) return FromPart(a);
-        // Charged at the full result size either way: that is what flattening may allocate, so budgets (and the
-        // `s += s` doubling bomb) behave exactly as they did before ropes.
-        realm.ChargeBytes(len * 2 + 24);
         if (len < JsRope.MinLength)
+        {
+            realm.ChargeBytes(len * 2 + 24);   // a flat copy
             return new JsValue(string.Concat(a as string ?? ((JsRope)a).Flatten(), b as string ?? ((JsRope)b).Flatten()));
+        }
+        // A rope node copies nothing: it is charged the smaller part, which is the growth of a doubling (`s += s` is still
+        // charged its full size, so allocation bombs hit the limit) but only the added text for an append or prepend
+        // (building a string piecewise stays linear). The characters themselves are charged when a rope is flattened.
+        realm.ChargeBytes(Math.Min(la, lb) * 2L + 48);
         return new JsValue(new JsRope(a, b, (int)len));
     }
 

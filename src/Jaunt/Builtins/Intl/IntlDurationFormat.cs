@@ -53,7 +53,7 @@ internal static unsafe partial class Icu
         fixed (char* sp = skeleton)
         fixed (byte* lp = l)
             h = ((delegate* unmanaged<char*, int, byte*, int*, nint>)P(ref s_unumfOpen_L, "unumf_openForSkeletonAndLocale"))(sp, skeleton.Length, lp, &err);
-        if (Failure(err) || h == 0) throw new InvalidOperationException("ICU number skeleton rejected: " + skeleton);
+        if (Failure(err) || h == 0) throw Icu.Error("ICU number skeleton rejected: " + skeleton);
         if (s_numberFormatters.Count >= 512) { owned = true; return h; }   // cache full: the caller frees it with CloseNumberFormatter
         var cached = s_numberFormatters.GetOrAdd(key, h);
         if (cached != h) ((delegate* unmanaged<nint, void>)P(ref s_unumfClose_L, "unumf_close"))(h);
@@ -70,7 +70,7 @@ internal static unsafe partial class Icu
     {
         int err = 0;
         var res = ((delegate* unmanaged<int*, nint>)P(ref s_unumfOpenResult_L, "unumf_openResult"))(&err);
-        if (Failure(err)) throw new InvalidOperationException("unumf_openResult failed");
+        if (Failure(err)) throw Icu.Error("unumf_openResult failed");
         try
         {
             if (decimalValue != null)
@@ -80,7 +80,7 @@ internal static unsafe partial class Icu
                     ((delegate* unmanaged<nint, byte*, int, nint, int*, void>)P(ref s_unumfFormatDecimal_L, "unumf_formatDecimal"))(formatter, dp, d.Length - 1, res, &err);
             }
             else ((delegate* unmanaged<nint, double, nint, int*, void>)P(ref s_unumfFormatDouble_L, "unumf_formatDouble"))(formatter, value, res, &err);
-            if (Failure(err)) throw new InvalidOperationException("unumf_format failed");
+            if (Failure(err)) throw Icu.Error("unumf_format failed");
             var toStr = (delegate* unmanaged<nint, char*, int, int*, int>)P(ref s_unumfResultToString, "unumf_resultToString");
             var s = CallUChars((buf, cap, e) => toStr(res, buf, cap, e)) ?? "";
             // field positions → innermost field per UTF-16 unit
@@ -151,14 +151,14 @@ internal static unsafe partial class Icu
             var l = Utf8Z(locale);
             int e0 = 0;
             fixed (byte* lp = l) lf = ((delegate* unmanaged<byte*, int, int, int*, nint>)P(ref s_ulistOpenForType, "ulistfmt_openForType"))(lp, 2 /* ULISTFMT_TYPE_UNITS */, width, &e0);
-            if (Failure(e0) || lf == 0) throw new InvalidOperationException("ulistfmt_openForType failed");
+            if (Failure(e0) || lf == 0) throw Icu.Error("ulistfmt_openForType failed");
             var cached = s_listFormatters.GetOrAdd(key, lf);
             if (cached != lf) ((delegate* unmanaged<nint, void>)P(ref s_ulistClose_L, "ulistfmt_close"))(lf);
             lf = cached;
         }
         int err = 0;
         var res = ((delegate* unmanaged<int*, nint>)P(ref s_ulistOpenResult_L, "ulistfmt_openResult"))(&err);
-        if (Failure(err)) throw new InvalidOperationException("ulistfmt_openResult failed");
+        if (Failure(err)) throw Icu.Error("ulistfmt_openResult failed");
         var handles = new System.Runtime.InteropServices.GCHandle[items.Length];
         try
         {
@@ -173,11 +173,11 @@ internal static unsafe partial class Icu
             fixed (nint* pp = ptrs)
             fixed (int* lp = lens)
                 ((delegate* unmanaged<nint, nint*, int*, int, nint, int*, void>)P(ref s_ulistFormatToResult_L, "ulistfmt_formatStringsToResult"))(lf, pp, lp, items.Length, res, &err);
-            if (Failure(err)) throw new InvalidOperationException("ulistfmt_formatStringsToResult failed");
+            if (Failure(err)) throw Icu.Error("ulistfmt_formatStringsToResult failed");
             var val = ((delegate* unmanaged<nint, int*, nint>)P(ref s_ulistAsValue, "ulistfmt_resultAsValue"))(res, &err);
             int len = 0;
             var str = ((delegate* unmanaged<nint, int*, int*, char*>)P(ref s_ufmtvalGetString_L, "ufmtval_getString"))(val, &len, &err);
-            if (Failure(err) || str == null) throw new InvalidOperationException("ufmtval_getString failed");
+            if (Failure(err) || str == null) throw Icu.Error("ufmtval_getString failed");
             var result = new string(str, 0, len);
             var pos = ((delegate* unmanaged<int*, nint>)P(ref s_ucfposOpen_L, "ucfpos_open"))(&err);
             try

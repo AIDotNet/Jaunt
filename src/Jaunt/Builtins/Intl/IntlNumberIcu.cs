@@ -131,7 +131,7 @@ internal sealed unsafe class IcuNumberFormatter
             fixed (char* s = _skeleton)
             fixed (byte* l = _locale)
                 r = IcuNum.unumrf_openForSkeletonWithCollapseAndIdentityFallback(s, _skeleton.Length, 0, 2, l, &err);
-            if (Icu.Failure(err) || r == 0) throw new InvalidOperationException("ICU number range formatter could not be created");
+            if (Icu.Failure(err) || r == 0) throw Icu.Error("ICU number range formatter could not be created");
             if (Interlocked.CompareExchange(ref _range, r, 0) != 0)
             {
                 IcuNum.unumrf_close(r);

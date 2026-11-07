@@ -13,6 +13,13 @@ namespace Jaunt.Runtime;
 /// </summary>
 internal static unsafe partial class Icu
 {
+    /// <summary>
+    /// An ICU call failed (e.g. a date outside ICU's range in formatRange): during an execution this is a catchable JS
+    /// RangeError of the running realm, not an internal error that faults the engine.
+    /// </summary>
+    internal static Exception Error(string message)
+        => Vm.OnThread is { } vm ? JsErrors.RangeError(vm.Realm, "Intl: " + message) : new InvalidOperationException(message);
+
     public const int U_ZERO_ERROR = 0;
     public const int U_BUFFER_OVERFLOW_ERROR = 15;
     public const int U_STRING_NOT_TERMINATED_WARNING = -124;

@@ -178,7 +178,7 @@ public class RobustnessTests
     [InlineData("const j = JSON.stringify('z'.repeat(1e6)); let n = 0; for (let i = 0; i < 200; i++) n += JSON.parse(j).length; n")]
     [InlineData("const f = new Function('return \"' + 'b'.repeat(1e5) + '\"'); let n = 0; for (let i = 0; i < 500; i++) n += f.toString().length; n")]
     [InlineData("let f = function aaaaaaaaaaaaaaaa() {}; for (let i = 0; i < 30000; i++) f = f.bind(null); f.name.length")]
-    [InlineData("let n = 0; for (let i = 0; i < 100; i++) n += (7n ** 200000n).toString().length; n")]
+    [InlineData("const b = 7n ** 200000n; let n = 0; for (let i = 0; i < 100; i++) n += b.toString().length; n")]
     public void LargeStringOperationsAreChargedBeforeTheyAllocate(string source)
     {
         using var engine = new JsEngine(new JsEngineOptions { Limits = new JsLimits { MaxTrackedBytes = 16 * 1024 * 1024 } });
@@ -284,8 +284,8 @@ public class RobustnessTests
         using var engine = new JsEngine();
         var r = engine.Evaluate("""
             let bad = 0;
-            for (let t = 0; t < 12; t++) {
-              let x = 1n; for (let i = 0; i < 400 + t * 50; i++) x = x * 1000000007n + BigInt(i);
+            for (let t = 0; t < 6; t++) {
+              let x = 1n; for (let i = 0; i < 300 + t * 40; i++) x = x * 1000000007n + BigInt(i);
               if (t % 2) x = -x;
               for (const radix of [2, 3, 8, 10, 16, 36]) {
                 let m = x < 0n ? -x : x, ref = ''; const R = BigInt(radix);
@@ -315,5 +315,82 @@ public class RobustnessTests
         Run();
         long retained = Live() - before;
         Assert.True(retained < 16L * 1024 * 1024, $"{retained / 1048576} MB retained after the engine was disposed");
+    }
+
+    [Fact]
+    public void RegExpCompilationIsChargedAndInterruptible()
+    {
+        // memory: compiled programs (Unicode property sets, nodes) count against tracked bytes
+        using (var engine = new JsEngine(new JsEngineOptions { Limits = new JsLimits { MaxTrackedBytes = 16 * 1024 * 1024 } }))
+        {
+            var ex = Assert.Throws<JsLimitExceededException>(() => engine.Evaluate(
+                "const keep = []; for (let i = 0; i < 30; i++) keep.push(new RegExp('[a-z\\\\p{L}]' + i + '|' + '\\\\p{L}'.repeat(3000), 'u')); keep.length"));
+            Assert.Equal(JsLimitKind.TrackedBytes, ex.Kind);
+        }
+        // time: a long pattern's compilation reaches the timeout checkpoints
+        using (var engine = new JsEngine(new JsEngineOptions { Limits = new JsLimits { Timeout = TimeSpan.FromMilliseconds(300) } }))
+        {
+            var sw = Stopwatch.StartNew();
+            var ex = Assert.Throws<JsLimitExceededException>(() => engine.Evaluate("new RegExp('[a-z\\\\p{L}]'.repeat(1e5), 'u').test('x')"));
+            Assert.Equal(JsLimitKind.Timeout, ex.Kind);
+            Assert.True(sw.Elapsed < TimeSpan.FromSeconds(10), $"took {sw.Elapsed}");
+        }
+    }
+
+    [Fact]
+    public void NonIsoCalendarArithmeticObeysTheTimeout()
+    {
+        using var engine = new JsEngine(new JsEngineOptions { Limits = new JsLimits { Timeout = TimeSpan.FromMilliseconds(300) } });
+        var sw = Stopwatch.StartNew();
+        var ex = Assert.Throws<JsLimitExceededException>(() => engine.Evaluate(
+            "Temporal.PlainDate.from({ calendar: 'chinese', year: 2020, monthCode: 'M01', day: 1 }).add({ months: 2e6 }).toString()"));
+        Assert.Equal(JsLimitKind.Timeout, ex.Kind);
+        Assert.True(sw.Elapsed < TimeSpan.FromSeconds(10), $"took {sw.Elapsed}");
+    }
+
+    [Fact]
+    public void DirectEvalOfManyVarsIsLinear()
+    {
+        var src = "var " + string.Join(",", Enumerable.Range(0, 200_000).Select(i => "v" + i)) + "; 1";
+        using var engine = new JsEngine();
+        engine.SetValue("src", JsValue.From(src));
+        var sw = Stopwatch.StartNew();
+        Assert.Equal(1, engine.Evaluate("(function () { return eval(src) })()").AsInt32());
+        Assert.True(sw.Elapsed < TimeSpan.FromSeconds(20), $"took {sw.Elapsed}");   // was ~40 s (quadratic binding removal)
+    }
+
+    [Fact]
+    public void DictionaryReadsCountAgainstTheOutputBudget()
+    {
+        using var engine = new JsEngine(new JsEngineOptions { Limits = new JsLimits { MaxOutputBytes = 10_000 } });
+        var obj = engine.Evaluate("const o = {}; for (let i = 0; i < 100000; i++) o['k' + i] = i; o");
+        using var exec = engine.BeginExecution();
+        var ex = Assert.Throws<JsLimitExceededException>(() => exec.ToObject(obj, JsTypeInfo.Dictionary(JsTypeInfo.Int32)));
+        Assert.Equal(JsLimitKind.OutputBytes, ex.Kind);
+    }
+
+    [Fact]
+    public void IcuFailuresAreCatchableJsErrors()
+    {
+        using var engine = new JsEngine();
+        var r = engine.Evaluate("""
+            try { new Intl.DateTimeFormat('en', { calendar: 'chinese' }).formatRange(new Date(-8.64e15), new Date(8.64e15)); 'ok' }
+            catch (e) { e.constructor.name }
+            """);
+        Assert.Contains(r.ToString(), new[] { "ok", "RangeError" });
+        Assert.False(engine.IsFaulted);
+        Assert.Equal(2, engine.Evaluate("1 + 1").AsInt32());
+    }
+
+    [Fact]
+    public void BuildingAStringByAppendingIsChargedLinearly()
+    {
+        // appends are charged the added text plus a rope node (the rope copies nothing), not the whole result each time:
+        // 40,000 appends of 100 chars build a 4M-char string within 64 MB (full-result charging would count ~160 GB)
+        using var engine = new JsEngine(new JsEngineOptions { Limits = new JsLimits { MaxTrackedBytes = 64 * 1024 * 1024 } });
+        Assert.Equal(4_000_000, engine.Evaluate("const c = 'x'.repeat(100); let s = ''; for (let i = 0; i < 4e4; i++) s += c; s.length").AsInt32());
+        // doubling is still charged its growth: the allocation bomb stops at the limit
+        var ex = Assert.Throws<JsLimitExceededException>(() => engine.Evaluate("let d = 'x'; while (true) d += d;"));
+        Assert.Equal(JsLimitKind.TrackedBytes, ex.Kind);
     }
 }

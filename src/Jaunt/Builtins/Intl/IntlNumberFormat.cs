@@ -314,7 +314,7 @@ internal sealed class NumberFormatRecord
         var result = IcuNumberFormatter.NumberResult;
         int err = 0;
         IntlNumberFormat.FormatInto(Formatter.Ptr, x, result, &err);
-        if (Icu.Failure(err)) throw new InvalidOperationException("ICU number formatting failed (" + err + ")");
+        if (Icu.Failure(err)) throw Icu.Error("ICU number formatting failed (" + err + ")");
         var v = IcuNum.unumf_resultAsValue(result, &err);
         GC.KeepAlive(Formatter);
         return v;
@@ -340,7 +340,7 @@ internal sealed class NumberFormatRecord
         int len = 0;
         var s = IcuNum.ufmtval_getString(v, &len, &err);
         GC.KeepAlive(Formatter);
-        if (Icu.Failure(err)) throw new InvalidOperationException("ICU number formatting failed (" + err + ")");
+        if (Icu.Failure(err)) throw Icu.Error("ICU number formatting failed (" + err + ")");
         return new string(s, 0, len);
     }
 
@@ -365,7 +365,7 @@ internal sealed class NumberFormatRecord
             for (int i = 0; i < b.Length; i++) pb[i] = (byte)b[i];
             IcuNum.unumrf_formatDecimalRange(range, pa, a.Length, pb, b.Length, result, &err);
         }
-        if (Icu.Failure(err)) throw new InvalidOperationException("ICU number range formatting failed (" + err + ")");
+        if (Icu.Failure(err)) throw Icu.Error("ICU number range formatting failed (" + err + ")");
         var v = IcuNum.unumrf_resultAsValue(result, &err);
         GC.KeepAlive(Formatter);
         return v;

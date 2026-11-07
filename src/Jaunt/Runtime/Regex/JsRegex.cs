@@ -25,6 +25,20 @@ internal sealed class JsRegex
     /// <summary>The pattern uses semantics the .NET Regex backend cannot reproduce exactly.</summary>
     public bool RequiresNative;
 
+    /// <summary>Approximate memory of the compiled code alone (character sets are charged as they are built).</summary>
+    public long CodeBytes => 64 + _code.Length * 4L;
+
+    /// <summary>Approximate memory of the compiled program (code + character sets), for budgets and the pattern cache.</summary>
+    public long ApproxBytes
+    {
+        get
+        {
+            long n = 64 + _code.Length * 4L;
+            foreach (var set in _sets) n += 32 + set.Ranges.Length * 4L;
+            return n;
+        }
+    }
+
     private JsRegex(int[] code, CharSet[] sets, bool unicode, int captureCount, string?[] names, int regCount)
     {
         _code = code;

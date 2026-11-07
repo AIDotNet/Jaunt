@@ -25,7 +25,7 @@ internal sealed partial class Vm
     /// the method's stack frame small. Invariant: the local <c>pc</c> is the start of the executing instruction
     /// until it completes; <c>f.Pc</c> is synchronized before any operation that can throw or call out.
     /// </remarks>
-    internal JsValue Run(Frame entry)
+    private JsValue RunLoop(Frame entry)
     {
         Frame f = entry;
         int[] code = f.Code;

@@ -86,6 +86,14 @@ internal sealed class Scope
     public void AddHoisted(FunctionDeclaration fd) => (_hoisted ??= new List<FunctionDeclaration>()).Add(fd);
     public void Remove(Binding b) { _map?.Remove(b.Name); _ordered?.Remove(b); }
 
+    /// <summary>Removes every binding matching <paramref name="match"/> in one pass (Remove per binding is O(n) each).</summary>
+    public void RemoveAll(Predicate<Binding> match)
+    {
+        if (_ordered == null) return;
+        if (_map != null) foreach (var b in _ordered) if (match(b)) _map.Remove(b.Name);
+        _ordered.RemoveAll(match);
+    }
+
     public bool IsGlobalScript => Kind == ScopeKind.Script;
 
     public Binding? Lookup(string name)
@@ -292,14 +300,14 @@ internal sealed class ScopeAnalyzer
         {
             fi.EvalVarNames = new List<string>();
             fi.EvalFunctionNames = new List<string>();
-            foreach (var b in scope.Ordered.ToArray())
+            foreach (var b in scope.Ordered)
             {
                 if (!b.IsVarLike) continue;
                 b.IsEvalDynamic = true;
                 _evalRemovedVars[b.Name] = b;
                 (b.Kind == BindingKind.Function ? fi.EvalFunctionNames : fi.EvalVarNames).Add(b.Name);
-                scope.Remove(b);
             }
+            scope.RemoveAll(static b => b.IsVarLike);   // one pass: removing one by one was quadratic in the var count
         }
         foreach (var st in program.Body) VisitStatement(st);
         return fi;

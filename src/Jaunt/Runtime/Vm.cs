@@ -169,6 +169,31 @@ internal sealed partial class Vm
 
     public CancellationToken Token => _token;
 
+    [ThreadStatic] private static Vm? t_current;
+
+    /// <summary>
+    /// The VM running JS on this thread (null outside any execution). Library code without a realm at hand — the RegExp
+    /// compiler, Temporal calendar arithmetic, BigInt conversion, eval setup — uses it to charge work and reach the
+    /// execution's Timeout/cancellation/Interrupt checkpoints. Scoped to <see cref="Run"/>, so it never outlives a run.
+    /// </summary>
+    internal static Vm? OnThread => t_current;
+
+    /// <summary>Charges <paramref name="ints"/> 32-bit words built by a compiler (e.g. RegExp character sets): bytes and work.</summary>
+    internal void ChargeCompileWork(int ints)
+    {
+        Realm.ChargeBytes(32 + ints * 4L);
+        Tick(1 + ints / 64);
+    }
+
+    internal JsValue Run(Frame entry)
+    {
+        var saved = t_current;
+        if (ReferenceEquals(saved, this)) return RunLoop(entry);   // nested native→JS call: already current
+        t_current = this;
+        try { return RunLoop(entry); }
+        finally { t_current = saved; }
+    }
+
     /// <summary>Whether the active execution has a wall-clock deadline.</summary>
     public bool HasDeadline => _budgetActive && _deadline != long.MaxValue;
 

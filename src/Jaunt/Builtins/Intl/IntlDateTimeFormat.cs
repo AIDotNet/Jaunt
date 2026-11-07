@@ -766,7 +766,7 @@ internal static unsafe partial class IntlDateTimeFormat
         int err = 0;
         var loc = Icu.Utf8Z(icuLocale);
         fixed (byte* l = loc) g = IcuDtf.udatpg_open(l, &err);
-        if (Icu.Failure(err) || g == 0) throw new InvalidOperationException("udatpg_open failed: " + err);
+        if (Icu.Failure(err) || g == 0) throw Icu.Error("udatpg_open failed: " + err);
         s_generators[icuLocale] = g;
         return g;
     }
@@ -837,7 +837,7 @@ internal static unsafe partial class IntlDateTimeFormat
         const string utc = "UTC";
         nint f;
         fixed (byte* l = loc) fixed (char* t = utc) f = IcuDtf.udat_open(StyleIndex(timeStyle), StyleIndex(dateStyle), l, t, utc.Length, null, 0, &err);
-        if (Icu.Failure(err) || f == 0) throw new InvalidOperationException("udat_open failed: " + err);
+        if (Icu.Failure(err) || f == 0) throw Icu.Error("udat_open failed: " + err);
         string pattern;
         try { pattern = Icu.CallUChars((buf, cap, e) => IcuDtf.udat_toPattern(f, 0, buf, cap, e)) ?? ""; }
         finally { IcuDtf.udat_close(f); }
@@ -959,7 +959,7 @@ internal static unsafe partial class IntlDateTimeFormat
         nint f;
         fixed (byte* l = loc) fixed (char* t = tz) fixed (char* p = pattern)
             f = IcuDtf.udat_open(IcuDtf.UDAT_PATTERN, IcuDtf.UDAT_PATTERN, l, t, tz.Length, p, pattern.Length, &err);
-        if (Icu.Failure(err) || f == 0) throw new InvalidOperationException("udat_open failed: " + err);
+        if (Icu.Failure(err) || f == 0) throw Icu.Error("udat_open failed: " + err);
         err = 0;
         var cal = IcuDtf.ucal_clone(IcuDtf.udat_getCalendar(f), &err);
         if (!Icu.Failure(err) && cal != 0)
@@ -978,7 +978,7 @@ internal static unsafe partial class IntlDateTimeFormat
         var loc = Icu.Utf8Z(icuLocale);
         nint cal;
         fixed (byte* l = loc) fixed (char* t = tz) cal = IcuDtf.ucal_open(t, tz.Length, l, 0, &err);
-        if (Icu.Failure(err) || cal == 0) throw new InvalidOperationException("ucal_open failed: " + err);
+        if (Icu.Failure(err) || cal == 0) throw Icu.Error("ucal_open failed: " + err);
         int e = 0;
         IcuDtf.ucal_setGregorianChange(cal, GregorianChange, &e);
         return cal;
@@ -991,7 +991,7 @@ internal static unsafe partial class IntlDateTimeFormat
         nint f;
         fixed (byte* l = loc) fixed (char* s = skeleton) fixed (char* t = tz)
             f = IcuDtf.udtitvfmt_open(l, s, skeleton.Length, t, tz.Length, &err);
-        if (Icu.Failure(err) || f == 0) throw new InvalidOperationException("udtitvfmt_open failed: " + err);
+        if (Icu.Failure(err) || f == 0) throw Icu.Error("udtitvfmt_open failed: " + err);
         return f;
     }
 
@@ -1075,10 +1075,10 @@ internal static unsafe partial class IntlDateTimeFormat
             var buf = new char[n + 1];
             err = 0;
             fixed (char* p = buf) n = IcuDtf.udat_format(f, ms, p, buf.Length, 0, &err);
-            if (Icu.Failure(err)) throw new InvalidOperationException("udat_format failed: " + err);
+            if (Icu.Failure(err)) throw Icu.Error("udat_format failed: " + err);
             return new string(buf, 0, n);
         }
-        if (Icu.Failure(err)) throw new InvalidOperationException("udat_format failed: " + err);
+        if (Icu.Failure(err)) throw Icu.Error("udat_format failed: " + err);
         return new string(stack, 0, n);
     }
 
@@ -1093,7 +1093,7 @@ internal static unsafe partial class IntlDateTimeFormat
         var f = fmt.Udat();
         int err = 0;
         var iter = IcuDtf.ufieldpositer_open(&err);
-        if (Icu.Failure(err)) throw new InvalidOperationException("ufieldpositer_open failed");
+        if (Icu.Failure(err)) throw Icu.Error("ufieldpositer_open failed");
         try
         {
             string? s = null;
@@ -1112,7 +1112,7 @@ internal static unsafe partial class IntlDateTimeFormat
                     iter = IcuDtf.ufieldpositer_open(&err);
                     continue;
                 }
-                if (Icu.Failure(err)) throw new InvalidOperationException("udat_formatForFields failed: " + err);
+                if (Icu.Failure(err)) throw Icu.Error("udat_formatForFields failed: " + err);
                 s = new string(buf, 0, n);
             }
             s ??= "";
@@ -1254,7 +1254,7 @@ internal static unsafe partial class IntlDateTimeFormat
         try
         {
             IcuDtf.udtitvfmt_formatCalendarToResult(itv, cal1, cal2, result, &err);
-            if (Icu.Failure(err)) throw new InvalidOperationException("udtitvfmt_formatCalendarToResult failed: " + err);
+            if (Icu.Failure(err)) throw Icu.Error("udtitvfmt_formatCalendarToResult failed: " + err);
             var value = IcuDtf.udtitvfmt_resultAsValue(result, &err);
             int len = 0;
             var chars = IcuDtf.ufmtval_getString(value, &len, &err);

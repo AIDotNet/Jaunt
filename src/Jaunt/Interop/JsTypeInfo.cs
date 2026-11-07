@@ -166,6 +166,7 @@ public sealed class JsConversionContext
             if (k.Value is not string s) continue;
             if (!o.GetOwnProperty(k, out var d) || !d.Enumerable) continue;
             if (d.IsAccessor) throw Fail($"Property '{s}' is an accessor; data-only conversion does not run getters");
+            CountString(s.Length);   // each entry (its key) counts against the conversion's output budget
             result.Add(new(s, d.Value));
         }
         return result;

@@ -49,10 +49,12 @@ internal sealed class JsRegExp : JsObject
 
 internal static class RegExpBuiltins
 {
-    private sealed class CacheEntry { public SysRegex? Regex; public JsRegex? Native; public JsRegex? NativeIgnoreCase; public int Groups; public string[] Names = Array.Empty<string>(); public int[][] NameGroups = Array.Empty<int[]>(); public int DotnetMaxGroup; public JsRegex? SliceFallback; public int[]? SliceFallbackGroups; }
+    private sealed class CacheEntry { public SysRegex? Regex; public JsRegex? Native; public JsRegex? NativeIgnoreCase; public int Groups; public string[] Names = Array.Empty<string>(); public int[][] NameGroups = Array.Empty<int[]>(); public int DotnetMaxGroup; public JsRegex? SliceFallback; public int[]? SliceFallbackGroups; public long Bytes; }
     private static readonly Dictionary<(string, string), CacheEntry> s_cache = new();
     private const int CacheLimit = 512;
     private const int MaxCachedPatternLength = 16 * 1024;
+    private const long MaxCachedProgramBytes = 1L << 20, MaxCacheBytes = 32L << 20;
+    private static long s_cacheBytes;   // guarded by s_cache
     /// <summary>
     /// Time slice of a .NET-backend match. .NET matching cannot observe the execution budget, so a match that runs longer
     /// is redone on the native engine, which does (see <see cref="JsRegExp.SliceFallback"/>).
@@ -333,7 +335,10 @@ internal static class RegExpBuiltins
             RegExpParseResult result;
             try
             {
-                result = AdaptRegExp(pattern, flags);
+                // huge patterns go to the native engine only: it validates the syntax itself, and its compilation is
+                // charged and interruptible, whereas the .NET adaptation/compile of a multi-megabyte pattern is neither
+                result = pattern.Length > MaxCachedPatternLength ? default
+                    : Tokenizer.AdaptRegExp(pattern, flags, false, MatchTimeout, false, EcmaVersion.Latest, ExperimentalESFeatures.All);
             }
             catch (ParseErrorException pe)
             {
@@ -411,12 +416,21 @@ internal static class RegExpBuiltins
                 }
                 entry = new CacheEntry { Native = native, Groups = native.CaptureCount - 1, Names = names.ToArray(), NameGroups = nameGroups.ToArray() };
             }
-            // the cache is process-wide and outlives engines: huge patterns (and their compiled programs) are not kept
-            if (pattern.Length <= MaxCachedPatternLength)
+            // compiling is an allocation of this execution (charged once, at compile time; cache hits share the program)
+            var nativeProgram = entry.Native ?? entry.SliceFallback ?? entry.NativeIgnoreCase;
+            long programBytes = nativeProgram?.ApproxBytes ?? 0;
+            long dotnetBytes = entry.Regex != null ? 256 + pattern.Length * 32L : 0;   // .NET program: rough estimate
+            programBytes += dotnetBytes;
+            realm.ChargeBytes((nativeProgram?.CodeBytes ?? 0) + dotnetBytes);   // sets were charged as they were built
+            entry.Bytes = programBytes;
+            // the cache is process-wide and outlives engines: bounded by entries and by bytes, huge programs not kept
+            if (pattern.Length <= MaxCachedPatternLength && programBytes <= MaxCachedProgramBytes)
             lock (s_cache)
             {
-                if (s_cache.Count >= CacheLimit) s_cache.Clear();
+                if (s_cache.Count >= CacheLimit || s_cacheBytes + programBytes > MaxCacheBytes) { s_cache.Clear(); s_cacheBytes = 0; }
+                if (s_cache.TryGetValue((pattern, flags), out var old)) s_cacheBytes -= old.Bytes;
                 s_cache[(pattern, flags)] = entry;
+                s_cacheBytes += programBytes;
             }
         }
         var re = new JsRegExp(realm, proto ?? realm.RegExpPrototype)
@@ -462,27 +476,6 @@ internal static class RegExpBuiltins
             if (c is 'u' or 'x' || (c >= '0' && c <= '9')) return true;
         }
         return false;
-    }
-
-    /// <summary>
-    /// Acornima's pattern adaptation keeps per-thread buffers sized by the largest pattern it has seen; a huge pattern is
-    /// therefore adapted on a short-lived thread, so those buffers do not outlive it on (possibly pooled) host threads.
-    /// </summary>
-    private static RegExpParseResult AdaptRegExp(string pattern, string flags)
-    {
-        if (pattern.Length <= MaxCachedPatternLength)
-            return Tokenizer.AdaptRegExp(pattern, flags, false, MatchTimeout, false, EcmaVersion.Latest, ExperimentalESFeatures.All);
-        RegExpParseResult result = default;
-        System.Runtime.ExceptionServices.ExceptionDispatchInfo? error = null;
-        var t = new System.Threading.Thread(() =>
-        {
-            try { result = Tokenizer.AdaptRegExp(pattern, flags, false, MatchTimeout, false, EcmaVersion.Latest, ExperimentalESFeatures.All); }
-            catch (Exception ex) { error = System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(ex); }
-        }, 16 * 1024 * 1024);
-        t.Start();
-        t.Join();
-        error?.Throw();
-        return result;
     }
 
     private static RegexMatch SafeMatch(Realm realm, JsRegExp re, string s, int start)

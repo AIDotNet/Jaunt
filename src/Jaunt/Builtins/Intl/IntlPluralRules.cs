@@ -35,7 +35,7 @@ internal sealed unsafe class IcuPluralRules
         int err = 0;
         nint p;
         fixed (byte* l = loc) p = IcuNum.uplrules_openForType(l, ordinal ? 1 : 0, &err);
-        if (Icu.Failure(err) || p == 0) throw new InvalidOperationException("ICU plural rules could not be created");
+        if (Icu.Failure(err) || p == 0) throw Icu.Error("ICU plural rules could not be created");
         int e2 = 0;
         var keywords = Icu.ReadUEnum(IcuNum.uplrules_getKeywords(p, &e2));
         var cats = new List<string>();

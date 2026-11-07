@@ -143,7 +143,9 @@ without an execution timeout they stop after 5 s with a catchable `RangeError`.
   budget for all realms of an engine (`ShadowRealm`, `JsCallContext.CreateRealm`; creating a realm is charged too).
   It is cumulative over the engine's lifetime: garbage that has since become unreachable still counts, so it bounds
   total allocation, not live memory. What is charged: objects, properties, array storage, ArrayBuffers, string
-  concatenation, and the output of string-producing builtins (`repeat`, `padStart`/`padEnd`, `concat`, `replace`/
+  concatenation (a long concatenation builds a rope: it is charged its smaller part plus a node — so `s += s` is charged
+  its growth and stops at the limit, while appending stays linear — and the full characters when the rope is first
+  read as a flat string), RegExp compilation (character sets and program), and the output of string-producing builtins (`repeat`, `padStart`/`padEnd`, `concat`, `replace`/
   `replaceAll` with strings or RegExps, `join` of arrays, typed arrays and iterators, `toLocaleString`, case mapping,
   `normalize`, `toWellFormed`, URI and `escape` functions, `JSON.stringify`, string values created by `JSON.parse` and
   host `ParseJson`, `toHex`/`toBase64`, `RegExp.prototype.source`, `Function.prototype.toString`, `bind` names, BigInt
@@ -164,10 +166,15 @@ without an execution timeout they stop after 5 s with a catchable `RangeError`.
   a process crash, also on small thread stacks and under NativeAOT. (Long `bind` chains also grow their names
   quadratically; that memory is charged to tracked bytes.)
 * Long single builtin operations stay interruptible: BigInt ↔ string conversions of large values are divide-and-conquer
-  and check the execution's timeout/cancellation/`Interrupt()` between steps (a million-digit `toString` takes ~0.5 s).
-* Process-wide caches are bounded: compiled RegExp patterns (512 entries, patterns over 16K characters not cached; huge
-  patterns are adapted on a short-lived thread so the parser's per-thread buffers do not outlive them), ICU date
-  pattern generators (64, native handles closed on eviction), date patterns and other Intl formatters.
+  and check the execution's timeout/cancellation/`Interrupt()` between steps (a million-digit `toString` takes ~0.5 s);
+  compiling a RegExp, year-by-year arithmetic in non-ISO Temporal calendars and eval setup charge work as they go, so
+  they reach the same checkpoints. (A single multiplication of two multi-megabit BigInts is still one uninterruptible
+  step of about a second.)
+* ICU failures (e.g. `formatRange` with dates outside ICU's range) are catchable `RangeError`s, not engine faults.
+* Process-wide caches are bounded: compiled RegExp patterns (512 entries and 32 MB of programs; patterns over 16K
+  characters or programs over 1 MB are not cached), ICU date pattern generators (64, native handles closed on
+  eviction), date patterns and other Intl formatters. Patterns over 16K characters are compiled by the native engine
+  only (charged and interruptible; its nesting limit of 1,000 groups applies, deeper ones are a SyntaxError).
 * Host APIs reject objects of another engine wherever a value can enter the engine's object graph (arguments,
   `SetValue`, host-function results, `JsCallContext.SetProperty`/`CreateArray`/`Call`, DTO conversion contexts).
   `Interrupt()` stops the execution that is active when it is called (at the latest when it completes, even if it was

@@ -43,6 +43,8 @@ internal sealed class JsRope
     {
         var flat = Volatile.Read(ref _flat);
         if (flat != null) return flat;
+        // the real allocation: charged to the execution running on this thread (none when the host reads the string)
+        Vm.OnThread?.Realm.ChargeBytes(Length * 2L + 24);
         flat = string.Create(Length, this, static (span, root) => Fill(span, root));
         Volatile.Write(ref _flat, flat);
         Volatile.Write(ref _left, null);

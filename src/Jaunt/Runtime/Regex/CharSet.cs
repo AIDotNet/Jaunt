@@ -10,7 +10,13 @@ internal sealed class CharSet
     public static readonly CharSet Empty = new(Array.Empty<int>());
     public static readonly CharSet AllCodePoints = new(new[] { 0, 0x10FFFF });
 
-    public CharSet(int[] ranges) => Ranges = ranges;
+    public CharSet(int[] ranges)
+    {
+        Ranges = ranges;
+        // sets are built while compiling a pattern (property escapes, unions, case folding): large ones are memory and
+        // work of the running execution (tracked bytes + VM work, so Timeout/Interrupt are reached)
+        if (ranges.Length > 64) Vm.OnThread?.ChargeCompileWork(ranges.Length);
+    }
 
     public static CharSet Single(int c) => new(new[] { c, c });
     public static CharSet Range(int lo, int hi) => new(new[] { lo, hi });

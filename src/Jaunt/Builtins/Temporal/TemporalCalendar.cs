@@ -292,7 +292,11 @@ internal static unsafe class TemporalCalendars
 
     private static YearInfo GetYear(string cal, int year)
     {
-        if (s_years.TryGetValue((cal, year), out var info)) return info;
+        // non-ISO arithmetic walks year by year (e.g. adding 100,000 months): each step is work of the running
+        // execution, so it reaches the Timeout/Interrupt checkpoints; building a year through ICU costs more
+        var vm = Vm.OnThread;
+        if (s_years.TryGetValue((cal, year), out var info)) { vm?.Tick(); return info; }
+        vm?.Tick(64);
         if (cal == "hebrew")
         {
             info = HebrewYear(year);

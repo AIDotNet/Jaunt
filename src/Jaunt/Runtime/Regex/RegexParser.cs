@@ -149,6 +149,9 @@ internal sealed class RegexParser
 
     private RNode? ParseTerm()
     {
+        // compiling a long pattern is work and memory (a node per term) of the running execution: charged, and it
+        // reaches the Timeout/Interrupt checkpoints
+        Vm.OnThread?.ChargeCompileWork(8);
         char c = Peek();
         int capBefore = _groupCount;
         RNode atom;
