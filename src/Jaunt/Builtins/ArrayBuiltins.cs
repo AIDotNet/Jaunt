@@ -124,6 +124,7 @@ internal static class ArrayBuiltins
             if (a.This.Ref is JsArray arr && arr.Dense && arr.LengthWritable)
             {
                 if (arr.Length == 0) return JsValue.Undefined;
+                if (arr.TryQueuePop(out var qv)) return qv;
                 uint i = arr.Length - 1;
                 if (arr.TryGetDense(i, out var dv))
                 {
@@ -144,15 +145,19 @@ internal static class ArrayBuiltins
         r.Method(proto, "shift", 0, static (in NativeArgs a) =>
         {
             var realm = a.Realm;
-            if (a.This.Ref is JsArray arr && arr.Dense && arr.LengthWritable && arr.Extensible && arr.Length <= arr.Items.Length && !JsArray.ProtoChainMayHaveIndices(arr.Proto))
+            if (a.This.Ref is JsArray arr && arr.Dense && arr.LengthWritable && arr.Extensible && !JsArray.ProtoChainMayHaveIndices(arr.Proto))
             {
                 if (arr.Length == 0) return JsValue.Undefined;
-                var first = arr.Items[0];
-                Array.Copy(arr.Items, 1, arr.Items, 0, (int)arr.Length - 1);
-                arr.Items[arr.Length - 1] = JsValue.Empty;
-                arr.Length--;
-                realm.Vm.Tick((int)Math.Min(arr.Length / 64, 1000));
-                return first.IsEmpty ? JsValue.Undefined : first;
+                if (arr.TryQueueShift(out var first)) return first.IsEmpty ? JsValue.Undefined : first;
+                if (arr.Length <= arr.Items.Length)
+                {
+                    first = arr.Items[0];
+                    Array.Copy(arr.Items, 1, arr.Items, 0, (int)arr.Length - 1);
+                    arr.Items[arr.Length - 1] = JsValue.Empty;
+                    arr.Length--;
+                    realm.Vm.Tick((int)Math.Min(arr.Length / 64, 1000));
+                    return first.IsEmpty ? JsValue.Undefined : first;
+                }
             }
             var o = Operations.ToObject(realm, a.This);
             long len = Operations.LengthOfArrayLike(realm, o);
@@ -179,13 +184,18 @@ internal static class ArrayBuiltins
             if (n > 0)
             {
                 CheckLength(realm, (double)len + n);
-                if (o is JsArray arr && arr.Dense && arr.Extensible && arr.LengthWritable && arr.Length <= arr.Items.Length && !JsArray.ProtoChainMayHaveIndices(arr.Proto))
+                if (o is JsArray arr && arr.Dense && arr.Extensible && arr.LengthWritable && !JsArray.ProtoChainMayHaveIndices(arr.Proto))
                 {
-                    arr.EnsureCapacity(arr.Length + (uint)n);
-                    Array.Copy(arr.Items, 0, arr.Items, n, (int)arr.Length);
-                    for (int i = 0; i < n; i++) arr.Items[i] = a.Args[i];
-                    arr.Length += (uint)n;
-                    return new JsValue(arr.Length);
+                    if (arr.TryQueueUnshift(a.Args)) return new JsValue(arr.Length);
+                    arr.LeaveQueueMode();
+                    if (arr.Length <= arr.Items.Length)
+                    {
+                        arr.EnsureCapacity(arr.Length + (uint)n);
+                        Array.Copy(arr.Items, 0, arr.Items, n, (int)arr.Length);
+                        for (int i = 0; i < n; i++) arr.Items[i] = a.Args[i];
+                        arr.Length += (uint)n;
+                        return new JsValue(arr.Length);
+                    }
                 }
                 for (long k = len; k > 0; k--)
                 {
@@ -209,21 +219,15 @@ internal static class ArrayBuiltins
             long end = Operations.RelativeIndex(realm, a[1], len, len);
             long count = Math.Max(end - k, 0);
             var resObj = ArraySpeciesCreate(realm, o, count, out bool intrinsic);
-            if (resObj is JsArray res && res.Dense && res.Length == count && o is JsArray arr && arr.Dense && end <= arr.Items.Length && !JsArray.ProtoChainMayHaveIndices(arr.Proto))
+            if (o is JsArray qa) qa.LeaveQueueMode();
+            // a fresh array nobody has seen: one copy into the store it already has; a hole stays a hole
+            if (intrinsic && resObj is JsArray res && o is JsArray arr && arr.Dense && end <= arr.Items.Length && !JsArray.ProtoChainMayHaveIndices(arr.Proto))
             {
-                if (intrinsic)
+                if (count > 0)
                 {
-                    // a fresh array nobody has seen: one copy into the store it already has; a hole stays a hole
-                    if (count > 0)
-                    {
-                        res.EnsureCapacity((uint)count);
-                        Array.Copy(arr.Items, k, res.Items, 0, count);
-                    }
-                    realm.Vm.Tick((int)Math.Min(count / 64, 1000));
-                    return JsValue.FromObject(res);
+                    res.EnsureCapacity((uint)count);
+                    Array.Copy(arr.Items, k, res.Items, 0, count);
                 }
-                res.SetLength(0);
-                for (long i = k; i < end; i++) { var v = arr.Items[i]; if (v.IsEmpty) res.PushHole(); else res.Push(v); }
                 realm.Vm.Tick((int)Math.Min(count / 64, 1000));
                 return JsValue.FromObject(res);
             }
@@ -250,32 +254,11 @@ internal static class ArrayBuiltins
             var items = a.Length > 2 ? a.Args.Slice(2).ToArray() : Array.Empty<JsValue>();
             CheckLength(realm, (double)len + items.Length - delCount);
             var removedObj = ArraySpeciesCreate(realm, o, delCount, out bool intrinsic);
-            if (removedObj is JsArray removed && removed.Dense && o is JsArray arr && arr.Dense && arr.Extensible && arr.LengthWritable && arr.Length == len && len <= arr.Items.Length && !JsArray.ProtoChainMayHaveIndices(arr.Proto))
+            if (intrinsic && o is JsArray arr && arr.Dense && arr.Extensible && arr.LengthWritable && arr.Length == len && !JsArray.ProtoChainMayHaveIndices(arr.Proto) && (arr.IsQueue || len <= arr.Items.Length))
             {
-                if (intrinsic)
-                {
-                    if (delCount > 0)
-                    {
-                        removed.EnsureCapacity((uint)delCount);
-                        Array.Copy(arr.Items, start, removed.Items, 0, delCount);
-                    }
-                }
-                else
-                {
-                    removed.SetLength(0);
-                    for (long i = 0; i < delCount; i++) { var v = arr.Items[start + i]; if (v.IsEmpty) removed.PushHole(); else removed.Push(v); }
-                }
-                long newLen = len - delCount + items.Length;
-                if (items.Length != delCount)
-                {
-                    arr.EnsureCapacity((uint)Math.Max(newLen, len));
-                    Array.Copy(arr.Items, start + delCount, arr.Items, start + items.Length, len - start - delCount);
-                    for (long i = newLen; i < len; i++) arr.Items[i] = JsValue.Empty;
-                }
-                for (int i = 0; i < items.Length; i++) arr.Items[start + i] = items[i];
-                arr.Length = (uint)newLen;
-                realm.Vm.Tick((int)Math.Min(len / 64, 1000));
-                return JsValue.FromObject(removed);
+                arr.SpliceDense((int)start, (int)delCount, items, (JsArray)removedObj);
+                realm.Vm.Tick((int)Math.Min(Math.Min(start, len - start - delCount) / 64, 1000));
+                return JsValue.FromObject(removedObj);
             }
             for (long i = 0; i < delCount; i++)
             {
@@ -331,6 +314,7 @@ internal static class ArrayBuiltins
                 }
                 if (!spreadable) { res.Push(item); return; }
                 var e = item.AsObjectUnchecked;
+                if (e is JsArray qa) qa.LeaveQueueMode();
                 if (e is JsArray ea && ea.Dense && ea.Length <= ea.Items.Length && !JsArray.ProtoChainMayHaveIndices(ea.Proto))
                 {
                     if (res.Dense && (ulong)res.Length + ea.Length <= int.MaxValue)
@@ -412,6 +396,7 @@ internal static class ArrayBuiltins
         {
             var realm = a.Realm;
             var o = Operations.ToObject(realm, a.This);
+            if (o is JsArray qa) qa.LeaveQueueMode();
             if (o is JsArray arr && arr.Dense && arr.Length <= arr.Items.Length && Array.IndexOf(arr.Items, JsValue.Empty, 0, (int)arr.Length) < 0 && arr.Extensible && arr.LengthWritable)
             {
                 Array.Reverse(arr.Items, 0, (int)arr.Length);
@@ -446,6 +431,7 @@ internal static class ArrayBuiltins
             var target = a[0];
             if (o is JsArray arr && arr.Dense && !JsArray.ProtoChainMayHaveIndices(arr.Proto))
             {
+                arr.LeaveQueueMode();
                 long end = Math.Min(len, arr.Items.Length);
                 for (long i = k; i < end; i++)
                 {
@@ -472,6 +458,7 @@ internal static class ArrayBuiltins
             double n = a.Length > 1 ? Operations.ToIntegerOrInfinity(realm, a[1]) : len - 1;
             long k = n >= 0 ? (long)Math.Min(n, len - 1) : (long)(len + n);
             var target = a[0];
+            if (o is JsArray qa) qa.LeaveQueueMode();
             if (o is JsArray arr && arr.Dense && len <= arr.Items.Length && !JsArray.ProtoChainMayHaveIndices(arr.Proto))
             {
                 for (long i = k; i >= 0; i--)
@@ -543,6 +530,7 @@ internal static class ArrayBuiltins
             long from = Operations.RelativeIndex(realm, a[1], len, 0);
             long final = Operations.RelativeIndex(realm, a[2], len, len);
             long count = Math.Min(final - from, len - to);
+            if (o is JsArray qa) qa.LeaveQueueMode();
             if (count > 0 && o is JsArray arr && arr.Dense && len <= arr.Items.Length && arr.Extensible && arr.LengthWritable && !JsArray.ProtoChainMayHaveIndices(arr.Proto))
             {
                 Array.Copy(arr.Items, from, arr.Items, to, count);   // overlap-safe
