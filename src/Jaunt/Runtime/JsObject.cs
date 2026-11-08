@@ -13,6 +13,17 @@ internal sealed class LazyFunction
     public LazyFunction(string name, int length, NativeFn fn) { Name = name; Length = length; Fn = fn; }
 }
 
+/// <summary>The less common state of a <see cref="JsObject"/>.</summary>
+internal sealed class ObjectExtras
+{
+    /// <summary>Root of the objects that have this one as their prototype.</summary>
+    public Shape? ChildRootShape;
+    /// <summary>Layout (length, name) of the functions that have this one as their prototype.</summary>
+    public Shape? FunctionChildShape;
+    /// <summary>Private class elements (#x): found by a scan for the name's identity, the end marked by a null name or the array's end.</summary>
+    public PrivateElement[]? PrivateElements;
+}
+
 internal struct PrivateElement
 {
     public JsPrivateName? Name;
@@ -47,10 +58,9 @@ internal class JsObject
             return h;
         }
     }
-    internal Shape? ChildRootShape;
-    internal Shape? FunctionChildShape;
-    /// <summary>Private class elements (#x): found by a scan for the name's identity, the end marked by a null name or the array's end.</summary>
-    internal PrivateElement[]? PrivateElements;
+    /// <summary>What only some objects need, apart so that the rest stay small (see <see cref="ObjectExtras"/>).</summary>
+    internal ObjectExtras? Extras;
+    internal PrivateElement[]? PrivateElements => Extras?.PrivateElements;
 
     private static readonly JsValue[] NoSlots = Array.Empty<JsValue>();
 
@@ -58,7 +68,7 @@ internal class JsObject
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     internal int FindPrivate(JsPrivateName name)
     {
-        var pe = PrivateElements;
+        var pe = Extras?.PrivateElements;
         if (pe != null)
         {
             for (int i = 0; i < pe.Length; i++)
@@ -72,7 +82,8 @@ internal class JsObject
     /// <summary>Appends a private element whose name is known to be absent.</summary>
     internal void AddPrivate(JsPrivateName name, JsValue value)
     {
-        var pe = PrivateElements;
+        var extras = Extras ??= new ObjectExtras();
+        var pe = extras.PrivateElements;
         int i = 0;
         if (pe == null) PrivateElements = pe = new PrivateElement[2];
         else

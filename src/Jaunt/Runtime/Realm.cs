@@ -384,10 +384,10 @@ internal sealed partial class Realm
         if (ReferenceEquals(proto, _objectPrototype)) return Shape.SharedObjectRoot;
         if (ReferenceEquals(proto, _functionPrototype)) return Shape.SharedFunctionRoot;
         if (ReferenceEquals(proto, _arrayPrototype)) return Shape.SharedArrayRoot;
-        var s = proto.ChildRootShape;
+        var s = proto.Extras?.ChildRootShape;
         if (s != null) return s;
         proto.IsPrototypeObject = true;
-        return proto.ChildRootShape = Shape.CreateRoot(proto);
+        return (proto.Extras ??= new ObjectExtras()).ChildRootShape = Shape.CreateRoot(proto);
     }
 
     private Shape? _nullRoot;
@@ -395,9 +395,10 @@ internal sealed partial class Realm
     public Shape FunctionShapeFor(JsObject proto)
     {
         if (ReferenceEquals(proto, _functionPrototype)) return Shape.SharedFunctionShape;
-        var s = proto.FunctionChildShape;
+        var s = proto.Extras?.FunctionChildShape;
         if (s != null) return s;
-        return proto.FunctionChildShape = RootShapeFor(proto).AddProperty("length", PropFlags.Configurable)!.AddProperty("name", PropFlags.Configurable)!;
+        var shape = RootShapeFor(proto).AddProperty("length", PropFlags.Configurable)!.AddProperty("name", PropFlags.Configurable)!;
+        return (proto.Extras ??= new ObjectExtras()).FunctionChildShape = shape;
     }
 
     /// <summary>Resolves a shared shape's prototype role to this realm's intrinsic.</summary>
