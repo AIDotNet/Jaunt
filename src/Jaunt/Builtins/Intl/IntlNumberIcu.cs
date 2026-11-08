@@ -16,7 +16,7 @@ internal static unsafe class IcuNum
         s_ufmtvalGetString, s_ufmtvalNextPosition, s_ucfposOpen, s_ucfposReset, s_ucfposGetCategory, s_ucfposGetField, s_ucfposGetIndexes,
         s_unumrfOpen, s_unumrfOpenResult, s_unumrfFormatDoubleRange, s_unumrfFormatDecimalRange, s_unumrfResultAsValue, s_unumrfClose,
         s_ucurrDigits, s_unumsysOpen, s_unumsysOpenByName, s_unumsysClose, s_unumsysAvailable, s_unumsysGetName, s_unumsysIsAlgorithmic,
-        s_uplOpenForType, s_uplSelectFormatted, s_uplSelectForRange, s_uplGetKeywords, s_uplClose;
+        s_uplOpenForType, s_uplSelect, s_uplSelectFormatted, s_uplSelectForRange, s_uplGetKeywords, s_uplClose;
 
     public static nint unumf_openForSkeletonAndLocale(char* skeleton, int len, byte* locale, int* err) =>
         ((delegate* unmanaged<char*, int, byte*, int*, nint>)P(ref s_unumfOpen, "unumf_openForSkeletonAndLocale"))(skeleton, len, locale, err);
@@ -60,6 +60,8 @@ internal static unsafe class IcuNum
     public static bool unumsys_isAlgorithmic(nint ns) => ((delegate* unmanaged<nint, sbyte>)P(ref s_unumsysIsAlgorithmic, "unumsys_isAlgorithmic"))(ns) != 0;
 
     public static nint uplrules_openForType(byte* locale, int type, int* err) => ((delegate* unmanaged<byte*, int, int*, nint>)P(ref s_uplOpenForType, "uplrules_openForType"))(locale, type, err);
+    public static int uplrules_select(nint pr, double number, char* buf, int cap, int* err) =>
+        ((delegate* unmanaged<nint, double, char*, int, int*, int>)P(ref s_uplSelect, "uplrules_select"))(pr, number, buf, cap, err);
     public static int uplrules_selectFormatted(nint pr, nint formatted, char* buf, int cap, int* err) =>
         ((delegate* unmanaged<nint, nint, char*, int, int*, int>)P(ref s_uplSelectFormatted, "uplrules_selectFormatted"))(pr, formatted, buf, cap, err);
     public static int uplrules_selectForRange(nint pr, nint formatted, char* buf, int cap, int* err) =>
@@ -118,6 +120,37 @@ internal sealed unsafe class IcuNumberFormatter
         var fmt = new IcuNumberFormatter(p, skeleton, loc);
         if (s_cache.Count >= 512) s_cache.Clear();
         return s_cache.GetOrAdd(key, fmt);   // a losing duplicate is freed by its finalizer
+    }
+
+    private IntegerLayout? _integerLayout;
+    private bool _integerLayoutProbed;
+
+    /// <summary>How this formatter writes plain integers, when that can be done without ICU; probed once per formatter.</summary>
+    public IntegerLayout? IntegerLayout
+    {
+        get
+        {
+            if (!_integerLayoutProbed)
+            {
+                _integerLayout = Jaunt.Runtime.IntegerLayout.Probe(this);
+                _integerLayoutProbed = true;
+            }
+            return _integerLayout;
+        }
+    }
+
+    /// <summary>The text ICU produces for a Number.</summary>
+    public string FormatDouble(double x)
+    {
+        var result = NumberResult;
+        int err = 0;
+        IcuNum.unumf_formatDouble(Ptr, x, result, &err);
+        var v = IcuNum.unumf_resultAsValue(result, &err);
+        int len = 0;
+        var s = IcuNum.ufmtval_getString(v, &len, &err);
+        GC.KeepAlive(this);
+        if (Icu.Failure(err)) throw Icu.Error("ICU number formatting failed (" + err + ")");
+        return new string(s, 0, len);
     }
 
     /// <summary>The range formatter (collapse "auto", identity fallback "approximately").</summary>
@@ -188,5 +221,102 @@ internal sealed unsafe class IcuNumberFormatter
             if (h.Pos == 0) { int err = 0; h.Pos = IcuNum.ucfpos_open(&err); }
             return h.Pos;
         }
+    }
+}
+
+/// <summary>
+/// The way one ICU decimal formatter writes integers: a sign prefix, Latin digits and a grouping separator placed by primary,
+/// secondary and minimum-grouping sizes. Those are all the inputs ICU's own grouping has, so the layout is read from what the
+/// formatter prints and then checked against it for every digit count in range; a formatter that prints anything else has no
+/// layout and stays with ICU. Formatting an integer this way is several times cheaper than a round trip through ICU's formatter.
+/// </summary>
+internal sealed class IntegerLayout
+{
+    /// <summary>Exclusive bound of the magnitudes covered: every digit count below it is checked by <see cref="Probe"/>.</summary>
+    public const double Limit = 1e15;
+    private const int MaxPrefix = 8;
+
+    private readonly string _negativePrefix;
+    private readonly char _separator;   // '\0' when the formatter does not group
+    private readonly int _primary, _secondary, _minGrouping;
+
+    private IntegerLayout(string negativePrefix, char separator, int primary, int secondary, int minGrouping)
+    {
+        _negativePrefix = negativePrefix;
+        _separator = separator;
+        _primary = primary;
+        _secondary = secondary;
+        _minGrouping = minGrouping;
+    }
+
+    public static bool Covers(double x) => Math.Abs(x) < Limit && x == Math.Floor(x) && (x != 0 || !double.IsNegative(x));
+
+    /// <summary>The text of an integer accepted by <see cref="Covers"/>.</summary>
+    public string Format(double x)
+    {
+        Span<char> buf = stackalloc char[MaxPrefix + 15 + 7];
+        ulong n = (ulong)Math.Abs(x);
+        int digits = 1;
+        for (ulong m = n; m >= 10; m /= 10) digits++;
+        bool grouped = _separator != '\0' && digits >= _primary + _minGrouping;
+        int pos = buf.Length, written = 0, next = _primary;
+        do
+        {
+            buf[--pos] = (char)('0' + (int)(n % 10));
+            n /= 10;
+            if (grouped && ++written == next && n != 0)
+            {
+                buf[--pos] = _separator;
+                next += _secondary;
+            }
+        }
+        while (n != 0);
+        if (x < 0)
+        {
+            pos -= _negativePrefix.Length;
+            _negativePrefix.AsSpan().CopyTo(buf.Slice(pos));
+        }
+        return new string(buf.Slice(pos));
+    }
+
+    /// <summary>Reads the layout of a formatter and verifies it; null when the formatter does anything else.</summary>
+    public static IntegerLayout? Probe(IcuNumberFormatter f)
+    {
+        if (f.FormatDouble(1) != "1") return null;
+        var minusOne = f.FormatDouble(-1);
+        if (minusOne.Length is 0 or > MaxPrefix + 1 || minusOne[^1] != '1') return null;
+        var prefix = minusOne.Substring(0, minusOne.Length - 1);
+
+        char separator = '\0';
+        int primary = 0, secondary = 0, minGrouping = 0;
+        var wide = f.FormatDouble(123456789012345);
+        int last = LastNonDigit(wide, wide.Length);
+        if (last >= 0)
+        {
+            int previous = LastNonDigit(wide, last);
+            if (previous < 0) return null;
+            separator = wide[last];
+            primary = wide.Length - 1 - last;
+            secondary = last - previous - 1;
+            if (primary < 2 || secondary < 2) return null;
+            double value = Math.Pow(10, primary);
+            for (minGrouping = 1; minGrouping <= 3; minGrouping++, value *= 10)
+                if (f.FormatDouble(value).Contains(separator)) break;
+            if (minGrouping > 3) return null;
+        }
+        var layout = new IntegerLayout(prefix, separator, primary, secondary, minGrouping);
+        if (f.FormatDouble(0) != "0") return null;
+        // both digit strings cover all ten digits; every length up to 15 digits, with either sign
+        foreach (double digits in new double[] { 123456789012345, 987654320987654 })
+            for (double v = digits; v >= 1; v = Math.Floor(v / 10))
+                if (layout.Format(v) != f.FormatDouble(v) || layout.Format(-v) != f.FormatDouble(-v)) return null;
+        return layout;
+    }
+
+    private static int LastNonDigit(string s, int end)
+    {
+        for (int i = end - 1; i >= 0; i--)
+            if (s[i] is < '0' or > '9') return i;
+        return -1;
     }
 }

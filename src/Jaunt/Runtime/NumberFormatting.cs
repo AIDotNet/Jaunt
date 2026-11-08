@@ -91,34 +91,41 @@ internal static class NumberFormatting
         double intPart = Math.Floor(value);
         double frac = value - intPart;
         const string chars = "0123456789abcdefghijklmnopqrstuvwxyz";
-        var sb = new StringBuilder();
-        if (intPart == 0) sb.Append('0');
+        // Integer digits are written backwards from `point`, fraction digits (at most 52) forwards from it. A double below
+        // 2^53 has at most 53 integer digits in any radix; the largest finite double has 1024 in radix 2.
+        Span<char> buf = intPart < 9007199254740992.0 ? stackalloc char[110] : new char[1080];
+        int point = buf.Length - 54, start = point, end = point;
+        if (intPart == 0) buf[--start] = '0';
+        else if (intPart <= uint.MaxValue)
+        {
+            uint n = (uint)intPart, b = (uint)radix;
+            while (n != 0) { buf[--start] = chars[(int)(n % b)]; n /= b; }
+        }
         else
         {
-            var tmp = new StringBuilder();
             while (intPart >= 1)
             {
                 double q = Math.Floor(intPart / radix);
                 int digit = (int)(intPart - q * radix);
-                tmp.Insert(0, chars[digit]);
+                buf[--start] = chars[digit];
                 intPart = q;
             }
-            sb.Append(tmp);
         }
         if (frac > 0)
         {
-            sb.Append('.');
+            buf[end++] = '.';
             int count = 0;
             while (frac > 0 && count < 52)
             {
                 frac *= radix;
                 int digit = (int)Math.Floor(frac);
-                sb.Append(chars[digit]);
+                buf[end++] = chars[digit];
                 frac -= digit;
                 count++;
             }
         }
-        return neg ? "-" + sb : sb.ToString();
+        if (neg) buf[--start] = '-';
+        return new string(buf.Slice(start, end - start));
     }
 
     private static bool IsWhite(char c) => c is '\u0009' or '\u000B' or '\u000C' or ' ' or '\u00A0' or '\uFEFF' or '\n' or '\r' or '\u2028' or '\u2029'

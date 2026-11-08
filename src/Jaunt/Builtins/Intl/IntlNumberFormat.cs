@@ -139,6 +139,9 @@ internal sealed class NumberDigitOptions
         return d;
     }
 
+    /// <summary>An integer keeps its exact digits and gets none added (it stays within any fraction-digit rounding).</summary>
+    public bool WritesIntegersAsIs => RoundingType == RoundingType.FractionDigits && RoundingIncrement == 1 && MinimumFractionDigits == 0 && MinimumIntegerDigits == 1 && TrailingZeroDisplay == "auto";
+
     public bool HasFractionDigits => RoundingType != RoundingType.SignificantDigits;
     public bool HasSignificantDigits => RoundingType != RoundingType.FractionDigits;
 
@@ -330,18 +333,27 @@ internal sealed class NumberFormatRecord
     }
 
     /// <summary>Fast path: formats a Number.</summary>
-    public unsafe string Format(double x)
+    public string Format(double x)
     {
         if (double.IsNaN(x)) x = IntlNumberFormat.CanonicalNaN;
-        var result = IcuNumberFormatter.NumberResult;
-        int err = 0;
-        IcuNum.unumf_formatDouble(Formatter.Ptr, x, result, &err);
-        var v = IcuNum.unumf_resultAsValue(result, &err);
-        int len = 0;
-        var s = IcuNum.ufmtval_getString(v, &len, &err);
-        GC.KeepAlive(Formatter);
-        if (Icu.Failure(err)) throw Icu.Error("ICU number formatting failed (" + err + ")");
-        return new string(s, 0, len);
+        else if (FormatsPlainIntegers && IntegerLayout.Covers(x) && Formatter.IntegerLayout is { } layout) return layout.Format(x);
+        return Formatter.FormatDouble(x);
+    }
+
+    private byte _plainIntegers;   // 0: not worked out yet, 1: yes, 2: no
+
+    /// <summary>
+    /// A plain decimal format whose output for an integer depends only on the digits, the sign and grouping: no scale, unit or
+    /// currency, no rounding that can reach integer digits, and no minimum digits to pad with.
+    /// </summary>
+    private bool FormatsPlainIntegers
+    {
+        get
+        {
+            if (_plainIntegers == 0)
+                _plainIntegers = Style == "decimal" && Notation == "standard" && SignDisplay == "auto" && Digits.WritesIntegersAsIs ? (byte)1 : (byte)2;
+            return _plainIntegers == 1;
+        }
     }
 
     public List<NumberPart> FormatToParts(in IntlMathValue x) => IntlNumberFormat.ReadParts(FormatToValue(x), this, x, x, false);
