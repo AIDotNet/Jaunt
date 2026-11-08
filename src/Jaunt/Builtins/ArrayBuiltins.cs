@@ -80,12 +80,15 @@ internal static class ArrayBuiltins
             if (mapping && !mapFn.IsFunction) throw JsErrors.TypeError(realm, "Array.from: when provided, the second argument must be a function");
             if (a.This.IsObject && !ReferenceEquals(a.This.Ref, realm.ArrayConstructor) && Operations.IsConstructor(a.This))
                 return FromWithConstructor(realm, a.This, items, mapFn, thisArg);
-            var result = realm.NewArray();
             var args = new JsValue[2];
             if (items.IsNullOrUndefined) throw JsErrors.TypeError(realm, $"{items} is not iterable");
             var usingIterator = Operations.GetV(realm, items, JsSymbol.Iterator);
+            JsClosure? fast = null;
+            if (mapping) realm.Vm.TryPrepareFastCalls(mapFn, out fast);
             if (!usingIterator.IsNullOrUndefined)
             {
+                // an array source's current length is only a capacity hint: the result still takes what the iterator yields
+                var result = items.Ref is JsArray ia ? CreateArrayForAppend(realm, ia.Length) : realm.NewArray();
                 var it = IteratorRecord.Get(realm, items);
                 double k = 0;
                 while (it.Step(out var v))
@@ -93,7 +96,7 @@ internal static class ArrayBuiltins
                     if (mapping)
                     {
                         args[0] = v; args[1] = new JsValue(k);
-                        try { v = realm.Vm.Call(mapFn, thisArg, args); }
+                        try { v = fast != null ? realm.Vm.CallClosureFast(fast, thisArg, args) : realm.Vm.Call(mapFn, thisArg, args); }
                         catch (JsThrowException) { it.CloseQuiet(); throw; }
                     }
                     result.Push(v);
@@ -104,14 +107,15 @@ internal static class ArrayBuiltins
             }
             var o = Operations.ToObject(realm, items);
             long len = Operations.LengthOfArrayLike(realm, o);
+            var res = CreateArrayForAppend(realm, len);
             for (long i = 0; i < len; i++)
             {
                 var v = GetAt(o, i, JsValue.FromObject(o));
-                if (mapping) { args[0] = v; args[1] = new JsValue(i); v = realm.Vm.Call(mapFn, thisArg, args); }
-                result.Push(v);
+                if (mapping) { args[0] = v; args[1] = new JsValue(i); v = fast != null ? realm.Vm.CallClosureFast(fast, thisArg, args) : realm.Vm.Call(mapFn, thisArg, args); }
+                res.Push(v);
                 realm.Vm.Tick();
             }
-            return JsValue.FromObject(result);
+            return JsValue.FromObject(res);
         });
 
         r.Method(proto, "push", 1, PushFn);
@@ -204,9 +208,20 @@ internal static class ArrayBuiltins
             long k = Operations.RelativeIndex(realm, a[0], len, 0);
             long end = Operations.RelativeIndex(realm, a[1], len, len);
             long count = Math.Max(end - k, 0);
-            var resObj = ArraySpeciesCreate(realm, o, count);
+            var resObj = ArraySpeciesCreate(realm, o, count, out bool intrinsic);
             if (resObj is JsArray res && res.Dense && res.Length == count && o is JsArray arr && arr.Dense && end <= arr.Items.Length && !JsArray.ProtoChainMayHaveIndices(arr.Proto))
             {
+                if (intrinsic)
+                {
+                    // a fresh array nobody has seen: one copy into the store it already has; a hole stays a hole
+                    if (count > 0)
+                    {
+                        res.EnsureCapacity((uint)count);
+                        Array.Copy(arr.Items, k, res.Items, 0, count);
+                    }
+                    realm.Vm.Tick((int)Math.Min(count / 64, 1000));
+                    return JsValue.FromObject(res);
+                }
                 res.SetLength(0);
                 for (long i = k; i < end; i++) { var v = arr.Items[i]; if (v.IsEmpty) res.PushHole(); else res.Push(v); }
                 realm.Vm.Tick((int)Math.Min(count / 64, 1000));
@@ -234,11 +249,22 @@ internal static class ArrayBuiltins
             else delCount = (long)Math.Min(Math.Max(Operations.ToIntegerOrInfinity(realm, a[1]), 0), len - start);
             var items = a.Length > 2 ? a.Args.Slice(2).ToArray() : Array.Empty<JsValue>();
             CheckLength(realm, (double)len + items.Length - delCount);
-            var removedObj = ArraySpeciesCreate(realm, o, delCount);
-            if (removedObj is JsArray removed && removed.Dense && o is JsArray arr && arr.Dense && arr.Extensible && arr.LengthWritable && arr.Length <= arr.Items.Length && !JsArray.ProtoChainMayHaveIndices(arr.Proto))
+            var removedObj = ArraySpeciesCreate(realm, o, delCount, out bool intrinsic);
+            if (removedObj is JsArray removed && removed.Dense && o is JsArray arr && arr.Dense && arr.Extensible && arr.LengthWritable && arr.Length == len && len <= arr.Items.Length && !JsArray.ProtoChainMayHaveIndices(arr.Proto))
             {
-                removed.SetLength(0);
-                for (long i = 0; i < delCount; i++) { var v = arr.Items[start + i]; if (v.IsEmpty) removed.PushHole(); else removed.Push(v); }
+                if (intrinsic)
+                {
+                    if (delCount > 0)
+                    {
+                        removed.EnsureCapacity((uint)delCount);
+                        Array.Copy(arr.Items, start, removed.Items, 0, delCount);
+                    }
+                }
+                else
+                {
+                    removed.SetLength(0);
+                    for (long i = 0; i < delCount; i++) { var v = arr.Items[start + i]; if (v.IsEmpty) removed.PushHole(); else removed.Push(v); }
+                }
                 long newLen = len - delCount + items.Length;
                 if (items.Length != delCount)
                 {
@@ -288,8 +314,13 @@ internal static class ArrayBuiltins
         {
             var realm = a.Realm;
             var o = Operations.ToObject(realm, a.This);
-            var species = ArraySpeciesCreate(realm, o, 0);
-            var res = species as JsArray ?? realm.NewArray();
+            var species = ArraySpeciesCreate(realm, o, 0, out bool intrinsic);
+            // gathered in a fresh array; a species-created result (which may be anything, even non-empty) is written at the end
+            var res = intrinsic ? (JsArray)species : realm.NewArray();
+            // room for the common case of array arguments; reading their lengths observes nothing
+            long hint = o is JsArray oa ? oa.Length : 0;
+            foreach (var v in a.Args) hint += v.Ref is JsArray va ? va.Length : 1;
+            if (hint > 0 && hint <= realm.MaxArrayLength) res.EnsureCapacity((uint)hint);
             void Add(Realm realm, JsArray res, JsValue item)
             {
                 bool spreadable = false;
@@ -302,7 +333,16 @@ internal static class ArrayBuiltins
                 var e = item.AsObjectUnchecked;
                 if (e is JsArray ea && ea.Dense && ea.Length <= ea.Items.Length && !JsArray.ProtoChainMayHaveIndices(ea.Proto))
                 {
-                    res.EnsureCapacity(res.Length + ea.Length);
+                    if (res.Dense && (ulong)res.Length + ea.Length <= int.MaxValue)
+                    {
+                        // one copy; a hole stays a hole
+                        uint at = res.Length;
+                        res.EnsureCapacity(at + ea.Length);
+                        Array.Copy(ea.Items, 0, res.Items, at, ea.Length);
+                        res.Length = at + ea.Length;
+                        realm.Vm.Tick((int)Math.Min(ea.Length / 64, 1000));
+                        return;
+                    }
                     for (uint i = 0; i < ea.Length; i++) { var v = ea.Items[i]; if (v.IsEmpty) res.PushHole(); else res.Push(v); }
                     return;
                 }
