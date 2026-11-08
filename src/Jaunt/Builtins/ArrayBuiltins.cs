@@ -10,7 +10,7 @@ internal static class ArrayBuiltins
     /// <summary>Array.prototype.push; the interpreter recognizes this delegate for its single-argument fast path.</summary>
     internal static readonly NativeFn PushFn = static (in NativeArgs a) =>
     {
-        if (a.This.Ref is JsArray arr && arr.Dense && arr.LengthWritable && arr.Extensible && (long)arr.Length + a.Length < uint.MaxValue && !JsArray.ProtoChainMayHaveIndices(arr.Proto))
+        if (a.This.Ref is JsArray arr && arr.DenseOrQueue && arr.LengthWritable && arr.Extensible && (long)arr.Length + a.Length < uint.MaxValue && !JsArray.ProtoChainMayHaveIndices(arr.Proto))
         {
             foreach (var v in a.Args) arr.Push(v);
             return new JsValue(arr.Length);
@@ -139,6 +139,7 @@ internal static class ArrayBuiltins
         r.Method(proto, "shift", 0, static (in NativeArgs a) =>
         {
             var realm = a.Realm;
+            if (a.This.Ref is JsArray qa && qa.TryShiftQueue(out var head)) return head;
             if (a.This.Ref is JsArray arr && arr.Dense && arr.LengthWritable && arr.Extensible && arr.Length <= arr.Items.Length && !JsArray.ProtoChainMayHaveIndices(arr.Proto))
             {
                 if (arr.Length == 0) return JsValue.Undefined;

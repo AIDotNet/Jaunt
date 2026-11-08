@@ -785,7 +785,7 @@ internal sealed partial class Vm
                             }
                             // arr.push(v) on a plain array: append without building NativeArgs
                             if (argc == 1 && fv.Ref is JsBuiltin pb && ReferenceEquals(pb.Fn, ArrayBuiltins.PushFn) && ov.Ref is JsArray pa
-                                && pa.Dense && pa.LengthWritable && pa.Extensible && pa.Length < uint.MaxValue - 1 && !JsArray.ProtoChainMayHaveIndices(pa.Proto))
+                                && pa.DenseOrQueue && pa.LengthWritable && pa.Extensible && pa.Length < uint.MaxValue - 1 && !JsArray.ProtoChainMayHaveIndices(pa.Proto))
                             {
                                 pa.Push(regs[argStart]);
                                 regs[dst] = new JsValue((double)pa.Length);

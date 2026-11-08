@@ -252,6 +252,57 @@ nested().catch(e => log.push(e.message));
 """, """
 sync agparam,sync gen,param,TypeError,body,fin,TypeError,2,deep,gen body,{"done":true}
 """),
+        ["coroutineFrameReuse"] = ("""
+const big = async (a, b, c, d) => { let x1 = a, x2 = b, x3 = c, x4 = d, x5 = 1, x6 = 2, x7 = 3, x8 = 4; await 0; return [x1, x2, x3, x4, x5 + x6 + x7 + x8, arguments.length === undefined].join(); };
+async function small(a, b) { let u; const seen = u; await null; return [a, b, seen, arguments.length, new.target === undefined, this === undefined || this === globalThis].join(); }
+const keep = [];
+async function captures(i) { let v = i; keep.push(() => v++); await 0; v += 10; return v; }
+function* gen(a, b) { let u; log.push('g' + a + b + u); yield arguments.length; return a; }
+class K { async m(x) { const arrow = async () => this.t + x + (await 1); return arrow(); } t = 5; }
+(async () => {
+  for (let i = 0; i < 40; i++) { await small(i); }
+  log.push(await small(1), await small(1, 2, 3));
+  log.push(await big.call(null, 1, 2, 3, 4).catch(e => e.name));
+  log.push(await captures(1), await captures(2), keep[0](), keep[1](), keep[0]());
+  log.push(await new K().m(7));
+  log.push([...gen(1)].join(), [...gen(1, 2)].join());
+  const ps = []; for (let i = 0; i < 100; i++) ps.push(small(i, i)); log.push((await Promise.all(ps))[99]);
+  const rec = async n => n === 0 ? 0 : 1 + await rec(n - 1); log.push(await rec(200));
+  try { await (async () => { throw new Error('x'); })(); } catch (e) { log.push(e.message); }
+  log.push(await small(8));
+})();
+""", """
+1,,,1,true,true,1,2,,3,true,true,ReferenceError,11,12,11,12,12,13,g1undefinedundefined,g12undefined,1,2,99,99,,2,true,true,200,x,8,,,1,true,true
+"""),
+        ["shiftQueueMode"] = ("""
+const mk = (n = 40) => Array.from({ length: n }, (_, i) => i);
+const show = a => a.join();
+let a = mk(); a.shift(); a.shift(); log.push(a.length, a[0], a[37], a[38], 1 in a, 38 in a, show(a.slice(0, 3)));
+a = mk(); a.shift(); a[0] = 'x'; a[50] = 'far'; log.push(a.length, a[0], a[1], a[50], a[45]);
+a = mk(); a.shift(); a.push('p'); log.push(a.length, a[38], a[39], a.at(-1)); a.shift(); log.push(a[0], a.pop(), a.length);
+a = mk(); for (let i = 0; i < 39; i++) a.shift(); log.push(a.length, a[0]); a.shift(); log.push(a.length, a.shift(), a.length); a.push(1); log.push(show(a));
+a = mk(); a.shift(); a.unshift('u'); log.push(a[0], a[1], a.length); a.shift(); a.splice(1, 2); log.push(a[0], a[1], a.length);
+a = mk(); a.shift(); a.length = 3; log.push(show(a), a.length); a.push(9); log.push(show(a));
+a = mk(); a.shift(); a.length = 100; log.push(a.length, 99 in a, a[38]); a.shift(); log.push(a.length, a[0]);
+a = mk(); a.shift(); log.push(Object.keys(a).length, JSON.stringify(a).length, [...a].length, show(a.concat([1]).slice(-2)), Math.max(...a), Math.max.apply(null, a));
+a = mk(); a.shift(); let n = 0; for (const v of a) n += v; log.push(n); a.shift(); n = 0; for (const k in a) n++; log.push(n); a.shift(); a.forEach(v => n += v); log.push(n);
+a = mk(); a.shift(); a.reverse(); log.push(a[0], a[38]); a.shift(); a.sort((x, y) => x - y); log.push(a[0], a[37]); a.shift(); log.push(a.indexOf(5), a.includes(39), a.lastIndexOf(1));
+a = mk(); delete a[1]; a.shift(); log.push(0 in a, a[0], a.shift(), a[0]);
+a = mk(); a.shift(); delete a[0]; log.push(a[0], 0 in a, a.shift(), a.length);
+a = mk(); a.shift(); Object.freeze(a); try { 'use strict'; a.shift(); log.push('no'); } catch (e) { log.push(e.name); } log.push(a.length, a[0], Object.isFrozen(a));
+a = mk(); a.shift(); Object.preventExtensions(a); log.push(a.shift(), a.length); try { a.push(1); log.push('no'); } catch (e) { log.push(e.name); } log.push(a.length);
+a = mk(); a.shift(); Object.defineProperty(a, 'length', { writable: false }); try { a.shift(); log.push('no'); } catch (e) { log.push(e.name); } log.push(a.length, a[0]); try { a.push(1); log.push('no'); } catch (e) { log.push(e.name); }
+a = mk(); a.shift(); Object.defineProperty(a, 2, { get() { return 'g'; }, enumerable: true, configurable: true }); log.push(a[2]); try { a.shift(); log.push('no'); } catch (e) { log.push(e.name, a[1], a[2], a.length); }
+a = mk(); a.shift(); a.foo = 1; log.push(a.foo, Object.keys(a).at(-1), a.shift(), a.foo);
+a = mk(); a.shift(); Array.prototype[100] = 'proto'; a.length = 101; log.push(a[100]); a.shift(); log.push(a[99], a.hasOwnProperty(99)); delete Array.prototype[100];
+a = mk(); a.shift(); Object.setPrototypeOf(a, { 0: 'pz', 39: 'py', length: 0 }); log.push(a[39], a.length); Object.setPrototypeOf(a, Array.prototype);
+a = mk(35); delete a[0]; delete a[1]; a.shift(); Object.setPrototypeOf(a, Object.create(Array.prototype, { 0: { value: 'inherited', writable: true } })); log.push(a[0], Array.prototype.shift.call(a), a.length); Object.setPrototypeOf(a, Array.prototype);
+a = mk(); const q = []; while (a.length) { const v = a.shift(); if (v % 3 === 0 && v < 30) a.push(v + 100); q.push(v); } log.push(q.length, q.at(-1), a.length);
+a = mk(); let t = 0; for (let i = 0; i < 1000; i++) { a.push(i); t += a.shift(); } log.push(t, a.length, a[0], a[39]);
+a = mk(); t = 0; for (let i = 0; i < 300; i++) { a.push(i, i); t += a.shift(); if (i % 7 === 0) t += a[3]; } log.push(t, a.length, a[0], a.at(-1));
+""", """
+38,2,39,,true,false,2,3,4,51,x,2,far,,40,39,p,p,2,p,38,1,39,0,,0,1,u,1,40,1,4,37,1,2,3,3,1,2,3,9,100,false,39,99,2,39,109,39,39,1,39,39,780,38,815,39,1,1,38,3,false,-1,false,,,2,,false,,38,TypeError,39,1,true,1,38,TypeError,38,TypeError,39,2,TypeError,g,TypeError,g,g,39,1,foo,1,1,proto,proto,true,py,39,inherited,inherited,33,50,127,0,461100,40,960,999,20112,340,130,299
+"""),
     };
 
     public static IEnumerable<object[]> CaseNames => Cases.Keys.Select(k => new object[] { k });
