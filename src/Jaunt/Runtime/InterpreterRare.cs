@@ -24,6 +24,9 @@ internal sealed partial class Vm
             case Op.Debugger:
             case Op.InitFields:
                 return pc + 1;
+            case Op.DefinePropK:
+                regs[bp + code[pc + 1]].AsObjectUnchecked.CreateDataPropertyOrThrow(new PropertyKey(k[code[pc + 2]].AsStringUnchecked), regs[bp + code[pc + 3]]);
+                return pc + 4;
             case Op.LoadNewTarget: regs[bp + code[pc + 1]] = f.NewTarget; return pc + 2;
             case Op.LoadCallee: regs[bp + code[pc + 1]] = JsValue.FromObject(f.Callee); return pc + 2;
             case Op.ThrowConstAssign:

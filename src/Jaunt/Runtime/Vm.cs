@@ -231,9 +231,9 @@ internal sealed partial class Vm
     internal JsValue Run(Frame entry)
     {
         var saved = t_current;
-        if (ReferenceEquals(saved, this)) return RunLoop(entry);   // nested native→JS call: already current
+        if (ReferenceEquals(saved, this)) return RunGuarded(entry);   // nested native→JS call: already current
         t_current = this;
-        try { return RunLoop(entry); }
+        try { return RunGuarded(entry); }
         finally { t_current = saved; }
     }
 
@@ -459,6 +459,7 @@ internal sealed partial class Vm
     /// caller never reads them again). The window does not overlap when the caller's registers are not the shared stack
     /// (a coroutine frame owns its registers) or the callee does not fit in the chunk: those calls copy as PushFrame does.
     /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     internal Frame PushCallFrame(JsClosure c, JsValue[] callerRegs, int thisIndex, int argStart, int argc)
     {
         if (Depth + 1 > MaxDepth) StackOverflowFrame();
@@ -469,7 +470,13 @@ internal sealed partial class Vm
         return f;
     }
 
+    /// <summary><see cref="PushCallFrame"/> for the paths other than the interpreter's own call instruction, which is the one place it is inlined.</summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private Frame PushCallFrameOutOfLine(JsClosure c, JsValue[] callerRegs, int thisIndex, int argStart, int argc) =>
+        PushCallFrame(c, callerRegs, thisIndex, argStart, argc);
+
     /// <summary><see cref="PushCallFrame"/> for the interpreter's New: the frame constructs <paramref name="obj"/>.</summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
     internal Frame PushNewFrame(JsClosure c, JsValue[] callerRegs, int argStart, int argc, JsObject obj, JsValue newTarget)
     {
         if (Depth + 1 > MaxDepth) StackOverflowFrame();
@@ -504,9 +511,8 @@ internal sealed partial class Vm
         }
         else
         {
-            regs = AllocRegs(count, out b, out f.ChunkIndex);
-            if (n <= 4) { for (int i = 0; i < n; i++) regs[b + i] = callerRegs[argStart + i]; }
-            else Array.Copy(callerRegs, argStart, regs, b, n);
+            regs = BindFreshWindow(f, count, callerRegs, argStart, n);
+            b = f.Base;
         }
         f.Base = b;
         if (!ReferenceEquals(f.Regs, regs)) f.Regs = regs;
@@ -515,6 +521,16 @@ internal sealed partial class Vm
         int initEnd = t.InitUndefEnd < 0 ? count : t.InitUndefEnd;
         for (int i = n; i < initEnd; i++) regs[b + i] = default;
         if (_poisonRegisters) for (int i = initEnd; i < count; i++) regs[b + i] = s_poison;
+    }
+
+    /// <summary>A register window that cannot overlap the caller's (see <see cref="PushCallFrame"/>), with the arguments copied in.</summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private JsValue[] BindFreshWindow(Frame f, int count, JsValue[] callerRegs, int argStart, int n)
+    {
+        var regs = AllocRegs(count, out int b, out f.ChunkIndex);
+        f.Base = b;
+        Array.Copy(callerRegs, argStart, regs, b, n);
+        return regs;
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]

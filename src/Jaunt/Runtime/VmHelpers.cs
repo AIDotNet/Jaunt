@@ -22,20 +22,22 @@ internal sealed partial class Vm
     /// <c>RunLoop</c>. Returns the pushed frame (the caller sets its RetIndex and switches to it) or null when the call has to
     /// take the general path: targets that are generators, async functions or class constructors (which throw), bound
     /// functions whose target is not a closure, <c>apply</c> with anything but a dense hole-free array. <paramref name="callee"/>
-    /// is the function object being invoked (the call/apply builtin or the bound function), <paramref name="receiver"/> its
-    /// this value (for call/apply: the target). The interpreter has already stored the continuation pc in the caller frame.
+    /// is the function object being invoked (the call/apply builtin or the bound function), <paramref name="receiverIndex"/> the
+    /// register of its this value (for call/apply: the target; negative when it has none). The interpreter has already stored the continuation pc in the caller frame.
     /// </summary>
-    private Frame? TryPushRedirectedCall(JsFunctionObject callee, in JsValue receiver, JsValue[] regs, int argStart, int argc)
+    private Frame? TryPushRedirectedCall(JsFunctionObject callee, int receiverIndex, JsValue[] regs, int argStart, int argc)
     {
         if (callee is JsBuiltin b)
         {
+            if (receiverIndex < 0) return null;
+            ref readonly var receiver = ref regs[receiverIndex];
             if (receiver.IsNotObject || receiver.Ref is not JsClosure target || (target.Template.Flags & InlineCallMask) != 0) return null;
             if (ReferenceEquals(b.Fn, FunctionBuiltins.CallFn))
             {
                 if (--_ticks <= 0) Checkpoint();
                 // the target's arguments are the caller's arguments after the first; the this register (argStart) stays below
                 // the new window, which is what PushCallFrame requires
-                return argc == 0 ? PushCallFrame(target, regs, -1, argStart, 0) : PushCallFrame(target, regs, argStart, argStart + 1, argc - 1);
+                return argc == 0 ? PushCallFrameOutOfLine(target, regs, -1, argStart, 0) : PushCallFrameOutOfLine(target, regs, argStart, argStart + 1, argc - 1);
             }
             if (ReferenceEquals(b.Fn, FunctionBuiltins.ApplyFn))
             {
