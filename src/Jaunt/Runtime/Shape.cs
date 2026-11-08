@@ -55,27 +55,6 @@ internal sealed class Shape
     private const int MaxSharedShapes = 200_000;
     private static int s_sharedShapes;
 
-    public static readonly Shape SharedObjectRoot = new(null, ProtoRole.RealmObjectPrototype);
-    public static readonly Shape SharedFunctionRoot = new(null, ProtoRole.RealmFunctionPrototype);
-    public static readonly Shape SharedArrayRoot = new(null, ProtoRole.RealmArrayPrototype);
-    /// <summary>Shared layout of builtin/closure functions: length, name.</summary>
-    public static readonly Shape SharedFunctionShape = SharedFunctionRoot.AddProperty("length", PropFlags.Configurable)!.AddProperty("name", PropFlags.Configurable)!;
-    /// <summary>Shared layout of iterator result objects: value, done.</summary>
-    public static readonly Shape SharedIterResultShape = SharedObjectRoot.AddProperty("value", PropFlags.Default)!.AddProperty("done", PropFlags.Default)!;
-    /// <summary>Layout of the objects Object.getOwnPropertyDescriptor returns for a data property.</summary>
-    public static readonly Shape SharedDataDescriptorShape = SharedObjectRoot.AddProperty("value", PropFlags.Default)!.AddProperty("writable", PropFlags.Default)!.AddProperty("enumerable", PropFlags.Default)!.AddProperty("configurable", PropFlags.Default)!;
-    /// <summary>Layout of the objects Object.getOwnPropertyDescriptor returns for an accessor property.</summary>
-    public static readonly Shape SharedAccessorDescriptorShape = SharedObjectRoot.AddProperty("get", PropFlags.Default)!.AddProperty("set", PropFlags.Default)!.AddProperty("enumerable", PropFlags.Default)!.AddProperty("configurable", PropFlags.Default)!;
-    /// <summary>
-    /// Root of arguments object layouts, apart from <see cref="SharedObjectRoot"/> so that no plain object ever has a shape of
-    /// one: a mapped arguments object keeps stale values in the slots of its mapped indices, which ICs must not read.
-    /// </summary>
-    private static readonly Shape SharedArgumentsRoot = new(null, ProtoRole.RealmObjectPrototype);
-    private const int MaxArgumentsLayout = 24;
-    private static readonly Shape?[] s_argumentsLayouts = new Shape?[(MaxArgumentsLayout + 1) * 2];
-    /// <summary>Shared layout of a JSON.parse reviver's context object for a primitive value: source.</summary>
-    public static readonly Shape SharedJsonContextShape = SharedObjectRoot.AddProperty("source", PropFlags.Default)!;
-
     /// <summary>Identity hash for the Vm's lookup caches (the CLR's object hash means a call and a header read per lookup).</summary>
     internal readonly int Hash = NextHash();
     private static int s_nextHash;
@@ -107,6 +86,7 @@ internal sealed class Shape
     public bool IsShared => Role != ProtoRole.Explicit;
 
     public static Shape CreateRoot(JsObject? proto) => new(proto, ProtoRole.Explicit);
+    public static Shape CreateRoleRoot(ProtoRole role) => new(null, role);
     public static Shape CreateUnique(JsObject? proto) => new(proto, ProtoRole.Explicit, 0, System.Array.Empty<PropertyKey>(), System.Array.Empty<PropFlags>(), true, false, false, true);
 
     /// <summary>Creates a cacheable shape directly from (possibly shared, immutable) key/flag arrays.</summary>
@@ -192,24 +172,6 @@ internal sealed class Shape
         }
         Volatile.Write(ref _index, index);
         return index;
-    }
-
-    /// <summary>
-    /// The layout of a fresh arguments object with <paramref name="argc"/> arguments (indices, length, @@iterator, callee),
-    /// or null when that many arguments are built property by property.
-    /// </summary>
-    public static Shape? ArgumentsLayout(int argc, bool mapped)
-    {
-        if (argc > MaxArgumentsLayout) return null;
-        int i = argc * 2 + (mapped ? 1 : 0);
-        var shape = Volatile.Read(ref s_argumentsLayouts[i]);
-        if (shape != null) return shape;
-        shape = SharedArgumentsRoot;
-        for (int n = 0; n < argc; n++) shape = shape.AddProperty(PropertyKey.FromIndex((uint)n), PropFlags.Default)!;
-        shape = shape.AddProperty("length", PropFlags.Hidden)!.AddProperty(JsSymbol.Iterator, PropFlags.Hidden)!;
-        shape = shape.AddProperty("callee", mapped ? PropFlags.Hidden : PropFlags.Accessor)!;
-        Volatile.Write(ref s_argumentsLayouts[i], shape);
-        return shape;
     }
 
     /// <summary>Returns the shape obtained by appending a property, or null when the object should go to dictionary mode.</summary>
@@ -361,6 +323,65 @@ internal sealed class Shape
         bool isIndex = key.TryGetArrayIndex(out _);
         bool special = HasSpecialProps || (flags & (PropFlags.Accessor | PropFlags.Writable)) != PropFlags.Writable;
         return new Shape(Prototype, Role, Count + 1, keys, fl, false, HasIndexKeys || isIndex, HasSymbolKeys || key.IsSymbol, special);
+    }
+}
+
+/// <summary>
+/// The role shapes of a realm: the roots and the layouts prebuilt from them. Every realm's first one on a Vm uses the
+/// process-wide <see cref="Process"/> family, so that fresh engines share them. Further realms on a Vm (CreateRealm,
+/// ShadowRealm) get a family of their own: the Vm's caches are keyed by shape and may hold the prototype object an answer came
+/// from, so objects of two realms that share a Vm must not share shapes, as their prototypes differ.
+/// </summary>
+internal sealed class ShapeFamily
+{
+    public static readonly ShapeFamily Process = new();
+
+    public readonly Shape ObjectRoot = Shape.CreateRoleRoot(ProtoRole.RealmObjectPrototype);
+    public readonly Shape FunctionRoot = Shape.CreateRoleRoot(ProtoRole.RealmFunctionPrototype);
+    public readonly Shape ArrayRoot = Shape.CreateRoleRoot(ProtoRole.RealmArrayPrototype);
+    /// <summary>Builtin and closure functions: length, name.</summary>
+    public readonly Shape Function;
+    /// <summary>Iterator result objects: value, done.</summary>
+    public readonly Shape IterResult;
+    /// <summary>A JSON.parse reviver's context object for a primitive value: source.</summary>
+    public readonly Shape JsonContext;
+    /// <summary>What Object.getOwnPropertyDescriptor returns for a data property.</summary>
+    public readonly Shape DataDescriptor;
+    /// <summary>What Object.getOwnPropertyDescriptor returns for an accessor property.</summary>
+    public readonly Shape AccessorDescriptor;
+    /// <summary>
+    /// Root of arguments object layouts, apart from <see cref="ObjectRoot"/> so that no plain object ever has a shape of
+    /// one: a mapped arguments object keeps stale values in the slots of its mapped indices, which ICs must not read.
+    /// </summary>
+    private readonly Shape _argumentsRoot = Shape.CreateRoleRoot(ProtoRole.RealmObjectPrototype);
+    private const int MaxArgumentsLayout = 24;
+    private readonly Shape?[] _argumentsLayouts = new Shape?[(MaxArgumentsLayout + 1) * 2];
+
+    public ShapeFamily()
+    {
+        Function = FunctionRoot.AddProperty("length", PropFlags.Configurable)!.AddProperty("name", PropFlags.Configurable)!;
+        IterResult = ObjectRoot.AddProperty("value", PropFlags.Default)!.AddProperty("done", PropFlags.Default)!;
+        JsonContext = ObjectRoot.AddProperty("source", PropFlags.Default)!;
+        DataDescriptor = ObjectRoot.AddProperty("value", PropFlags.Default)!.AddProperty("writable", PropFlags.Default)!.AddProperty("enumerable", PropFlags.Default)!.AddProperty("configurable", PropFlags.Default)!;
+        AccessorDescriptor = ObjectRoot.AddProperty("get", PropFlags.Default)!.AddProperty("set", PropFlags.Default)!.AddProperty("enumerable", PropFlags.Default)!.AddProperty("configurable", PropFlags.Default)!;
+    }
+
+    /// <summary>
+    /// The layout of a fresh arguments object with <paramref name="argc"/> arguments (indices, length, @@iterator, callee),
+    /// or null when that many arguments are built property by property.
+    /// </summary>
+    public Shape? ArgumentsLayout(int argc, bool mapped)
+    {
+        if (argc > MaxArgumentsLayout) return null;
+        int i = argc * 2 + (mapped ? 1 : 0);
+        var shape = Volatile.Read(ref _argumentsLayouts[i]);
+        if (shape != null) return shape;
+        shape = _argumentsRoot;
+        for (int n = 0; n < argc; n++) shape = shape.AddProperty(PropertyKey.FromIndex((uint)n), PropFlags.Default)!;
+        shape = shape.AddProperty("length", PropFlags.Hidden)!.AddProperty(JsSymbol.Iterator, PropFlags.Hidden)!;
+        shape = shape.AddProperty("callee", mapped ? PropFlags.Hidden : PropFlags.Accessor)!;
+        Volatile.Write(ref _argumentsLayouts[i], shape);
+        return shape;
     }
 }
 

@@ -153,6 +153,8 @@ internal sealed partial class Realm
     /// <summary>Prototype-mutation epoch; shared by every realm on the Vm so ICs see cross-realm prototype changes.</summary>
     public ref int ProtoEpoch => ref Vm.ProtoEpoch;
 
+    /// <summary>See <see cref="ShapeFamily"/>.</summary>
+    public readonly ShapeFamily Shapes;
     public Shape ObjectRootShape = null!;
     public Shape IterResultShape = null!;
     public Shape JsonContextShape = null!;
@@ -310,6 +312,7 @@ internal sealed partial class Realm
     {
         Hardened = hardened;
         Budget = parent?.Budget ?? new ByteBudget();
+        Shapes = parent == null ? ShapeFamily.Process : new ShapeFamily();
         if (parent == null)
         {
             Vm = new Vm(this);
@@ -381,9 +384,9 @@ internal sealed partial class Realm
     public Shape RootShapeFor(JsObject? proto)
     {
         if (proto == null) return _nullRoot ??= Shape.CreateRoot(null);
-        if (ReferenceEquals(proto, _objectPrototype)) return Shape.SharedObjectRoot;
-        if (ReferenceEquals(proto, _functionPrototype)) return Shape.SharedFunctionRoot;
-        if (ReferenceEquals(proto, _arrayPrototype)) return Shape.SharedArrayRoot;
+        if (ReferenceEquals(proto, _objectPrototype)) return Shapes.ObjectRoot;
+        if (ReferenceEquals(proto, _functionPrototype)) return Shapes.FunctionRoot;
+        if (ReferenceEquals(proto, _arrayPrototype)) return Shapes.ArrayRoot;
         var s = proto.Extras?.ChildRootShape;
         if (s != null) return s;
         proto.IsPrototypeObject = true;
@@ -394,7 +397,7 @@ internal sealed partial class Realm
 
     public Shape FunctionShapeFor(JsObject proto)
     {
-        if (ReferenceEquals(proto, _functionPrototype)) return Shape.SharedFunctionShape;
+        if (ReferenceEquals(proto, _functionPrototype)) return Shapes.Function;
         var s = proto.Extras?.FunctionChildShape;
         if (s != null) return s;
         var shape = RootShapeFor(proto).AddProperty("length", PropFlags.Configurable)!.AddProperty("name", PropFlags.Configurable)!;

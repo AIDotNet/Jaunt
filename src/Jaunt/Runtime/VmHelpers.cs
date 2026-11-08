@@ -163,7 +163,7 @@ internal sealed partial class Vm
         if (target.GetType() == typeof(JsObject) && target.Dict == null && target.Extensible && excluded.Length == 0)
         {
             var ts = target.Shape;
-            if (ts.Count == 0 && ts.Role == shape.Role && ReferenceEquals(ts.Prototype, shape.Prototype) && !ts.IsUnique)
+            if (ts.Count == 0 && ReferenceEquals(target.Realm, so.Realm) && ts.Role == shape.Role && ReferenceEquals(ts.Prototype, shape.Prototype) && !ts.IsUnique)
             {
                 bool allDefault = true;
                 var flags = shape.Flags;
@@ -865,7 +865,7 @@ internal sealed partial class Vm
         var realm = Realm;
         var args = f.Args ?? Array.Empty<JsValue>();
         int mapLength = Math.Min(args.Length, paramSlots.Length);
-        var layout = Shape.ArgumentsLayout(args.Length, mapped: true);
+        var layout = realm.Shapes.ArgumentsLayout(args.Length, mapped: true);
         if (layout != null)
             return new JsMappedArguments(realm, f.Env!, paramSlots, mapLength, args.Length, layout, ArgumentsSlots(realm, args, layout, JsValue.FromObject(f.Callee)));
         var obj = new JsMappedArguments(realm, f.Env!, paramSlots, mapLength, args.Length);
@@ -881,7 +881,7 @@ internal sealed partial class Vm
         var realm = Realm;
         var args = f.Args ?? Array.Empty<JsValue>();
         // CreateUnmappedArgumentsObject (strict code or non-simple parameters): callee is the %ThrowTypeError% accessor
-        var layout = Shape.ArgumentsLayout(args.Length, mapped: false);
+        var layout = realm.Shapes.ArgumentsLayout(args.Length, mapped: false);
         if (layout != null)
             return new JsArguments(realm, args.Length, layout, ArgumentsSlots(realm, args, layout, new JsValue(JsTag.Empty, 0, realm.ThrowTypeErrorAccessor)));
         var obj = new JsArguments(realm, args.Length);

@@ -567,7 +567,7 @@ internal static class Operations
 
     public static JsValue FromPropertyDescriptor(Realm realm, in PropertyDescriptor d)
     {
-        var o = new JsObject(realm, d.IsAccessor ? Shape.SharedAccessorDescriptorShape : Shape.SharedDataDescriptorShape, 4);
+        var o = new JsObject(realm, d.IsAccessor ? realm.Shapes.AccessorDescriptor : realm.Shapes.DataDescriptor, 4);
         realm.ChargeProperties(4);
         var slots = o.Slots;
         if (d.IsAccessor)
