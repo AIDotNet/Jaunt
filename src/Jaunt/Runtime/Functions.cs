@@ -114,10 +114,17 @@ internal sealed class Feedback
     public readonly IcEntry[] Ics;
     private Feedback?[]? _children;
     public readonly FunctionTemplate Template;
+    /// <summary><c>Template.Code</c> and <c>Template.Constants</c>, one load from the frame (see <see cref="Frame.Feedback"/>).</summary>
+    public readonly int[] Code;
+    public readonly JsValue[] Constants;
+    /// <summary>For a constructor: the slot count to give new instances, learned from those constructed so far (at most <see cref="Vm.MaxInstanceSlots"/>).</summary>
+    public int InstanceSlots;
 
     public Feedback(FunctionTemplate t)
     {
         Template = t;
+        Code = t.Code;
+        Constants = t.Constants;
         Ics = t.IcCount == 0 ? Array.Empty<IcEntry>() : new IcEntry[t.IcCount];
     }
 
@@ -176,7 +183,7 @@ internal sealed class JsClosure : JsFunctionObject
     public ModuleInstance? Module;
 
     public JsClosure(Realm realm, FunctionTemplate t, Env? env, Feedback fb, JsObject proto)
-        : base(realm, realm.FunctionShapeFor(proto), 3)
+        : base(realm, realm.FunctionShapeFor(proto), t.IsConstructor || t.IsGenerator ? 3 : 2)   // the third slot is for "prototype"
     {
         Template = t;
         Env = env;
@@ -186,6 +193,14 @@ internal sealed class JsClosure : JsFunctionObject
         Slots[1] = new JsValue(t.Name);
         IsClassConstructor = t.IsClassConstructor;
         IsDerived = t.IsDerived;
+    }
+
+    /// <summary>The object an ordinary function's "prototype" property starts with.</summary>
+    internal JsObject CreatePrototypeObject()
+    {
+        var p = new JsObject(Realm, Realm.ObjectPrototype);
+        p.AddOwnProperty("constructor", JsValue.FromObject(this), PropFlags.Hidden);
+        return p;
     }
 
     public override bool IsConstructor => Template.IsConstructor;

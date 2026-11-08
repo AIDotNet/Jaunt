@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Text;
+using Jaunt.Compiler;
 
 namespace Jaunt.Runtime;
 
@@ -18,8 +19,9 @@ internal static class JsonBuiltins
             var text = Operations.ToString(realm, a[0]);
             if (a[1].IsFunction)
             {
-                // reviver: keep parse records so the reviver's context can expose primitive source text
-                var p = new JsonParser(realm, text, 512) { BuildRecords = true };
+                // reviver: keep parse records so the reviver's context can expose primitive source text, if it can see the context
+                bool context = ReviverSeesContext(a[1]);
+                var p = new JsonParser(realm, text, 512) { BuildRecords = context };
                 p.SkipWs();
                 var pv = p.ParseValue(0);
                 var rec = p.LastRecord;
@@ -28,7 +30,7 @@ internal static class JsonBuiltins
                 if (p.Error != null) return realm.Vm.Raise(p.ErrorValue());
                 var root = realm.NewObject();
                 root.CreateDataProperty("", pv);
-                return Internalize(realm, root, "", a[1], rec, text, new JsValue[3]);
+                return Internalize(realm, root, "", a[1], context, rec, text, new JsValue[3]);
             }
             // a syntax error is raised without a CLR throw: JSON.parse of untrusted input inside try/catch is common
             return TryParse(realm, text, 512, out var v, out var error) ? v : realm.Vm.Raise(error);
@@ -54,15 +56,20 @@ internal static class JsonBuiltins
         });
     }
 
-    private static JsValue Internalize(Realm realm, JsObject holder, string name, JsValue reviver, JsonParseRecord? record, string source, JsValue[] args)
+    /// <summary>Whether a call of the reviver can observe its third argument: a plain function with fewer parameters and no use of arguments can't.</summary>
+    private static bool ReviverSeesContext(in JsValue reviver) =>
+        !(reviver.Ref is JsClosure c && c.Template.ParamCount < 3 && (c.Template.Flags & FunctionFlags.NeedsArgsArray) == 0);
+
+    private static JsValue Internalize(Realm realm, JsObject holder, string name, JsValue reviver, bool seesContext, JsonParseRecord? record, string source, JsValue[] args)
     {
         var val = holder.Get(name);
         // InternalizeJSONProperty (JSON.parse source text access): records apply only while the value is unchanged.
         // The context object is fresh per call (a reviver may keep it); a primitive's context has its source text.
-        JsObject context;
+        JsObject? context;
         List<JsonParseRecord?>? elements = null;
         JsonParseRecord? entries = null;
-        if (record != null && Operations.SameValue(record.Value, val))
+        if (!seesContext) context = null;
+        else if (record != null && Operations.SameValue(record.Value, val))
         {
             if (!val.IsObject)
             {
@@ -81,7 +88,7 @@ internal static class JsonBuiltins
             {
                 long len = Operations.LengthOfArrayLike(realm, o);
                 for (long i = 0; i < len; i++)
-                    Revive(realm, o, PropertyKey.IndexToString((uint)i), reviver, elements != null && i < elements.Count ? elements[(int)i] : null, source, args);
+                    Revive(realm, o, PropertyKey.IndexToString((uint)i), reviver, seesContext, elements != null && i < elements.Count ? elements[(int)i] : null, source, args);
             }
             else
             {
@@ -105,12 +112,12 @@ internal static class JsonBuiltins
                 // the parsed entries are in key order too: the cursor usually hits without a scan
                 int cursor = 0;
                 foreach (var ks in names)
-                    Revive(realm, o, ks, reviver, entries != null ? FindEntry(entries, ks, ref cursor) : null, source, args);
+                    Revive(realm, o, ks, reviver, seesContext, entries != null ? FindEntry(entries, ks, ref cursor) : null, source, args);
             }
         }
         args[0] = new JsValue(name);
         args[1] = val;
-        args[2] = JsValue.FromObject(context);
+        args[2] = context != null ? JsValue.FromObject(context) : default;
         var result = realm.Vm.Call(reviver, JsValue.FromObject(holder), args);
         args[1] = default;
         args[2] = default;
@@ -131,12 +138,12 @@ internal static class JsonBuiltins
 
     private static bool IsJsonWs(char c) => c is ' ' or '\t' or '\n' or '\r';
 
-    private static void Revive(Realm realm, JsObject o, string key, JsValue reviver, JsonParseRecord? record, string source, JsValue[] args)
+    private static void Revive(Realm realm, JsObject o, string key, JsValue reviver, bool seesContext, JsonParseRecord? record, string source, JsValue[] args)
     {
         realm.Vm.EnterNative();
         try
         {
-            var nv = Internalize(realm, o, key, reviver, record, source, args);
+            var nv = Internalize(realm, o, key, reviver, seesContext, record, source, args);
             if (nv.IsUndefined) o.Delete(key);
             else o.CreateDataProperty(key, nv);
         }
@@ -664,7 +671,7 @@ internal static class JsonBuiltins
             try
             {
                 if (PropertyList == null && ReplacerFn.IsUndefined && Gap.Length == 0 && !o.IsExotic && o.Dict == null
-                    && !o.Shape.HasIndexKeys && !o.Shape.HasSymbolKeys && !o.Shape.HasSpecialProps)
+                    && !o.Shape.HasIndexKeys && !o.Shape.HasSymbolKeys && !o.Shape.HasAccessors)
                 {
                     // plain data properties: iterate the layout directly (no key list, no lookups)
                     var shape = o.Shape;
@@ -750,7 +757,7 @@ internal static class JsonBuiltins
                     if (i > 0) Sb.Append(',');
                     if (Gap.Length > 0) Sb.Append('\n').Append(_indent);
                     JsValue v;
-                    if (!(o is JsArray da && da.TryGetDense((uint)i, out v))) v = o.GetIndex((uint)i, self);
+                    if (!(o is JsArray da && da.TryGetElement((uint)i, out v))) v = o.GetIndex((uint)i, self);
                     if (!SerializeProperty(o, null, v, (uint)i)) Sb.Append("null");
                 }
                 if (len > 0 && Gap.Length > 0) Sb.Append('\n').Append(stepback);

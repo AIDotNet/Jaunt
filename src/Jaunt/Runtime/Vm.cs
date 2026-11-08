@@ -19,9 +19,11 @@ internal enum FrameFlags : byte
     RealmSwitch = 8,
     /// <summary>Entry frame of a <c>RunLoop</c> invocation: returning from or unwinding past it leaves the loop.</summary>
     Entry = 16,
+    /// <summary>Entry coroutine frame whose driver takes an uncaught throw as a return value with <see cref="SuspendKind.Thrown"/>, instead of a CLR exception.</summary>
+    ThrowAsResult = 32,
 }
 
-internal enum SuspendKind : byte { None, Yield, YieldRaw, Await, Initial }
+internal enum SuspendKind : byte { None, Yield, YieldRaw, Await, Initial, Thrown }
 
 /// <summary>One captured stack frame: the function and the pc of the instruction it was executing.</summary>
 internal readonly struct StackFrameRecord
@@ -34,10 +36,9 @@ internal readonly struct StackFrameRecord
 /// <summary>Activation record of a bytecode function. Frames are pooled except for coroutines.</summary>
 internal sealed class Frame
 {
-    public FunctionTemplate T = null!;
-    public int[] Code = null!;
-    /// <summary><c>T.Constants</c>, at hand so a call or return reloads the interpreter's constant pool with one load.</summary>
-    public JsValue[] K = null!;
+    public FunctionTemplate T => Feedback.Template;
+    public int[] Code => Feedback.Code;
+    public JsValue[] K => Feedback.Constants;
     public JsValue[] Regs = null!;
     public int Base;
     public int Pc;
@@ -48,6 +49,10 @@ internal sealed class Frame
     /// <summary>Shared this-binding of a derived constructor once it created arrow functions (or of such an arrow).</summary>
     public ThisBox? ThisBox;
     public JsClosure Callee = null!;
+    /// <summary>
+    /// The inline caches of the running function, and through them its template, code and constants: one reference store when a
+    /// pooled frame changes function (each costs a GC write barrier), where separate fields would take four.
+    /// </summary>
     public Feedback Feedback = null!;
     public JsValue[]? Args;
     /// <summary>
@@ -230,11 +235,38 @@ internal sealed partial class Vm
 
     internal JsValue Run(Frame entry)
     {
+        return _onThread ? RunGuarded(entry) : RunOnThread(entry);   // nested native→JS call: already current
+    }
+
+    /// <summary>
+    /// Whether this Vm is <see cref="t_current"/>: a thread-static read per native→JS call costs several nanoseconds, this
+    /// field a load. It is only ever true on the thread running the Vm's outermost <see cref="Run"/>.
+    /// </summary>
+    private bool _onThread;
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private JsValue RunOnThread(Frame entry)
+    {
+        var saved = EnterThread();
+        try { return RunGuarded(entry); }
+        finally { LeaveThread(saved); }
+    }
+
+    private Vm? EnterThread()
+    {
         var saved = t_current;
-        if (ReferenceEquals(saved, this)) return RunLoop(entry);   // nested native→JS call: already current
+        if (saved != null) saved._onThread = false;   // a host function of that Vm entered this one
         t_current = this;
-        try { return RunLoop(entry); }
-        finally { t_current = saved; }
+        _onThread = true;
+        return saved;
+    }
+
+    private void LeaveThread(Vm? saved)
+    {
+        _onThread = false;
+        t_current = saved;
+        if (saved != null) saved._onThread = true;
+        _stackCheckedTo = nuint.MaxValue;   // the next execution of this Vm may run on another thread
     }
 
     /// <summary>Whether the active execution has a wall-clock deadline.</summary>
@@ -273,7 +305,7 @@ internal sealed partial class Vm
     public void EnterNative()
     {
         if (Sp + ++_nativeDepth > MaxDepth) StackOverflow();
-        if (!RuntimeHelpers.TryEnsureSufficientExecutionStack()) StackOverflow();
+        if (!StackIsSufficient()) StackOverflow();
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -283,7 +315,36 @@ internal sealed partial class Vm
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public void EnsureNativeStack()
     {
-        if (!RuntimeHelpers.TryEnsureSufficientExecutionStack()) NativeStackOverflow();
+        if (!StackIsSufficient()) NativeStackOverflow();
+    }
+
+    /// <summary>
+    /// Lowest stack address known to be sufficient (see <see cref="StackIsSufficient"/>); <c>nuint.MaxValue</c> for "none", which
+    /// is its value whenever no execution is running, since the next one may be on another thread.
+    /// </summary>
+    private nuint _stackCheckedTo = nuint.MaxValue;
+
+    /// <summary>How far below a successful probe the stack may grow without another one; the runtime's probe asks for 64 KB (128 KB on 64-bit) of room.</summary>
+    private const int StackProbeReach = 16 * 1024;
+
+    /// <summary>
+    /// <see cref="RuntimeHelpers.TryEnsureSufficientExecutionStack"/> for the native→JS call path: the runtime's probe reads thread-local
+    /// state (several nanoseconds under NativeAOT), so one successful probe also covers the <see cref="StackProbeReach"/> below it,
+    /// which leaves at least 48 KB of the room it asks for. A loop of callbacks at one depth probes once.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private unsafe bool StackIsSufficient()
+    {
+        byte marker;
+        return (nuint)(&marker) >= _stackCheckedTo || ProbeStack((nuint)(&marker));
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private bool ProbeStack(nuint at)
+    {
+        if (!RuntimeHelpers.TryEnsureSufficientExecutionStack()) return false;
+        if (_onThread) _stackCheckedTo = at - StackProbeReach;
+        return true;
     }
 
     [MethodImpl(MethodImplOptions.NoInlining)]
@@ -348,7 +409,7 @@ internal sealed partial class Vm
         if (_top == 0 && _chunkIndex == 0 && prevLen < MaxChunkSize)
         {
             // nothing live in the first chunk yet: just grow it
-            _chunks[0] = _chunk = chunk = new JsValue[Math.Max(prevLen == 0 ? InitialChunkSize : Math.Min(prevLen * 4, MaxChunkSize), count)];
+            _chunks[0] = _chunk = chunk = NewChunk(Math.Max(prevLen == 0 ? InitialChunkSize : Math.Min(prevLen * 4, MaxChunkSize), count));
             baseIndex = 0;
             chunkIndex = 0;
             _top = count;
@@ -357,8 +418,8 @@ internal sealed partial class Vm
         }
         _chunkIndex++;
         int size = Math.Max(Math.Min(prevLen * 2, MaxChunkSize), count);
-        if (_chunkIndex == _chunks.Count) _chunks.Add(new JsValue[size]);
-        else if (_chunks[_chunkIndex].Length < count) _chunks[_chunkIndex] = new JsValue[size];
+        if (_chunkIndex == _chunks.Count) _chunks.Add(NewChunk(size));
+        else if (_chunks[_chunkIndex].Length < count) _chunks[_chunkIndex] = NewChunk(size);
         _chunk = chunk = _chunks[_chunkIndex];
         _top = 0;
         baseIndex = 0;
@@ -367,6 +428,21 @@ internal sealed partial class Vm
         if (_chunkIndex > _chunkHwm) _chunkHwm = _chunkIndex;
         return chunk;
     }
+
+    /// <summary>
+    /// A register chunk whose elements are 16-byte aligned. The GC aligns objects to 8 bytes, and with the elements at 8 mod 16 a
+    /// register load right after the store of the same register (the interpreter's usual pattern) straddles what the
+    /// store wrote as a pair: the same workload ran up to 35% slower depending on what was allocated before the chunk.
+    /// An array's size is 8 mod 16, so the next object after a misaligned array is aligned.
+    /// </summary>
+    private static JsValue[] NewChunk(int size)
+    {
+        var chunk = new JsValue[size];
+        for (int i = 0; i < 8 && !IsAligned(chunk); i++) chunk = new JsValue[size];
+        return chunk;
+    }
+
+    private static unsafe bool IsAligned(JsValue[] chunk) => chunk.Length == 0 || ((nuint)Unsafe.AsPointer(ref chunk[0]) & 15) == 0;
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private Frame RentFrame()
@@ -407,6 +483,39 @@ internal sealed partial class Vm
         f.Displaced = null;
     }
 
+    /// <summary>Finished coroutine frames for reuse, linked through <see cref="Frame.Displaced"/>. Like the register stack they keep stale references until the root execution ends.</summary>
+    private Frame? _freeCoroutineFrames;
+    private int _freeCoroutineFrameCount;
+    private const int MaxFreeCoroutineFrames = 32;
+    private const int MaxPooledCoroutineRegisters = 128;
+
+    private Frame RentCoroutineFrame(int registerCount)
+    {
+        var f = _freeCoroutineFrames;
+        if (f == null)
+        {
+            f = new Frame { ChunkIndex = -1 };
+            f.Regs = new JsValue[registerCount];
+            return f;
+        }
+        _freeCoroutineFrames = f.Displaced;
+        _freeCoroutineFrameCount--;
+        f.Displaced = null;
+        if (f.Regs.Length < registerCount) f.Regs = new JsValue[registerCount];
+        return f;
+    }
+
+    /// <summary>Takes back the frame of a coroutine that ran to completion; nothing may refer to it any more.</summary>
+    internal void ReleaseCoroutineFrame(Frame f)
+    {
+        if (_freeCoroutineFrameCount >= MaxFreeCoroutineFrames || f.Regs.Length > MaxPooledCoroutineRegisters) return;
+        f.Args = null;
+        f.NewTarget = default;
+        f.Displaced = _freeCoroutineFrames;
+        _freeCoroutineFrames = f;
+        _freeCoroutineFrameCount++;
+    }
+
     /// <summary>Pushes a frame for a closure call; arguments are copied into the new register window.</summary>
     internal Frame PushFrame(JsClosure c, JsValue thisValue, ReadOnlySpan<JsValue> args, JsValue newTarget, FrameFlags flags)
     {
@@ -416,10 +525,7 @@ internal sealed partial class Vm
         int savedTop = _top, savedChunk = _chunkIndex;
         if ((flags & FrameFlags.OwnsRegs) != 0)
         {
-            f = new Frame();
-            f.Regs = new JsValue[t.RegisterCount];
-            f.Base = 0;
-            f.ChunkIndex = -1;
+            f = RentCoroutineFrame(t.RegisterCount);
             PlaceHeapFrame(f);
         }
         else
@@ -436,7 +542,7 @@ internal sealed partial class Vm
             if (n <= 4)
             {
                 // element stores beat the bulk copy helper for the usual one to four arguments
-                for (int i = 0; i < n; i++) regs[b + i] = args[i];
+                for (int i = 0; i < n; i++) JsValue.Store(ref regs[b + i], args[i]);
             }
             else args.Slice(0, n).CopyTo(regs.AsSpan(b, n));
             // Registers are not cleared when a frame is popped (the pooled stack is cleared when the root execution
@@ -459,6 +565,7 @@ internal sealed partial class Vm
     /// caller never reads them again). The window does not overlap when the caller's registers are not the shared stack
     /// (a coroutine frame owns its registers) or the callee does not fit in the chunk: those calls copy as PushFrame does.
     /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     internal Frame PushCallFrame(JsClosure c, JsValue[] callerRegs, int thisIndex, int argStart, int argc)
     {
         if (Depth + 1 > MaxDepth) StackOverflowFrame();
@@ -469,13 +576,24 @@ internal sealed partial class Vm
         return f;
     }
 
+    /// <summary><see cref="PushCallFrame"/> for the paths other than the interpreter's own call instruction, which is the one place it is inlined.</summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private Frame PushCallFrameOutOfLine(JsClosure c, JsValue[] callerRegs, int thisIndex, int argStart, int argc) =>
+        PushCallFrame(c, callerRegs, thisIndex, argStart, argc);
+
     /// <summary><see cref="PushCallFrame"/> for the interpreter's New: the frame constructs <paramref name="obj"/>.</summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
     internal Frame PushNewFrame(JsClosure c, JsValue[] callerRegs, int argStart, int argc, JsObject obj, JsValue newTarget)
+    {
+        return PushConstructFrame(c, callerRegs, argStart, argc, JsValue.FromObject(obj), newTarget);
+    }
+
+    private Frame PushConstructFrame(JsClosure c, JsValue[] callerRegs, int argStart, int argc, JsValue thisValue, JsValue newTarget)
     {
         if (Depth + 1 > MaxDepth) StackOverflowFrame();
         var f = RentFrame();
         BindCallWindow(f, c.Template, callerRegs, argStart, argc);
-        SetupFrame(f, c, JsValue.FromObject(obj), newTarget, FrameFlags.Construct);
+        SetupFrame(f, c, thisValue, newTarget, FrameFlags.Construct);
         return f;
     }
 
@@ -504,9 +622,8 @@ internal sealed partial class Vm
         }
         else
         {
-            regs = AllocRegs(count, out b, out f.ChunkIndex);
-            if (n <= 4) { for (int i = 0; i < n; i++) regs[b + i] = callerRegs[argStart + i]; }
-            else Array.Copy(callerRegs, argStart, regs, b, n);
+            regs = BindFreshWindow(f, count, callerRegs, argStart, n);
+            b = f.Base;
         }
         f.Base = b;
         if (!ReferenceEquals(f.Regs, regs)) f.Regs = regs;
@@ -515,6 +632,16 @@ internal sealed partial class Vm
         int initEnd = t.InitUndefEnd < 0 ? count : t.InitUndefEnd;
         for (int i = n; i < initEnd; i++) regs[b + i] = default;
         if (_poisonRegisters) for (int i = initEnd; i < count; i++) regs[b + i] = s_poison;
+    }
+
+    /// <summary>A register window that cannot overlap the caller's (see <see cref="PushCallFrame"/>), with the arguments copied in.</summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private JsValue[] BindFreshWindow(Frame f, int count, JsValue[] callerRegs, int argStart, int n)
+    {
+        var regs = AllocRegs(count, out int b, out f.ChunkIndex);
+        f.Base = b;
+        Array.Copy(callerRegs, argStart, regs, b, n);
+        return regs;
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -529,10 +656,8 @@ internal sealed partial class Vm
         if (!ReferenceEquals(f.Callee, c))
         {
             f.Callee = c;
-            f.T = t;
-            f.Code = t.Code;
-            f.K = t.Constants;
-            f.Feedback = c.Feedback;
+            var fb = c.Feedback;
+            if (!ReferenceEquals(f.Feedback, fb)) f.Feedback = fb;
         }
         f.Pc = 0;
         // compared even for the same callee: a frame that left through a throw or a return from inside a block keeps
@@ -583,10 +708,8 @@ internal sealed partial class Vm
         if (!ReferenceEquals(f.Callee, c))
         {
             f.Callee = c;
-            f.T = t;
-            f.Code = t.Code;
-            f.K = t.Constants;
-            f.Feedback = c.Feedback;
+            var fb = c.Feedback;
+            if (!ReferenceEquals(f.Feedback, fb)) f.Feedback = fb;
         }
         f.Pc = 0;
         var env = c.Env;
@@ -687,15 +810,17 @@ internal sealed partial class Vm
     {
         ClearRegisterStack();
         if (_sortScratch != null && _sortScratch.Length > 1 << 12) _sortScratch = null;   // an idle engine keeps at most 64 KB of sort scratch
+        // a compacting GC may have moved the chunk to 8 mod 16; it is empty now, and is rarely moved again once it is old
+        if (_chunkIndex == 0 && !IsAligned(_chunk)) _chunks[0] = _chunk = NewChunk(_chunk.Length);
+        TrimJobs();
+        _freeCoroutineFrames = null;
+        _freeCoroutineFrameCount = 0;
         var pool = _frames;   // Sp is 0 here: every slot holds a pooled frame (or nothing)
         for (int i = 0; i < pool.Length; i++)
         {
             var f = pool[i];
             if (f == null) break;
             f.Callee = null!;
-            f.T = null!;
-            f.Code = null!;
-            f.K = null!;
             f.Feedback = null!;
             f.Env = null;
             f.ThisBox = null;
@@ -768,8 +893,7 @@ internal sealed partial class Vm
         else
         {
             var proto = Operations.GetPrototypeFromConstructor(Realm, newTarget, Realm.ObjectPrototype);
-            var obj = new JsObject(Realm, proto);
-            thisValue = JsValue.FromObject(obj);
+            thisValue = JsValue.FromObject(NewInstance(newTarget, proto));
             if (c.FieldInit != null) c.FieldInit.Call(thisValue, ReadOnlySpan<JsValue>.Empty);
         }
         var f = PushFrame(c, thisValue, args, JsValue.FromObject(newTarget), FrameFlags.Construct);
@@ -800,6 +924,54 @@ internal sealed partial class Vm
         return Run(f);
     }
 
+    /// <summary>
+    /// <see cref="CallClosureFast"/> for a builtin's callback of up to four arguments (<paramref name="argc"/> of them are
+    /// passed; the others are ignored): only the ones the callee declares are written, straight into its registers. Most
+    /// callbacks declare fewer than the builtin passes, and each element of an arguments array is a store with a GC write barrier.
+    /// </summary>
+    internal JsValue CallCallback(JsClosure c, JsValue thisValue, in JsValue a0, in JsValue a1, in JsValue a2, in JsValue a3, int argc)
+    {
+        if (Depth + 1 > MaxDepth) StackOverflowFrame();
+        var t = c.Template;
+        var f = RentFrame();
+        f.SavedTop = _top;
+        f.SavedChunkIndex = _chunkIndex;
+        var regs = AllocRegs(t.RegisterCount, out f.Base, out f.ChunkIndex);
+        if (!ReferenceEquals(f.Regs, regs)) f.Regs = regs;
+        int b = f.Base;
+        int n = argc < t.ParamCount ? argc : t.ParamCount;
+        if (n > 0)
+        {
+            JsValue.Store(ref regs[b], a0);
+            if (n > 1)
+            {
+                JsValue.Store(ref regs[b + 1], a1);
+                if (n > 2)
+                {
+                    JsValue.Store(ref regs[b + 2], a2);
+                    if (n > 3) JsValue.Store(ref regs[b + 3], a3);
+                }
+            }
+        }
+        // as in PushFrame: the bindings and missing parameters start as undefined, every other register is written before it is read
+        int initEnd = t.InitUndefEnd < 0 ? t.RegisterCount : t.InitUndefEnd;
+        for (int i = n; i < initEnd; i++) regs[b + i] = default;
+        if (_poisonRegisters) for (int i = initEnd; i < t.RegisterCount; i++) regs[b + i] = s_poison;
+        if ((t.Flags & FunctionFlags.NeedsArgsArray) != 0) f.Args = CallbackArgsArray(a0, a1, a2, a3, argc);
+        SetupFrame(f, c, thisValue, JsValue.Undefined, FrameFlags.None);
+        return Run(f);
+    }
+
+    private static JsValue[] CallbackArgsArray(in JsValue a0, in JsValue a1, in JsValue a2, in JsValue a3, int argc)
+    {
+        var args = new JsValue[argc];
+        if (argc > 0) args[0] = a0;
+        if (argc > 1) args[1] = a1;
+        if (argc > 2) args[2] = a2;
+        if (argc > 3) args[3] = a3;
+        return args;
+    }
+
     private JsValue[]? _sortScratch;
 
     /// <summary>A scratch buffer of at least <paramref name="n"/> elements (sort merges, result-array collection); taken out of the Vm while in use, so a re-entrant use allocates its own.</summary>
@@ -818,11 +990,8 @@ internal sealed partial class Vm
         if (s.Length <= 1 << 16) _sortScratch = s;
     }
 
-    private void EnsureStack()
-    {
-        if (!RuntimeHelpers.TryEnsureSufficientExecutionStack())
-            throw new JsTerminationException(TerminationKind.StackDepth, "Native recursion is too deep to continue safely.", Depth, MaxDepth);
-    }
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private void EnsureStack() => EnsureNativeStack();
 
     /// <summary>Applies [[Construct]] return semantics.</summary>
     internal JsValue ConstructResult(Frame f, JsValue value)
@@ -847,13 +1016,29 @@ internal sealed partial class Vm
             if (f.This.IsEmpty) { error = JsValue.FromObject(JsError.Create(CallerRealmOf(f), ErrorKind.ReferenceError, "Must call super constructor in derived class before accessing 'this' or returning from derived constructor")); return false; }
         }
         value = f.This;
+        // instances of this constructor will be about this big: spares them the growth from no slots, or empty slots
+        if (f.NewTarget.Ref is JsClosure nt && value.Ref is JsObject o)
+        {
+            int n = o.Shape.Count;
+            if (n > nt.Feedback.InstanceSlots && n <= MaxInstanceSlots) nt.Feedback.InstanceSlots = n;
+        }
         return true;
+    }
+
+    internal const int MaxInstanceSlots = 32;
+
+    /// <summary>The object a [[Construct]] of <paramref name="newTarget"/> starts with, slots sized by experience.</summary>
+    private JsObject NewInstance(JsObject newTarget, JsObject proto)
+    {
+        var realm = Realm;
+        return newTarget is JsClosure c ? new JsObject(realm, realm.RootShapeFor(proto), c.Feedback.InstanceSlots) : new JsObject(realm, proto);
     }
 
     // ------------------------------------------------------------------ closures
 
     internal JsClosure CreateClosure(FunctionTemplate t, Env? env, Feedback fb, Frame? creator, JsObject? protoOverride = null)
     {
+        System.Diagnostics.Debug.Assert(ReferenceEquals(fb.Template, t));   // a frame finds its code and constants through the feedback
         var realm = Realm;
         JsObject fproto = protoOverride ?? (t.IsGenerator ? (t.IsAsync ? realm.AsyncGeneratorFunctionPrototype : realm.GeneratorFunctionPrototype) : t.IsAsync ? realm.AsyncFunctionPrototype : realm.FunctionPrototype);
         var c = new JsClosure(realm, t, env, fb, fproto);
@@ -877,9 +1062,7 @@ internal sealed partial class Vm
         }
         else if (t.IsConstructor && !t.IsClassConstructor && (t.Flags & FunctionFlags.NoPrototype) == 0)
         {
-            var p = new JsObject(realm, realm.ObjectPrototype);
-            p.AddOwnProperty("constructor", JsValue.FromObject(c), PropFlags.Hidden);
-            c.AddOwnProperty("prototype", JsValue.FromObject(p), PropFlags.Writable);
+            c.AddOwnProperty("prototype", LazyFunction.ClosurePrototypeSlot, PropFlags.Writable);
         }
         return c;
     }

@@ -4,13 +4,34 @@ using System.Runtime.CompilerServices;
 
 namespace Jaunt.Runtime;
 
-/// <summary>Placeholder stored in a slot until a builtin method is first read.</summary>
+/// <summary>Placeholder stored in a slot until a builtin method is first read. Data slots holding one read as Empty, so every read that takes the slot as is must check for that and go through <see cref="JsObject.ReadSlot"/>.</summary>
 internal sealed class LazyFunction
 {
     public readonly string Name;
     public readonly int Length;
     public readonly NativeFn Fn;
     public LazyFunction(string name, int length, NativeFn fn) { Name = name; Length = length; Fn = fn; }
+
+    /// <summary>In the "prototype" slot of a closure: the object is created when first read, most functions never get there.</summary>
+    public static readonly LazyFunction ClosurePrototype = new("prototype", 0, null!);
+    public static readonly JsValue ClosurePrototypeSlot = new(JsTag.Empty, 0, ClosurePrototype);
+}
+
+/// <summary>The less common state of a <see cref="JsObject"/>.</summary>
+internal sealed class ObjectExtras
+{
+    /// <summary>Root of the objects that have this one as their prototype.</summary>
+    public Shape? ChildRootShape;
+    /// <summary>Layout (length, name) of the functions that have this one as their prototype.</summary>
+    public Shape? FunctionChildShape;
+    /// <summary>Private class elements (#x): found by a scan for the name's identity, the end marked by a null name or the array's end.</summary>
+    public PrivateElement[]? PrivateElements;
+}
+
+internal struct PrivateElement
+{
+    public JsPrivateName? Name;
+    public JsValue Value;
 }
 
 /// <summary>
@@ -41,12 +62,46 @@ internal class JsObject
             return h;
         }
     }
-    internal Shape? ChildRootShape;
-    internal Shape? FunctionChildShape;
-    /// <summary>Private class elements (#x), keyed by private name identity.</summary>
-    internal Dictionary<object, JsValue>? PrivateElements;
+    /// <summary>What only some objects need, apart so that the rest stay small (see <see cref="ObjectExtras"/>).</summary>
+    internal ObjectExtras? Extras;
+    internal PrivateElement[]? PrivateElements => Extras?.PrivateElements;
 
     private static readonly JsValue[] NoSlots = Array.Empty<JsValue>();
+
+    /// <summary>The index in <see cref="PrivateElements"/> of the element named <paramref name="name"/>, or -1.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal int FindPrivate(JsPrivateName name)
+    {
+        var pe = Extras?.PrivateElements;
+        if (pe != null)
+        {
+            for (int i = 0; i < pe.Length; i++)
+            {
+                if (ReferenceEquals(pe[i].Name, name)) return i;
+            }
+        }
+        return -1;
+    }
+
+    /// <summary>Appends a private element whose name is known to be absent.</summary>
+    internal void AddPrivate(JsPrivateName name, JsValue value)
+    {
+        var extras = Extras ??= new ObjectExtras();
+        var pe = extras.PrivateElements;
+        int i = 0;
+        if (pe == null) extras.PrivateElements = pe = new PrivateElement[2];
+        else
+        {
+            while (i < pe.Length && pe[i].Name != null) i++;
+            if (i == pe.Length)
+            {
+                Array.Resize(ref pe, i * 2);
+                extras.PrivateElements = pe;
+            }
+        }
+        pe[i].Name = name;
+        pe[i].Value = value;
+    }
 
     public JsObject(Realm realm, JsObject? proto)
     {
@@ -73,6 +128,17 @@ internal class JsObject
         Shape = shape;
         Slots = slotCapacity == 0 ? NoSlots : new JsValue[slotCapacity];
         realm.ChargeObject();
+    }
+
+    /// <summary>Constructor used for exotic objects created with a fully built layout (arguments objects).</summary>
+    protected JsObject(Realm realm, Shape shape, JsValue[] slots, bool exotic)
+    {
+        Realm = realm;
+        IsExotic = exotic;
+        Shape = shape;
+        Slots = slots;
+        realm.ChargeObject();
+        realm.ChargeProperties(shape.Count);
     }
 
     public virtual string ClassName => "Object";
@@ -118,7 +184,7 @@ internal class JsObject
     {
         var v = Dict == null ? Slots[i] : Dict.Values[i];
         if (v.Ref is not LazyFunction lf) return v;
-        var fn = JsValue.FromObject(Realm.CreateBuiltinUncharged(lf));
+        var fn = JsValue.FromObject(ReferenceEquals(lf, LazyFunction.ClosurePrototype) ? ((JsClosure)this).CreatePrototypeObject() : Realm.CreateBuiltinUncharged(lf));
         if (Dict == null) Slots[i] = fn;
         else Dict.Values[i] = fn;
         return fn;
@@ -234,6 +300,13 @@ internal class JsObject
         if (Dict == null)
         {
             if (Shape.Flags[idx] == flags) return;
+            var next = Shape.WithFlags(idx, flags);
+            if (next != null)
+            {
+                Shape = next;
+                if (IsPrototypeObject) Realm.ProtoEpoch++;
+                return;
+            }
             ConvertToDictionary();
         }
         Dict!.Flags[idx] = flags;
@@ -314,6 +387,12 @@ internal class JsObject
 
     private bool ValidateAndApply(int i, PropFlags cf, in PropertyDescriptor desc)
     {
+        // { value } alone on a writable data property changes nothing else (Reflect.set through a receiver, for one)
+        if ((cf & (PropFlags.Accessor | PropFlags.Writable)) == PropFlags.Writable && desc.HasValue && !desc.HasWritable && !desc.HasGet && !desc.HasSet && !desc.HasEnumerable && !desc.HasConfigurable)
+        {
+            WriteSlot(i, desc.Value);
+            return true;
+        }
         bool curConfigurable = (cf & PropFlags.Configurable) != 0;
         bool curEnumerable = (cf & PropFlags.Enumerable) != 0;
         bool curAccessor = (cf & PropFlags.Accessor) != 0;

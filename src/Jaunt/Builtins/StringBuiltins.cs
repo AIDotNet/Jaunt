@@ -185,9 +185,14 @@ internal static class StringBuiltins
             if (s.Length == 0 || n == 0) return JsValue.EmptyString;
             if (s.Length * n > a.Realm.MaxStringLength) throw JsErrors.RangeError(a.Realm, "Invalid string length");
             a.Realm.ChargeOutput((long)(s.Length * n));
-            var sb = new StringBuilder((int)(s.Length * n));
-            for (int i = 0; i < n; i++) sb.Append(s);
-            return new JsValue(sb.ToString());
+            return new JsValue(string.Create((int)(s.Length * n), s, static (dest, unit) =>
+            {
+                if (unit.Length == 1) { dest.Fill(unit[0]); return; }
+                unit.AsSpan().CopyTo(dest);
+                // doubling copy of what is already written
+                for (int done = unit.Length; done < dest.Length; done *= 2)
+                    dest.Slice(0, Math.Min(done, dest.Length - done)).CopyTo(dest.Slice(done));
+            }));
         });
         r.Method(proto, "concat", 1, static (in NativeArgs a) =>
         {
@@ -352,17 +357,19 @@ internal static class StringBuiltins
         if (filler.Length == 0) return s;
         if (max > a.Realm.MaxStringLength) throw JsErrors.RangeError(a.Realm, "Invalid string length");
         a.Realm.ChargeOutput((long)max);   // charged before allocating
-        int fill = (int)max - s.Length;
-        var sb = new StringBuilder((int)max);
-        if (!start) sb.Append(s);
-        while (fill > 0)
+        return string.Create((int)max, (s, filler, start), static (dest, st) =>
         {
-            int n = Math.Min(fill, filler.Length);
-            sb.Append(filler, 0, n);
-            fill -= n;
-        }
-        if (start) sb.Append(s);
-        return sb.ToString();
+            var (str, fill, atStart) = st;
+            str.AsSpan().CopyTo(atStart ? dest.Slice(dest.Length - str.Length) : dest);
+            var gap = atStart ? dest.Slice(0, dest.Length - str.Length) : dest.Slice(str.Length);
+            if (fill.Length == 1) { gap.Fill(fill[0]); return; }
+            while (gap.Length > 0)
+            {
+                int n = Math.Min(gap.Length, fill.Length);
+                fill.AsSpan(0, n).CopyTo(gap);
+                gap = gap.Slice(n);
+            }
+        });
     }
 
     private static JsValue DelegateRegExp(in NativeArgs a, JsSymbol sym, string name, string? flags)
@@ -402,21 +409,66 @@ internal static class StringBuiltins
         var search = Operations.ToString(realm, searchValue);
         bool functional = replaceValue.IsFunction;
         string replaceStr = functional ? "" : Operations.ToString(realm, replaceValue);
-        var positions = new System.Collections.Generic.List<int>();
         int advance = Math.Max(1, search.Length);
         int p = s.IndexOf(search, 0, StringComparison.Ordinal);
+        if (p < 0) return new JsValue(s);
+        var positions = System.Buffers.ArrayPool<int>.Shared.Rent(all ? 64 : 1);
+        int count = 0;
         while (p >= 0)
         {
-            positions.Add(p);
+            if (count == positions.Length)
+            {
+                var grown = System.Buffers.ArrayPool<int>.Shared.Rent(count * 2);
+                Array.Copy(positions, grown, count);
+                System.Buffers.ArrayPool<int>.Shared.Return(positions);
+                positions = grown;
+            }
+            positions[count++] = p;
             if (!all) break;
             p = p + advance > s.Length ? -1 : s.IndexOf(search, p + advance, StringComparison.Ordinal);
             realm.Vm.Tick();
         }
-        if (positions.Count == 0) return new JsValue(s);
+        string result = !functional && !replaceStr.Contains('$')
+            ? ReplaceLiteral(realm, s, search, replaceStr, positions, count)
+            : ReplaceEach(realm, s, search, replaceValue, functional, replaceStr, positions, count);
+        System.Buffers.ArrayPool<int>.Shared.Return(positions);   // lost to the GC if a callback or limit throws: harmless
+        return new JsValue(result);
+    }
+
+    /// <summary>A replacement text with no <c>$</c> is inserted as it is, so the result size is known before any copy.</summary>
+    private static string ReplaceLiteral(Realm realm, string s, string search, string rep, int[] positions, int count)
+    {
+        int last = positions[count - 1];
+        // everything up to the last replacement; the tail after it is copied unchecked as in ReplaceEach
+        long upToLast = last + (count - 1L) * (rep.Length - search.Length) + rep.Length;
+        realm.ChargeOutput(upToLast);
+        if (upToLast > realm.MaxStringLength) throw JsErrors.RangeError(realm, "Invalid string length");
+        long total = upToLast + (s.Length - (long)last - search.Length);
+        if (total > int.MaxValue) throw JsErrors.RangeError(realm, "Invalid string length");
+        return string.Create((int)total, (s, search.Length, rep, positions, count), static (dest, st) =>
+        {
+            var (src, searchLen, text, pos, n) = st;
+            int from = 0, to = 0;
+            for (int i = 0; i < n; i++)
+            {
+                int run = pos[i] - from;
+                src.AsSpan(from, run).CopyTo(dest.Slice(to));
+                to += run;
+                text.AsSpan().CopyTo(dest.Slice(to));
+                to += text.Length;
+                from = pos[i] + searchLen;
+            }
+            src.AsSpan(from).CopyTo(dest.Slice(to));
+        });
+    }
+
+    private static string ReplaceEach(Realm realm, string s, string search, in JsValue replaceValue, bool functional, string replaceStr, int[] positions, int count)
+    {
         var sb = new StringBuilder();
         int end = 0;
-        foreach (int idx in positions)
+        for (int i = 0; i < count; i++)
         {
+            int idx = positions[i];
             sb.Append(s, end, idx - end);
             string rep = functional
                 ? Operations.ToString(realm, realm.Vm.Call(replaceValue, JsValue.Undefined, new[] { new JsValue(search), new JsValue(idx), new JsValue(s) }))
@@ -427,7 +479,7 @@ internal static class StringBuiltins
             if (sb.Length > realm.MaxStringLength) throw JsErrors.RangeError(realm, "Invalid string length");
         }
         if (end < s.Length) sb.Append(s, end, s.Length - end);
-        return new JsValue(sb.ToString());
+        return sb.ToString();
     }
 }
 

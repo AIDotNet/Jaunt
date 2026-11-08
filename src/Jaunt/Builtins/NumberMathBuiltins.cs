@@ -154,6 +154,7 @@ internal static class MathBuiltins
     {
         if (double.IsNaN(b)) return double.NaN;
         if (b == 0) return 1;
+        if (b == 2) return a * a;
         if ((a == 1 || a == -1) && double.IsInfinity(b)) return double.NaN;
         return Math.Pow(a, b);
     }

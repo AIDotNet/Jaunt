@@ -22,20 +22,22 @@ internal sealed partial class Vm
     /// <c>RunLoop</c>. Returns the pushed frame (the caller sets its RetIndex and switches to it) or null when the call has to
     /// take the general path: targets that are generators, async functions or class constructors (which throw), bound
     /// functions whose target is not a closure, <c>apply</c> with anything but a dense hole-free array. <paramref name="callee"/>
-    /// is the function object being invoked (the call/apply builtin or the bound function), <paramref name="receiver"/> its
-    /// this value (for call/apply: the target). The interpreter has already stored the continuation pc in the caller frame.
+    /// is the function object being invoked (the call/apply builtin or the bound function), <paramref name="receiverIndex"/> the
+    /// register of its this value (for call/apply: the target; negative when it has none). The interpreter has already stored the continuation pc in the caller frame.
     /// </summary>
-    private Frame? TryPushRedirectedCall(JsFunctionObject callee, in JsValue receiver, JsValue[] regs, int argStart, int argc)
+    private Frame? TryPushRedirectedCall(JsFunctionObject callee, int receiverIndex, JsValue[] regs, int argStart, int argc)
     {
         if (callee is JsBuiltin b)
         {
+            if (receiverIndex < 0) return null;
+            ref readonly var receiver = ref regs[receiverIndex];
             if (receiver.IsNotObject || receiver.Ref is not JsClosure target || (target.Template.Flags & InlineCallMask) != 0) return null;
             if (ReferenceEquals(b.Fn, FunctionBuiltins.CallFn))
             {
                 if (--_ticks <= 0) Checkpoint();
                 // the target's arguments are the caller's arguments after the first; the this register (argStart) stays below
                 // the new window, which is what PushCallFrame requires
-                return argc == 0 ? PushCallFrame(target, regs, -1, argStart, 0) : PushCallFrame(target, regs, argStart, argStart + 1, argc - 1);
+                return argc == 0 ? PushCallFrameOutOfLine(target, regs, -1, argStart, 0) : PushCallFrameOutOfLine(target, regs, argStart, argStart + 1, argc - 1);
             }
             if (ReferenceEquals(b.Fn, FunctionBuiltins.ApplyFn))
             {
@@ -157,13 +159,13 @@ internal sealed partial class Vm
     {
         if (so.GetType() != typeof(JsObject) || so.Dict != null) return false;
         var shape = so.Shape;
-        if (shape.IsUnique || shape.HasSpecialProps || shape.HasIndexKeys || shape.HasSymbolKeys) return false;
+        if (shape.IsUnique || shape.HasAccessors || shape.HasIndexKeys || shape.HasSymbolKeys) return false;
         int n = shape.Count;
         var slots = so.Slots;
         if (target.GetType() == typeof(JsObject) && target.Dict == null && target.Extensible && excluded.Length == 0)
         {
             var ts = target.Shape;
-            if (ts.Count == 0 && ts.Role == shape.Role && ReferenceEquals(ts.Prototype, shape.Prototype) && !ts.IsUnique)
+            if (ts.Count == 0 && ReferenceEquals(target.Realm, so.Realm) && ts.Role == shape.Role && ReferenceEquals(ts.Prototype, shape.Prototype) && !ts.IsUnique)
             {
                 bool allDefault = true;
                 var flags = shape.Flags;
@@ -218,7 +220,32 @@ internal sealed partial class Vm
     [MethodImpl(MethodImplOptions.NoInlining)]
     internal JsValue NotCallableError(in JsValue fv) => ErrorValue(ErrorKind.TypeError, $"{JsErrors.Describe(fv)} is not a function");
 
+    /// <summary>A miss of the site IC. A plain object at a megamorphic site is served here, ahead of the many cases of <see cref="GetPropGeneric"/>.</summary>
     internal JsValue GetPropSlow(in JsValue ov, in JsValue keyValue, ref IcEntry ic)
+    {
+        if (ic.Kind == IcKind.Megamorphic && ov.IsObject && ov.Ref!.GetType() == typeof(JsObject) && keyValue.Ref is string ks)
+        {
+            var obj = Unsafe.As<JsObject>(ov.Ref);
+            var shape = obj.Shape;
+            ref var e = ref _np[NamedHash(shape, ks)];
+            if (ReferenceEquals(e.Shape, shape) && ReferenceEquals(e.Key, ks))
+            {
+                if (e.Kind == IcKind.OwnData)
+                {
+                    var v = obj.Slots[e.Slot];
+                    if (v.IsNotEmpty) return v;
+                }
+                else if (e.Kind == IcKind.ProtoData && e.Epoch == ProtoEpoch)
+                {
+                    var v = e.Holder!.Slots[e.Slot];
+                    if (v.IsNotEmpty) return v;
+                }
+            }
+        }
+        return GetPropGeneric(ov, keyValue, ref ic);
+    }
+
+    private JsValue GetPropGeneric(in JsValue ov, in JsValue keyValue, ref IcEntry ic)
     {
         var key = new PropertyKey(keyValue.AsStringUnchecked);
         if (ov.IsNotObject)
@@ -267,17 +294,17 @@ internal sealed partial class Vm
             if (keyValue.Ref is string ks && !obj.Shape.IsUnique)
             {
                 var shape = obj.Shape;
-                int h = NamedHash(shape, ks);
-                if (ReferenceEquals(_npShape[h], shape) && ReferenceEquals(_npKey[h], ks))
+                ref var e = ref _np[NamedHash(shape, ks)];
+                if (ReferenceEquals(e.Shape, shape) && ReferenceEquals(e.Key, ks))
                 {
-                    byte ck = _npKind[h];
-                    if (ck is IcKind.OwnData or IcKind.OwnGetter || _npEpoch[h] == Realm.ProtoEpoch)
-                        return NamedResult(ck, obj, _npHolder[h], _npSlot[h], ov);
+                    byte ck = e.Kind;
+                    if (ck is IcKind.OwnData or IcKind.OwnGetter || e.Epoch == Realm.ProtoEpoch)
+                        return NamedResult(ck, obj, e.Holder, e.Slot, ov);
                 }
                 if (!LookupNamed(obj, key, out var mk, out var mh, out var ms, out bool mc)) return obj.Get(key, ov);
                 if (mc || mk is IcKind.OwnData or IcKind.OwnGetter)
                 {
-                    _npShape[h] = shape; _npKey[h] = ks; _npKind[h] = mk; _npHolder[h] = mh; _npSlot[h] = ms; _npEpoch[h] = Realm.ProtoEpoch;
+                    e.Shape = shape; e.Key = ks; e.Kind = mk; e.Holder = mh; e.Slot = ms; e.Epoch = Realm.ProtoEpoch;
                 }
                 return NamedResult(mk, obj, mh, ms, ov);
             }
@@ -339,15 +366,20 @@ internal sealed partial class Vm
     // prototype results and absences). A shape is an immutable layout and names are the sites' constant strings
     // (matched by reference), so an entry is either exact or a miss.
     private const int NamedCacheSize = 1024;
-    private readonly Shape?[] _npShape = new Shape?[NamedCacheSize];
-    private readonly object?[] _npKey = new object?[NamedCacheSize];
-    private readonly byte[] _npKind = new byte[NamedCacheSize];
-    private readonly JsObject?[] _npHolder = new JsObject?[NamedCacheSize];
-    private readonly int[] _npSlot = new int[NamedCacheSize];
-    private readonly int[] _npEpoch = new int[NamedCacheSize];
+    private readonly NamedEntry[] _np = new NamedEntry[NamedCacheSize];
+
+    private struct NamedEntry
+    {
+        public Shape? Shape;
+        public object? Key;
+        public JsObject? Holder;
+        public int Slot;
+        public int Epoch;
+        public byte Kind;
+    }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static int NamedHash(Shape shape, string key) => (RuntimeHelpers.GetHashCode(shape) * 31 + RuntimeHelpers.GetHashCode(key)) & (NamedCacheSize - 1);
+    private static int NamedHash(Shape shape, string key) => (shape.Hash ^ PropertyKey.CheapHash(key)) & (NamedCacheSize - 1);
 
     /// <summary>Invokes the getter of a cached accessor slot (an <see cref="Accessor"/> value) on <paramref name="receiver"/>.</summary>
     internal JsValue CallCachedGetter(Accessor accessor, in JsValue receiver)
@@ -378,6 +410,7 @@ internal sealed partial class Vm
             return;
         }
         var obj = ov.AsObjectUnchecked;
+        if (ic.Kind == IcKind.Megamorphic && TrySetNamedCached(obj, key, value)) return;
         if (ic.Kind != IcKind.Megamorphic && obj.Dict == null && obj.CanCacheNamed(key))
         {
             int slot = obj.FindOwn(key, out var flags);
@@ -390,32 +423,79 @@ internal sealed partial class Vm
                     return;
                 }
             }
-            else if (obj.Extensible && !obj.IsPrototypeObject)
+            else if (obj.Extensible && !obj.IsPrototypeObject && CanAppendNamed(obj, key))
             {
-                // check the prototype chain for setters / read-only properties
-                bool plain = true;
-                for (var p = obj.Proto; p != null; p = p.Proto)
+                var oldShape = obj.Shape;
+                obj.AddOwnProperty(key, value, PropFlags.Default);
+                if (obj.Dict == null)
                 {
-                    if (p.IsExotic && !p.CanCacheNamed(key)) { plain = false; break; }
-                    if (p.Dict != null) { plain = false; break; }
-                    int ps = p.FindOwn(key, out var pf);
-                    if (ps >= 0) { plain = false; break; }
+                    FillIc(ref ic, IcKind.AddTransition, oldShape, null, oldShape.Count);
+                    ic.NewShape = obj.Shape;
                 }
-                if (plain)
-                {
-                    var oldShape = obj.Shape;
-                    obj.AddOwnProperty(key, value, PropFlags.Default);
-                    if (obj.Dict == null)
-                    {
-                        FillIc(ref ic, IcKind.AddTransition, oldShape, null, oldShape.Count);
-                        ic.NewShape = obj.Shape;
-                    }
-                    return;
-                }
+                return;
             }
         }
         if (!obj.Set(key, value, ov) && strict)
             throw JsErrors.TypeError(Realm, $"Cannot assign to read only property '{key}' of object");
+    }
+
+    /// <summary>Whether no object on the prototype chain has a say in adding <paramref name="key"/> (setter, read-only property, exotic).</summary>
+    private static bool CanAppendNamed(JsObject obj, in PropertyKey key)
+    {
+        for (var p = obj.Proto; p != null; p = p.Proto)
+        {
+            if (p.IsExotic && !p.CanCacheNamed(key)) return false;
+            if (p.Dict != null) return false;
+            if (p.FindOwn(key, out _) >= 0) return false;
+        }
+        return true;
+    }
+
+    // The store side of the Vm-wide named cache, for sites that cycle through shapes (a base class constructor assigning
+    // fields of several subclasses): (shape, name) → own writable data slot, or append with the next shape while
+    // ProtoEpoch stands. Same exactness argument as the load side.
+    private readonly Shape?[] _nsShape = new Shape?[NamedCacheSize];
+    private readonly string?[] _nsKey = new string?[NamedCacheSize];
+    private readonly Shape?[] _nsNext = new Shape?[NamedCacheSize];
+    private readonly int[] _nsSlot = new int[NamedCacheSize];
+    private readonly int[] _nsEpoch = new int[NamedCacheSize];
+
+    private bool TrySetNamedCached(JsObject obj, in PropertyKey key, JsValue value)
+    {
+        if (obj.Dict != null || !obj.CanCacheNamed(key)) return false;
+        var shape = obj.Shape;
+        var ks = key.Value as string;
+        if (ks == null || shape.IsUnique) return false;
+        int h = NamedHash(shape, ks);
+        if (ReferenceEquals(_nsShape[h], shape) && ReferenceEquals(_nsKey[h], ks))
+        {
+            var cachedNext = _nsNext[h];
+            if (cachedNext == null) { obj.Slots[_nsSlot[h]] = value; return true; }
+            if (_nsEpoch[h] == ProtoEpoch && obj.Extensible && !obj.IsPrototypeObject)
+            {
+                int to = _nsSlot[h];
+                if (to >= obj.Slots.Length) GrowSlots(obj, to);
+                obj.Slots[to] = value;
+                obj.Shape = cachedNext;
+                Realm.ChargeProperty();
+                return true;
+            }
+        }
+        int slot = obj.FindOwn(key, out var flags);
+        if (slot >= 0)
+        {
+            if ((flags & (PropFlags.Accessor | PropFlags.Writable)) != PropFlags.Writable) return false;
+            obj.Slots[slot] = value;
+            _nsShape[h] = shape; _nsKey[h] = ks; _nsNext[h] = null; _nsSlot[h] = slot;
+            return true;
+        }
+        if (!obj.Extensible || obj.IsPrototypeObject || !CanAppendNamed(obj, key)) return false;
+        obj.AddOwnProperty(key, value, PropFlags.Default);
+        if (obj.Dict == null)
+        {
+            _nsShape[h] = shape; _nsKey[h] = ks; _nsNext[h] = obj.Shape; _nsSlot[h] = shape.Count; _nsEpoch[h] = ProtoEpoch;
+        }
+        return true;
     }
 
     private void SetOnPrimitive(in JsValue ov, in PropertyKey key, JsValue value, bool strict)
@@ -473,9 +553,8 @@ internal sealed partial class Vm
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static int KeyedHash(Shape shape, object? keyRef, int index)
     {
-        int h = RuntimeHelpers.GetHashCode(shape) * 31;
-        h += keyRef != null ? RuntimeHelpers.GetHashCode(keyRef) : index;
-        return h & (KeyedCacheSize - 1);
+        int h = keyRef != null ? PropertyKey.CheapHash(Unsafe.As<string>(keyRef)) : index;
+        return (shape.Hash ^ h) & (KeyedCacheSize - 1);
     }
 
     /// <summary>The cacheable form of a computed key: a string instance, or an array index (keyRef null). False otherwise.</summary>
@@ -586,6 +665,35 @@ internal sealed partial class Vm
 
     // ------------------------------------------------------------------ object literal / class helpers
 
+    /// <summary>
+    /// A property with a constant key in an object literal, cached per site as shape → next shape. The object can't be observed
+    /// before the literal is complete, so nothing but the layout (a key seen before, a __proto__ or spread earlier) has a say.
+    /// </summary>
+    internal void DefineLiteralProp(in JsValue target, in JsValue keyValue, in JsValue value, ref IcEntry ic)
+    {
+        var obj = Unsafe.As<JsObject>(target.Ref!);
+        var shape = obj.Shape;
+        if (ReferenceEquals(shape, ic.Shape))
+        {
+            int slot = ic.Slot;
+            if (slot >= obj.Slots.Length) GrowSlots(obj, slot);
+            obj.Slots[slot] = value;
+            obj.Shape = ic.NewShape!;
+            Realm.ChargeProperty();
+            return;
+        }
+        var key = new PropertyKey(keyValue.AsStringUnchecked);
+        bool appends = obj.Dict == null && !shape.IsUnique && obj.FindOwn(key, out _) < 0;
+        obj.CreateDataPropertyOrThrow(key, value);
+        if (appends && obj.Dict == null && ic.Misses <= MaxIcMisses)
+        {
+            if (ic.Shape != null) ic.Misses++;
+            ic.Shape = shape;
+            ic.NewShape = obj.Shape;
+            ic.Slot = shape.Count;
+        }
+    }
+
     private void DefineAccessorOp(JsObject obj, JsValue keyValue, JsValue fnValue, int flags)
     {
         var key = Operations.ToPropertyKey(Realm, keyValue);
@@ -596,7 +704,10 @@ internal sealed partial class Vm
         if (setName || kind != 2) SetFunctionName(fn, key, kind == 0 ? "get" : kind == 1 ? "set" : null, onlyIfAnonymous: kind == 2);
         if (kind == 2)
         {
-            obj.DefinePropertyOrThrow(key, PropertyDescriptor.Data(fnValue, PropFlags.Writable | PropFlags.Configurable | (enumerable ? PropFlags.Enumerable : 0)));
+            var methodFlags = PropFlags.Writable | PropFlags.Configurable | (enumerable ? PropFlags.Enumerable : 0);
+            // a method of an object literal or a class: nearly always a new key on an ordinary object
+            if (!obj.IsExotic && obj.Extensible && obj.FindOwn(key, out _) < 0 && obj.GetType() == typeof(JsObject)) obj.AddOwnProperty(key, fnValue, methodFlags);
+            else obj.DefinePropertyOrThrow(key, PropertyDescriptor.Data(fnValue, methodFlags));
             return;
         }
         var desc = new PropertyDescriptor
@@ -658,7 +769,8 @@ internal sealed partial class Vm
         return home.GetPrototypeOf();
     }
 
-    private JsValue SuperCall(Frame f, ReadOnlySpan<JsValue> args)
+    /// <summary>The first half of super(...): [[Construct]] of the parent; <see cref="SuperBind"/> follows when it returns.</summary>
+    private JsValue SuperConstruct(Frame f, ReadOnlySpan<JsValue> args)
     {
         var ctor = f.Callee;
         var box = f.ThisBox;
@@ -673,13 +785,20 @@ internal sealed partial class Vm
         var parent = ctor.GetPrototypeOf();
         if (parent is not JsFunctionObject pf || !pf.IsConstructor) throw JsErrors.TypeError(Realm, "Super constructor is not a constructor");
         var nt = ntv.IsObject ? ntv.AsObjectUnchecked : ctor;
-        var result = pf.Construct(args, nt);
+        return pf.Construct(args, nt);
+    }
+
+    /// <summary>The second half of super(...): binds this to the result of the parent and initializes the instance fields.</summary>
+    private void SuperBind(Frame f, JsValue result)
+    {
+        var ctor = f.Callee;
+        var box = f.ThisBox;
+        if (!ctor.IsDerived || (f.Flags & FrameFlags.Construct) == 0) ctor = box!.Ctor;
         bool bound = box != null ? box.Value.IsNotEmpty : !f.This.IsEmpty;
         if (bound) throw JsErrors.ReferenceError(Realm, "Super constructor may only be called once");
         f.This = result;
         if (box != null) box.Value = result;
         if (ctor.FieldInit != null) ctor.FieldInit.Call(result, ReadOnlySpan<JsValue>.Empty);
-        return result;
     }
 
     private void ClassCreate(Frame f, JsValue[] regs, int bp, int ctorDst, int protoDst, int fi, int superReg, int hasHeritage)
@@ -716,22 +835,22 @@ internal sealed partial class Vm
     private void PrivateDefine(in JsValue target, JsPrivateName name, JsValue value)
     {
         var obj = target.AsObjectUnchecked;
-        var pe = obj.PrivateElements;
-        if (pe != null && pe.ContainsKey(name))
+        if (obj.FindPrivate(name) >= 0)
             throw JsErrors.TypeError(Realm, $"Cannot initialize {name.Description} twice on the same object");
         // proposal-nonextensible-applies-to-private: private elements cannot be added to non-extensible objects
         if (!obj.IsExtensibleCheck())
             throw JsErrors.TypeError(Realm, $"Cannot define private member {name.Description} on a non-extensible object");
-        (obj.PrivateElements ??= new Dictionary<object, JsValue>(ReferenceEqualityComparer.Instance)).Add(name, value);
+        obj.AddPrivate(name, value);
     }
 
     private JsValue PrivateGet(in JsValue target, JsPrivateName name)
     {
-        if (target.IsNotObject || target.AsObjectUnchecked.PrivateElements is not { } pe || !pe.TryGetValue(name, out var v))
+        int i = target.IsNotObject ? -1 : target.AsObjectUnchecked.FindPrivate(name);
+        if (i < 0)
             throw JsErrors.TypeError(Realm, $"Cannot read private member {name.Description} from an object whose class did not declare it");
         switch (name.Kind)
         {
-            case 0: return v;
+            case 0: return target.AsObjectUnchecked.PrivateElements![i].Value;
             case 1: return JsValue.FromObject(name.Method!);
             default:
                 if (name.Getter == null) throw JsErrors.TypeError(Realm, $"'{name.Description}' was defined without a getter");
@@ -741,11 +860,12 @@ internal sealed partial class Vm
 
     private void PrivateSet(in JsValue target, JsPrivateName name, JsValue value)
     {
-        if (target.IsNotObject || target.AsObjectUnchecked.PrivateElements is not { } pe || !pe.ContainsKey(name))
+        int i = target.IsNotObject ? -1 : target.AsObjectUnchecked.FindPrivate(name);
+        if (i < 0)
             throw JsErrors.TypeError(Realm, $"Cannot write private member {name.Description} to an object whose class did not declare it");
         switch (name.Kind)
         {
-            case 0: pe[name] = value; return;
+            case 0: target.AsObjectUnchecked.PrivateElements![i].Value = value; return;
             case 1: throw JsErrors.TypeError(Realm, $"Private method {name.Description} is not writable");
             default:
                 if (name.Setter == null) throw JsErrors.TypeError(Realm, $"'{name.Description}' was defined without a setter");
@@ -776,9 +896,11 @@ internal sealed partial class Vm
     {
         var realm = Realm;
         var args = f.Args ?? Array.Empty<JsValue>();
-        var map = new int[Math.Min(args.Length, paramSlots.Length)];
-        Array.Copy(paramSlots, map, map.Length);
-        var obj = new JsMappedArguments(realm, f.Env!, map);
+        int mapLength = Math.Min(args.Length, paramSlots.Length);
+        var layout = realm.Shapes.ArgumentsLayout(args.Length, mapped: true);
+        if (layout != null)
+            return new JsMappedArguments(realm, f.Env!, paramSlots, mapLength, args.Length, layout, ArgumentsSlots(realm, args, layout, JsValue.FromObject(f.Callee)));
+        var obj = new JsMappedArguments(realm, f.Env!, paramSlots, mapLength, args.Length);
         for (int i = 0; i < args.Length; i++) obj.AddOwnProperty(PropertyKey.FromIndex((uint)i), args[i], PropFlags.Default);
         obj.AddOwnProperty("length", new JsValue(args.Length), PropFlags.Hidden);
         obj.AddOwnProperty(JsSymbol.Iterator, JsValue.FromObject(realm.ArrayProtoValues), PropFlags.Hidden);
@@ -790,45 +912,102 @@ internal sealed partial class Vm
     {
         var realm = Realm;
         var args = f.Args ?? Array.Empty<JsValue>();
-        var obj = new JsArguments(realm);
+        // CreateUnmappedArgumentsObject (strict code or non-simple parameters): callee is the %ThrowTypeError% accessor
+        var layout = realm.Shapes.ArgumentsLayout(args.Length, mapped: false);
+        if (layout != null)
+            return new JsArguments(realm, args.Length, layout, ArgumentsSlots(realm, args, layout, new JsValue(JsTag.Empty, 0, realm.ThrowTypeErrorAccessor)));
+        var obj = new JsArguments(realm, args.Length);
         for (int i = 0; i < args.Length; i++) obj.AddOwnProperty(PropertyKey.FromIndex((uint)i), args[i], PropFlags.Default);
         obj.AddOwnProperty("length", new JsValue(args.Length), PropFlags.Hidden);
         obj.AddOwnProperty(JsSymbol.Iterator, JsValue.FromObject(realm.ArrayProtoValues), PropFlags.Hidden);
-        // CreateUnmappedArgumentsObject (strict code or non-simple parameters): callee is the %ThrowTypeError% accessor
         obj.DefineAccessor("callee", realm.ThrowTypeErrorFunction, realm.ThrowTypeErrorFunction, PropFlags.None);
         return obj;
+    }
+
+    /// <summary>The slots of a fresh arguments object in the order of <see cref="ShapeFamily.ArgumentsLayout"/>.</summary>
+    private static JsValue[] ArgumentsSlots(Realm realm, JsValue[] args, Shape layout, JsValue callee)
+    {
+        var slots = new JsValue[layout.Count];
+        Array.Copy(args, slots, args.Length);
+        slots[args.Length] = new JsValue(args.Length);
+        slots[args.Length + 1] = JsValue.FromObject(realm.ArrayProtoValues);
+        slots[args.Length + 2] = callee;
+        return slots;
     }
 }
 
 internal sealed class JsArguments : JsObject
 {
-    public JsArguments(Realm realm) : base(realm, realm.ObjectPrototype) { }
+    private readonly int _argc;
+
+    public JsArguments(Realm realm, int argc) : base(realm, realm.ObjectPrototype) => _argc = argc;
+    public JsArguments(Realm realm, int argc, Shape layout, JsValue[] slots) : base(realm, layout, slots, exotic: false) => _argc = argc;
     public override string ClassName => "Arguments";
+
+    // While in shape mode slot i holds index i: a delete or an overflow of the shape limit moves the object to dictionary mode
+    public override JsValue GetIndex(uint index, JsValue receiver)
+    {
+        if (index < (uint)_argc && Dict == null && (Shape.Flags[index] & PropFlags.Accessor) == 0) return Slots[index];
+        return Get(PropertyKey.FromIndex(index), receiver);
+    }
+
+    public override bool SetIndex(uint index, JsValue value, JsValue receiver)
+    {
+        if (index < (uint)_argc && Dict == null && ReferenceEquals(receiver.Ref, this) && (Shape.Flags[index] & (PropFlags.Accessor | PropFlags.Writable)) == PropFlags.Writable)
+        {
+            Slots[index] = value;
+            return true;
+        }
+        return Set(PropertyKey.FromIndex(index), value, receiver);
+    }
 }
 
 /// <summary>Arguments exotic object with parameter map (10.4.4).</summary>
 internal sealed class JsMappedArguments : JsObject
 {
     private readonly Env _env;
-    private readonly int[] _map; // index → env slot, -1 when unmapped
+    private int[] _map; // index → env slot, -1 when unmapped; the function's shared table until something is unmapped
+    private bool _ownsMap;
+    private readonly int _mapLength;
+    private readonly int _argc;
 
-    public JsMappedArguments(Realm realm, Env env, int[] map) : base(realm, realm.ObjectPrototype, exotic: true)
+    /// <summary>For objects that are filled property by property.</summary>
+    public JsMappedArguments(Realm realm, Env env, int[] map, int mapLength, int argc) : base(realm, realm.ObjectPrototype, exotic: true)
     {
         _env = env;
         _map = map;
+        _mapLength = mapLength;
+        _argc = argc;
+    }
+
+    public JsMappedArguments(Realm realm, Env env, int[] map, int mapLength, int argc, Shape layout, JsValue[] slots) : base(realm, layout, slots, exotic: true)
+    {
+        _env = env;
+        _map = map;
+        _mapLength = mapLength;
+        _argc = argc;
     }
 
     public override string ClassName => "Arguments";
 
+    /// <summary>Only the index keys go through the parameter map; the rest (length, callee, ...) behave as on an ordinary object.</summary>
+    internal override bool CanCacheNamed(in PropertyKey key) => !key.TryGetArrayIndex(out _) && !Shape.IsUnique;
+
     private int MappedSlot(in PropertyKey key)
     {
-        if (!key.TryGetArrayIndex(out uint i) || i >= (uint)_map.Length) return -1;
+        if (!key.TryGetArrayIndex(out uint i) || i >= (uint)_mapLength) return -1;
         return _map[i];
     }
 
     private void Unmap(in PropertyKey key)
     {
-        if (key.TryGetArrayIndex(out uint i) && i < (uint)_map.Length) _map[i] = -1;
+        if (!key.TryGetArrayIndex(out uint i) || i >= (uint)_mapLength) return;
+        if (!_ownsMap)
+        {
+            _map = (int[])_map.Clone();
+            _ownsMap = true;
+        }
+        _map[i] = -1;
     }
 
     public override bool GetOwnProperty(in PropertyKey key, out PropertyDescriptor desc)
@@ -881,6 +1060,31 @@ internal sealed class JsMappedArguments : JsObject
         return ok;
     }
 
-    public override JsValue GetIndex(uint index, JsValue receiver) => Get(PropertyKey.FromIndex(index), receiver);
-    public override bool SetIndex(uint index, JsValue value, JsValue receiver) => Set(PropertyKey.FromIndex(index), value, receiver);
+    // While in shape mode slot i holds index i: a delete or an overflow of the shape limit moves the object to dictionary mode.
+    // An index stays mapped only while it is a writable data property (DefineOwnProperty unmaps otherwise).
+    public override JsValue GetIndex(uint index, JsValue receiver)
+    {
+        if (index < (uint)_mapLength)
+        {
+            int slot = _map[index];
+            if (slot >= 0) return _env.Slots[slot];
+        }
+        if (index < (uint)_argc && Dict == null && (Shape.Flags[index] & PropFlags.Accessor) == 0) return Slots[index];
+        return OrdinaryGet(PropertyKey.FromIndex(index), receiver);
+    }
+
+    public override bool SetIndex(uint index, JsValue value, JsValue receiver)
+    {
+        if (index < (uint)_argc && Dict == null && ReferenceEquals(receiver.Ref, this) && (Shape.Flags[index] & (PropFlags.Accessor | PropFlags.Writable)) == PropFlags.Writable)
+        {
+            if (index < (uint)_mapLength)
+            {
+                int slot = _map[index];
+                if (slot >= 0) _env.Slots[slot] = value;
+            }
+            Slots[index] = value;
+            return true;
+        }
+        return Set(PropertyKey.FromIndex(index), value, receiver);
+    }
 }

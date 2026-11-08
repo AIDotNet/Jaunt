@@ -174,7 +174,7 @@ internal sealed partial class Vm
                 var arr = ((JsArray)regs[bp + code[pc + 4]].Ref!);
                 int dst = bp + code[pc + 1];
                 f.Pc = pc + 5;
-                regs[dst] = CallValue(fv, tr < 0 ? default : regs[bp + tr], new ReadOnlySpan<JsValue>(arr.Items, 0, (int)arr.Length));
+                regs[dst] = CallValue(fv, tr < 0 ? default : regs[bp + tr], arr.ContiguousElements());
                 return pc + 5;
             }
             case Op.NewSpread:
@@ -183,15 +183,7 @@ internal sealed partial class Vm
                 var arr = ((JsArray)regs[bp + code[pc + 3]].Ref!);
                 int dst = bp + code[pc + 1];
                 f.Pc = pc + 4;
-                regs[dst] = Construct(fv, new ReadOnlySpan<JsValue>(arr.Items, 0, (int)arr.Length));
-                return pc + 4;
-            }
-            case Op.SuperCall:
-            {
-                int dst = bp + code[pc + 1];
-                var args = new ReadOnlySpan<JsValue>(regs, bp + code[pc + 2], code[pc + 3]);
-                f.Pc = pc + 4;
-                regs[dst] = SuperCall(f, args);
+                regs[dst] = Construct(fv, arr.ContiguousElements());
                 return pc + 4;
             }
             case Op.SuperCallSpread:
@@ -199,9 +191,13 @@ internal sealed partial class Vm
                 int dst = bp + code[pc + 1];
                 var arr = ((JsArray)regs[bp + code[pc + 2]].Ref!);
                 f.Pc = pc + 3;
-                regs[dst] = SuperCall(f, new ReadOnlySpan<JsValue>(arr.Items, 0, (int)arr.Length));
+                regs[dst] = SuperConstruct(f, arr.ContiguousElements());
                 return pc + 3;
             }
+            case Op.SuperBind:
+                f.Pc = pc + 2;
+                SuperBind(f, regs[bp + code[pc + 1]]);
+                return pc + 2;
 
             // ------------------------------------------------------------ classes and private names
             case Op.ClassCreate:
@@ -249,7 +245,7 @@ internal sealed partial class Vm
                 var ov = regs[bp + code[pc + 2]];
                 if (ov.IsNotObject) throw JsErrors.TypeError(realm, "Cannot use 'in' operator to search for a private field in a non-object");
                 var name = (JsPrivateName)regs[bp + code[pc + 3]].Ref!;
-                regs[bp + code[pc + 1]] = JsValue.FromBool(ov.AsObjectUnchecked.PrivateElements?.ContainsKey(name) == true);
+                regs[bp + code[pc + 1]] = JsValue.FromBool(ov.AsObjectUnchecked.FindPrivate(name) >= 0);
                 return pc + 4;
             }
 

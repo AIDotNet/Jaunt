@@ -121,7 +121,31 @@ internal sealed class JsProxy : JsObject
         return t;
     }
 
-    private JsValue CallTrap(JsObject handler, JsValue trap, params JsValue[] args) => Realm.Vm.Call(trap, JsValue.FromObject(handler), args);
+    private JsValue CallTrap(JsObject handler, JsValue trap, JsValue a0) => Realm.Vm.Call(trap, JsValue.FromObject(handler), new ReadOnlySpan<JsValue>(in a0));
+
+    private JsValue CallTrap(JsObject handler, JsValue trap, JsValue a0, JsValue a1)
+    {
+        TrapArgs args = default;
+        args[0] = a0; args[1] = a1;
+        return Realm.Vm.Call(trap, JsValue.FromObject(handler), ((ReadOnlySpan<JsValue>)args).Slice(0, 2));
+    }
+
+    private JsValue CallTrap(JsObject handler, JsValue trap, JsValue a0, JsValue a1, JsValue a2)
+    {
+        TrapArgs args = default;
+        args[0] = a0; args[1] = a1; args[2] = a2;
+        return Realm.Vm.Call(trap, JsValue.FromObject(handler), ((ReadOnlySpan<JsValue>)args).Slice(0, 3));
+    }
+
+    private JsValue CallTrap(JsObject handler, JsValue trap, JsValue a0, JsValue a1, JsValue a2, JsValue a3)
+    {
+        TrapArgs args = default;
+        args[0] = a0; args[1] = a1; args[2] = a2; args[3] = a3;
+        return Realm.Vm.Call(trap, JsValue.FromObject(handler), args);
+    }
+
+    [System.Runtime.CompilerServices.InlineArray(4)]
+    private struct TrapArgs { private JsValue _first; }
 
     public override JsObject? GetPrototypeOf()
     {

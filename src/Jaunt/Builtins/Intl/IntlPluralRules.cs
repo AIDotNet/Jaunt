@@ -19,6 +19,25 @@ internal sealed unsafe class IcuPluralRules
 
     private IcuPluralRules(nint ptr, string[] categories) { Ptr = ptr; Categories = categories; }
 
+    private string?[]? _smallIntegers;   // racing threads store equal strings
+
+    /// <summary>
+    /// The category of a non-negative integer with no visible fraction digits, straight from the rules. Rules are pure and
+    /// counts are usually small, so the small ones are remembered.
+    /// </summary>
+    public unsafe string SelectInteger(double n)
+    {
+        int index = n < 1024 ? (int)n : -1;
+        if (index >= 0 && _smallIntegers?[index] is { } known) return known;
+        char* buf = stackalloc char[16];
+        int err = 0;
+        int len = IcuNum.uplrules_select(Ptr, n, buf, 16, &err);
+        GC.KeepAlive(this);
+        var category = Icu.Failure(err) ? "other" : JsPluralRules.Category(buf, len);
+        if (index >= 0) (_smallIntegers ??= new string?[1024])[index] = category;
+        return category;
+    }
+
     ~IcuPluralRules()
     {
         if (Ptr != 0) IcuNum.uplrules_close(Ptr);
@@ -54,6 +73,8 @@ internal sealed class JsPluralRules : JsObject
     public NumberDigitOptions Digits = null!;
     public IcuNumberFormatter Formatter = null!;
     public IcuPluralRules Rules = null!;
+    /// <summary>Standard notation and <see cref="NumberDigitOptions.WritesIntegersAsIs"/>: an integer's operands are the value itself.</summary>
+    public bool PlainIntegers;
 
     public JsPluralRules(Realm realm, JsObject proto) : base(realm, proto) { }
 
@@ -61,6 +82,8 @@ internal sealed class JsPluralRules : JsObject
     public unsafe string Select(double n)
     {
         if (!double.IsFinite(n)) return "other";
+        // The formatted form only adds visible fraction digits, a scale or an exponent; without those the rules read the value.
+        if (PlainIntegers && n >= 0 && n <= int.MaxValue && n == Math.Floor(n) && !double.IsNegative(n)) return Rules.SelectInteger(n);
         var result = IcuNumberFormatter.NumberResult;
         int err = 0;
         IcuNum.unumf_formatDouble(Formatter.Ptr, n, result, &err);
@@ -87,7 +110,7 @@ internal sealed class JsPluralRules : JsObject
         return Category(buf, len);
     }
 
-    private static unsafe string Category(char* p, int len)
+    internal static unsafe string Category(char* p, int len)
     {
         var span = new ReadOnlySpan<char>(p, len);
         return span switch
@@ -183,5 +206,6 @@ internal static partial class IntlBuiltins
         sb.Append(" group-off");
         pr.Formatter = IcuNumberFormatter.Get(icuLocale, sb.ToString()) ?? throw JsErrors.RangeError(realm, "Unsupported plural rules options");
         pr.Rules = IcuPluralRules.Get(icuLocale, pr.Type == "ordinal");
+        pr.PlainIntegers = notation == "standard" && pr.Digits.WritesIntegersAsIs;
     }
 }

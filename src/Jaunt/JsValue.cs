@@ -35,12 +35,12 @@ public readonly struct JsValue : IEquatable<JsValue>
     // Layout (16 bytes): a GC-visible reference field plus a 64-bit payload that never contains references.
     //   Bits in [0, 15]  → non-number tag (0 undefined, 1 null, 2 false, 8 true, 3 bigint, 4 string, 5 symbol, 6 object, 7 empty)
     //   Bits  > 15       → a number; Bits = IEEE754(d) XOR NumberXor. The XOR keeps default(JsValue) == undefined and
-    //                      maps the tag range onto NaN payloads (0x7FF8_0000_0000_0010..1F) that are canonicalized away
+    //                      maps the tag range onto NaN payloads (0x7FFF_FFFF_FFFF_FFF0..FF) that are canonicalized away
     //                      at every boundary where arbitrary double bits can enter.
     internal readonly object? Ref;
     internal readonly ulong Bits;
 
-    internal const ulong NumberXor = 0x7FF8_0000_0000_0010UL;
+    internal const ulong NumberXor = 0x7FFF_FFFF_FFFF_FFF0UL;
     internal const ulong UndefinedBits = 0, NullBits = 1, FalseBits = 2, BigIntBits = 3, StringBits = 4, SymbolBits = 5, ObjectBits = 6, EmptyBits = 7, TrueBits = 8;
     private static ReadOnlySpan<byte> TagMap => new byte[] { 0, 1, 2, 8, 4, 5, 6, 7, 2, 7, 7, 7, 7, 7, 7, 7 };
 
@@ -58,6 +58,17 @@ public readonly struct JsValue : IEquatable<JsValue>
     }
 
     internal bool IsTrue => Bits == TrueBits;
+
+    /// <summary>
+    /// <c>slot = value</c> that skips the GC write barrier when the value holds no reference: storing a null never needs
+    /// one, and the barrier (a call, a store-release and several loads of GC globals) is a large part of copying a number.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal static void Store(ref JsValue slot, in JsValue value)
+    {
+        if (value.Ref == null) slot = new JsValue((object?)null, value.Bits);
+        else slot = value;
+    }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private JsValue(object? reference, ulong bits)

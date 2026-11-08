@@ -135,6 +135,9 @@ internal sealed partial class Realm
     public JsBuiltin? MapProtoEntries, MapIteratorNext, SetProtoValues, SetIteratorNext;
     public JsBuiltin? StringProtoIterator, StringIteratorNext;
     private JsBuiltin? _throwTypeErrorFunction;
+    /// <summary>The callee accessor of every unmapped arguments object (non-configurable, so no one can replace its functions).</summary>
+    internal Accessor ThrowTypeErrorAccessor => _throwTypeErrorAccessor ??= new Accessor(ThrowTypeErrorFunction, ThrowTypeErrorFunction);
+    private Accessor? _throwTypeErrorAccessor;
     public JsBuiltin ThrowTypeErrorFunction { get => _throwTypeErrorFunction ?? Ensure(IntrinsicGroup.Function)._throwTypeErrorFunction!; set => _throwTypeErrorFunction = value; }
     private JsBuiltin? _evalFunction;
     public JsBuiltin EvalFunction { get => _evalFunction ?? Ensure(IntrinsicGroup.Globals)._evalFunction!; set => _evalFunction = value; }
@@ -150,6 +153,8 @@ internal sealed partial class Realm
     /// <summary>Prototype-mutation epoch; shared by every realm on the Vm so ICs see cross-realm prototype changes.</summary>
     public ref int ProtoEpoch => ref Vm.ProtoEpoch;
 
+    /// <summary>See <see cref="ShapeFamily"/>.</summary>
+    public readonly ShapeFamily Shapes;
     public Shape ObjectRootShape = null!;
     public Shape IterResultShape = null!;
     public Shape JsonContextShape = null!;
@@ -307,6 +312,7 @@ internal sealed partial class Realm
     {
         Hardened = hardened;
         Budget = parent?.Budget ?? new ByteBudget();
+        Shapes = parent == null ? ShapeFamily.Process : new ShapeFamily();
         if (parent == null)
         {
             Vm = new Vm(this);
@@ -378,23 +384,24 @@ internal sealed partial class Realm
     public Shape RootShapeFor(JsObject? proto)
     {
         if (proto == null) return _nullRoot ??= Shape.CreateRoot(null);
-        if (ReferenceEquals(proto, _objectPrototype)) return Shape.SharedObjectRoot;
-        if (ReferenceEquals(proto, _functionPrototype)) return Shape.SharedFunctionRoot;
-        if (ReferenceEquals(proto, _arrayPrototype)) return Shape.SharedArrayRoot;
-        var s = proto.ChildRootShape;
+        if (ReferenceEquals(proto, _objectPrototype)) return Shapes.ObjectRoot;
+        if (ReferenceEquals(proto, _functionPrototype)) return Shapes.FunctionRoot;
+        if (ReferenceEquals(proto, _arrayPrototype)) return Shapes.ArrayRoot;
+        var s = proto.Extras?.ChildRootShape;
         if (s != null) return s;
         proto.IsPrototypeObject = true;
-        return proto.ChildRootShape = Shape.CreateRoot(proto);
+        return (proto.Extras ??= new ObjectExtras()).ChildRootShape = Shape.CreateRoot(proto);
     }
 
     private Shape? _nullRoot;
 
     public Shape FunctionShapeFor(JsObject proto)
     {
-        if (ReferenceEquals(proto, _functionPrototype)) return Shape.SharedFunctionShape;
-        var s = proto.FunctionChildShape;
+        if (ReferenceEquals(proto, _functionPrototype)) return Shapes.Function;
+        var s = proto.Extras?.FunctionChildShape;
         if (s != null) return s;
-        return proto.FunctionChildShape = RootShapeFor(proto).AddProperty("length", PropFlags.Configurable)!.AddProperty("name", PropFlags.Configurable)!;
+        var shape = RootShapeFor(proto).AddProperty("length", PropFlags.Configurable)!.AddProperty("name", PropFlags.Configurable)!;
+        return (proto.Extras ??= new ObjectExtras()).FunctionChildShape = shape;
     }
 
     /// <summary>Resolves a shared shape's prototype role to this realm's intrinsic.</summary>

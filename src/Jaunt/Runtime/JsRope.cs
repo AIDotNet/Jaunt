@@ -1,6 +1,7 @@
 using System.Threading;
 using System;
 using System.Collections.Generic;
+using System.Runtime.CompilerServices;
 
 namespace Jaunt.Runtime;
 
@@ -32,6 +33,7 @@ internal sealed class JsRope
         Length = length;
     }
 
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static int LengthOf(object part) => part is string s ? s.Length : ((JsRope)part).Length;
 
     /// <summary>
@@ -52,39 +54,45 @@ internal sealed class JsRope
         return flat;
     }
 
-    /// <summary>Writes the characters right-to-left with an explicit stack, so a chain of any depth cannot overflow.</summary>
+    /// <summary>
+    /// Writes the characters right-to-left. An append chain (<c>s += x</c>: flat right children) needs no stack at all, so it
+    /// walks straight down the left spine; a pending left child goes on an explicit stack only when the right child is itself
+    /// a rope, so a chain of any depth cannot overflow.
+    /// </summary>
     private static void Fill(Span<char> span, JsRope root)
     {
         int pos = span.Length;
-        var stack = new Stack<object>();
-        stack.Push(root);
-        while (stack.Count > 0)
+        Stack<object>? stack = null;
+        object node = root;
+        while (true)
         {
-            var node = stack.Pop();
-            if (node is string s)
+            if (node is JsRope r)
             {
-                pos -= s.Length;
-                s.AsSpan().CopyTo(span.Slice(pos));
-            }
-            else
-            {
-                var r = (JsRope)node;
                 var left = Volatile.Read(ref r._left);
                 var right = Volatile.Read(ref r._right);
                 var f = Volatile.Read(ref r._flat);
-                if (f != null || left == null || right == null)
+                if (f == null && left != null && right != null)
                 {
-                    // flattened (possibly by another thread just now): children are released only after _flat is set
-                    f ??= Volatile.Read(ref r._flat)!;
-                    pos -= f.Length;
-                    f.AsSpan().CopyTo(span.Slice(pos));
+                    if (right is string rs)
+                    {
+                        pos -= rs.Length;
+                        rs.AsSpan().CopyTo(span.Slice(pos));
+                        node = left;
+                    }
+                    else
+                    {
+                        (stack ??= new Stack<object>()).Push(left);   // popped once the right side is written: we fill from the end
+                        node = right;
+                    }
+                    continue;
                 }
-                else
-                {
-                    stack.Push(left);    // popped second
-                    stack.Push(right);   // popped first: we fill from the end
-                }
+                // flattened (possibly by another thread just now): children are released only after _flat is set
+                node = f ?? Volatile.Read(ref r._flat)!;
             }
+            var s = (string)node;
+            pos -= s.Length;
+            s.AsSpan().CopyTo(span.Slice(pos));
+            if (stack == null || !stack.TryPop(out node!)) return;
         }
     }
 

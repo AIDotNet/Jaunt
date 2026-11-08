@@ -29,6 +29,19 @@ internal sealed partial class CodeGen
             if (op != null && be.Left is not PrivateIdentifier)
             {
                 int m = Mark;
+                if (ImmediateForm(be) is { } imm && TryInt32Literal(be.Right, out int k))
+                {
+                    _fb.JumpCmp(imm, Expr(be.Left), k, falseLabel);
+                    ResetTo(m);
+                    return;
+                }
+                if (op is Op.StrictEqJmpFalse or Op.StrictNeJmpFalse && LiteralConstant(be.Right) is { } lit)
+                {
+                    int l = Expr(be.Left);
+                    _fb.JumpCmp(op == Op.StrictEqJmpFalse ? Op.StrictEqKJmpFalse : Op.StrictNeKJmpFalse, l, lit, falseLabel);
+                    ResetTo(m);
+                    return;
+                }
                 var (a, b) = Operands(be.Left, be.Right);
                 _fb.JumpCmp(op.Value, a, b, falseLabel);
                 ResetTo(m);
@@ -66,6 +79,48 @@ internal sealed partial class CodeGen
         int r = Expr(test);
         _fb.JumpIf(Op.JmpFalse, r, falseLabel);
         ResetTo(mm);
+    }
+
+    /// <summary>
+    /// The instruction for <paramref name="be"/> with a literal int32 right operand, when there is one: a function's
+    /// <c>n - 1</c> and <c>n &lt; 2</c> would otherwise spend a dispatch and a register to materialize the literal. The right operand
+    /// has no effects to order against the left's, and the instruction's slow path sees the same two values.
+    /// </summary>
+    private static Op? ImmediateForm(BinaryExpression be)
+    {
+        if (be is LogicalExpression || !TryInt32Literal(be.Right, out _)) return null;
+        return be.Operator switch
+        {
+            Operator.Addition => Op.AddI,
+            Operator.Subtraction => Op.SubI,
+            Operator.LessThan => Op.LtIJmpFalse,
+            Operator.LessThanOrEqual => Op.LeIJmpFalse,
+            Operator.GreaterThan => Op.GtIJmpFalse,
+            Operator.GreaterThanOrEqual => Op.GeIJmpFalse,
+            _ => null,
+        };
+    }
+
+    /// <summary>
+    /// The constant of a string or number literal, for the compare-and-jump instructions that take one (<c>x === 'a'</c>, a
+    /// switch case): nothing to order against the left operand, and no dispatch and GC write barrier to bring it into a register.
+    /// </summary>
+    private int? LiteralConstant(Expression e) => e switch
+    {
+        StringLiteral s => _fb.Const(s.Value),
+        NumericLiteral n => _fb.Const(n.Value),
+        _ => null,
+    };
+
+    /// <summary>A numeric literal an int32 holds exactly (not -0, which has no int32 form).</summary>
+    private static bool TryInt32Literal(Expression e, out int value)
+    {
+        value = 0;
+        if (e is not NumericLiteral n) return false;
+        double v = n.Value;
+        if (v != Math.Floor(v) || v < int.MinValue || v > int.MaxValue || (v == 0 && double.IsNegative(v))) return false;
+        value = (int)v;
+        return true;
     }
 
     /// <summary>Evaluates two operands left-to-right, protecting the left value from being clobbered by the right.</summary>
@@ -375,7 +430,7 @@ internal sealed partial class CodeGen
     private int ObjectLiteral(ObjectExpression oe, int dst)
     {
         int d = Dst(dst);
-        _fb.Emit(Op.NewObject, d);
+        _fb.Emit(Op.NewObject, d, Math.Min(oe.Properties.Count, Jaunt.Runtime.Shape.MaxShapeProperties));   // slots to start with
         foreach (var p in oe.Properties)
         {
             int m = Mark;
@@ -401,14 +456,15 @@ internal sealed partial class CodeGen
             }
             else if (prop.Method)
             {
-                int key = Temp();
-                LoadKey(prop, key);
+                int key = staticName == null ? Temp() : -1;
+                if (staticName == null) LoadKey(prop, key);
                 int fn = Temp();
                 int idx = CompileNestedFunction((FunctionExpression)prop.Value, staticName ?? "", FunctionFlags.Method, prop.Start);
                 _fb.Emit(Op.Closure, fn, idx);
                 _fb.Emit(Op.SetHomeObject, fn, d);
                 // computed method keys (incl. symbols) name the function at run time
-                _fb.Emit(Op.DefineAccessor, d, key, fn, 2 | 4 | (staticName == null ? 8 : 0));
+                if (staticName != null) _fb.Emit(Op.DefinePropK, d, _fb.Const(staticName), fn, _fb.NewIc());
+                else _fb.Emit(Op.DefineAccessor, d, key, fn, 2 | 4 | 8);
             }
             else if (staticName != null)
             {
@@ -420,7 +476,7 @@ internal sealed partial class CodeGen
                 else
                 {
                     int v = Expr((Expression)prop.Value, -1, staticName);
-                    _fb.Emit(Op.DefinePropK, d, _fb.Const(staticName), v);
+                    _fb.Emit(Op.DefinePropK, d, _fb.Const(staticName), v, _fb.NewIc());
                 }
             }
             else
@@ -588,7 +644,15 @@ internal sealed partial class CodeGen
         }
         int m = Mark;
         var op = BinaryOp(be.Operator, be);
-        // constant folding of `x + k` for number constants
+        if (op is Op.Add or Op.Sub && TryInt32Literal(be.Right, out int k))
+        {
+            int l = Expr(be.Left);
+            int di = dst >= 0 ? dst : Temp();
+            if (dst < 0 && di != m) { ResetTo(m); di = Temp(); }
+            _fb.Emit(op == Op.Add ? Op.AddI : Op.SubI, di, l, k);
+            ResetTo(Math.Max(m, di + 1));
+            return di;
+        }
         var (a, b) = Operands(be.Left, be.Right);
         int d = dst >= 0 ? dst : Temp();
         if (dst < 0 && d != m) { ResetTo(m); d = Temp(); }
@@ -944,6 +1008,7 @@ internal sealed partial class CodeGen
                 _fb.Position(call);
                 _fb.Emit(Op.SuperCall, d, start, call.Arguments.Count);
             }
+            _fb.Emit(Op.SuperBind, d);
             ResetTo(Math.Max(m, d + 1));
             return d;
         }
@@ -1880,11 +1945,10 @@ internal sealed partial class CodeGen
         _fb = FunctionBuilder.Rent();
         if ((flags & FunctionFlags.Derived) != 0)
         {
-            t.Flags |= FunctionFlags.NeedsArgsArray | FunctionFlags.HasRest;
-            t.RestIndex = 0;
-            int arr = _fb.AllocReg(), d = _fb.AllocReg();
-            _fb.Emit(Op.CreateRestArray, arr, 0);
-            _fb.Emit(Op.SuperCallSpread, d, arr);
+            t.Flags |= FunctionFlags.NeedsArgsArray;
+            int d = _fb.AllocReg();
+            _fb.Emit(Op.SuperCall, d, d, -1);   // forwards the arguments of the frame
+            _fb.Emit(Op.SuperBind, d);
         }
         _fb.Emit(Op.RetUndef);
         _fb.Finish(t);

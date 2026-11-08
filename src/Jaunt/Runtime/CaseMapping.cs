@@ -15,6 +15,9 @@ internal static partial class CaseMapping
 
     public static string ToLower(string s)
     {
+        // Pure ASCII (nearly every string): one vectorized scan, then one vectorized copy into the exact-size result.
+        if (Ascii.IsValid(s))
+            return s.AsSpan().IndexOfAnyInRange('A', 'Z') < 0 ? s : string.Create(s.Length, s, static (dest, src) => Ascii.ToLower(src, dest, out _));
         int i = 0;
         // ASCII fast path: nothing to do until the first upper-case or non-ASCII char
         for (; i < s.Length; i++)
@@ -41,6 +44,8 @@ internal static partial class CaseMapping
 
     public static string ToUpper(string s)
     {
+        if (Ascii.IsValid(s))
+            return s.AsSpan().IndexOfAnyInRange('a', 'z') < 0 ? s : string.Create(s.Length, s, static (dest, src) => Ascii.ToUpper(src, dest, out _));
         int i = 0;
         for (; i < s.Length; i++)
         {

@@ -283,11 +283,12 @@ internal static class ObjectBuiltins
         var result = realm.NewArray();
         if (o is JsArray arr && arr.Dense && kind == 0 && arr.Shape.Count == 0)
         {
+            arr.LeaveQueueMode();
             for (uint i = 0; i < arr.Length && i < (uint)arr.Items.Length; i++)
                 if (arr.Items[i].IsNotEmpty) result.Push(new JsValue(PropertyKey.IndexToString(i)));
             return JsValue.FromObject(result);
         }
-        if (!o.IsExotic && o.Dict == null && !o.Shape.HasIndexKeys && !o.Shape.HasSpecialProps)
+        if (!o.IsExotic && o.Dict == null && !o.Shape.HasIndexKeys && !o.Shape.HasAccessors)
         {
             // fast path: ordinary shape-mode object with only plain data properties
             var shape = o.Shape;
@@ -336,6 +337,13 @@ internal static class ObjectBuiltins
     private static JsValue OwnKeysArray(Realm realm, JsValue v, bool strings)
     {
         var o = Operations.ToObject(realm, v);
+        if (o.GetType() == typeof(JsObject) && o.Dict == null && !o.Shape.HasIndexKeys)
+        {
+            var shape = o.Shape;
+            var names = realm.NewArray(shape.Count);
+            for (int i = 0; i < shape.Count; i++) if (shape.Keys[i].IsString == strings) names.Push(shape.Keys[i].ToJsValue());
+            return JsValue.FromObject(names);
+        }
         var keys = new List<PropertyKey>();
         o.OwnPropertyKeys(keys);
         var result = realm.NewArray(keys.Count);
@@ -359,6 +367,11 @@ internal static class ObjectBuiltins
 
     public static bool SetIntegrityLevel(Realm realm, JsObject o, bool frozen)
     {
+        if (o.GetType() == typeof(JsObject) && o.Dict == null && o.Shape.WithIntegrity(frozen) is { } shape)
+        {
+            o.Shape = shape;
+            return o.PreventExtensions();   // an object used as a prototype invalidates the prototype ICs here
+        }
         if (!o.PreventExtensions()) return false;
         var keys = new List<PropertyKey>();
         o.OwnPropertyKeys(keys);
@@ -382,6 +395,7 @@ internal static class ObjectBuiltins
     public static bool TestIntegrityLevel(JsObject o, bool frozen)
     {
         if (o.IsExtensibleCheck()) return false;
+        if (o.GetType() == typeof(JsObject) && o.Dict == null) return o.Shape.HasIntegrity(frozen);
         var keys = new List<PropertyKey>();
         o.OwnPropertyKeys(keys);
         foreach (var k in keys)
