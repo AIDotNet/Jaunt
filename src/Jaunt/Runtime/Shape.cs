@@ -38,7 +38,8 @@ internal sealed class Shape
     /// <summary>True when any property is an accessor or non-writable (affects set fast paths).</summary>
     public readonly bool HasSpecialProps;
 
-    private Dictionary<PropertyKey, int>? _index;
+    /// <summary>Open-addressed key table (slot + 1, 0 = empty) of a shape too large for the linear scan.</summary>
+    private byte[]? _index;
     private Shape? _t1;
     private Dictionary<(PropertyKey, PropFlags), Shape>? _transitions;
     private object? _lock;
@@ -124,12 +125,17 @@ internal sealed class Shape
 
     private int IndexOfSlow(in PropertyKey key)
     {
-        var index = Volatile.Read(ref _index);
-        if (index == null)
+        var index = Volatile.Read(ref _index) ?? BuildIndex();
+        var keys = Keys;
+        object kv = key.Value;
+        int mask = index.Length - 1;
+        for (int h = PropertyKey.CheapHash(kv) & mask; ; h = (h + 1) & mask)
         {
-            index = new Dictionary<PropertyKey, int>(Count, PropertyKeyComparer.Instance);
-            for (int i = 0; i < Count; i++) index[Keys[i]] = i;
-            Volatile.Write(ref _index, index);
+            int e = index[h];
+            if (e == 0) return -1;
+            object c = keys[e - 1].Value;
+            if (ReferenceEquals(c, kv)) return e - 1;
+            if (kv is string ks && c is string s && s.Length == ks.Length && string.Equals(s, ks)) return e - 1;
         }
         return index.TryGetValue(key, out int slot) ? slot : -1;
     }
@@ -194,6 +200,14 @@ internal sealed class Shape
         bool special = HasSpecialProps || (flags & (PropFlags.Accessor | PropFlags.Writable)) != PropFlags.Writable;
         return new Shape(Prototype, Role, Count + 1, keys, fl, false, HasIndexKeys || isIndex, HasSymbolKeys || key.IsSymbol, special);
     }
+}
+
+/// <summary>Keys the transition table of a shared shape, whose size is bounded by <see cref="Shape.MaxTransitionsPerSharedShape"/>.</summary>
+internal sealed class TransitionComparer : IEqualityComparer<(PropertyKey Key, PropFlags Flags)>
+{
+    public static readonly TransitionComparer Instance = new();
+    public bool Equals((PropertyKey Key, PropFlags Flags) x, (PropertyKey Key, PropFlags Flags) y) => x.Flags == y.Flags && x.Key.Equals(y.Key);
+    public int GetHashCode((PropertyKey Key, PropFlags Flags) t) => PropertyKey.CheapHash(t.Key.Value) + (int)t.Flags;
 }
 
 /// <summary>Ordered property table used by dictionary-mode objects.</summary>

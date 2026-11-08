@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Runtime.CompilerServices;
+using System.Threading;
 
 namespace Jaunt.Runtime;
 
@@ -10,11 +11,15 @@ internal sealed class JsSymbol
     public readonly string? Description;
     /// <summary>Registry key for Symbol.for symbols; null otherwise.</summary>
     public readonly string? RegistryKey;
+    /// <summary>Identity hash, assigned up front (the CLR's object hash takes a thread-static and a header update).</summary>
+    public readonly int Hash;
+    private static int s_nextHash;
 
     public JsSymbol(string? description, string? registryKey = null)
     {
         Description = description;
         RegistryKey = registryKey;
+        Hash = Interlocked.Add(ref s_nextHash, unchecked((int)0x9E3779B1));
     }
 
     public override string ToString() => "Symbol(" + Description + ")";
@@ -65,7 +70,24 @@ internal readonly struct PropertyKey : IEquatable<PropertyKey>
     }
 
     public override bool Equals(object? obj) => obj is PropertyKey k && Equals(k);
-    public override int GetHashCode() => Value is string s ? s.GetHashCode() : RuntimeHelpers.GetHashCode(Value);
+    public override int GetHashCode() => Value is string s ? s.GetHashCode() : ((JsSymbol)Value).Hash;
+
+    /// <summary>
+    /// A hash for tables that hold a small bounded number of keys. It samples a string, so scripts can make keys collide;
+    /// a table open to any number of script-chosen keys needs <see cref="GetHashCode"/> (seeded) instead.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal static int CheapHash(object key)
+    {
+        if (key is string s)
+        {
+            int n = s.Length;
+            if (n == 0) return 0;
+            int h = (s[0] * 31 + s[n - 1]) * 31 + s[n >> 1] + n * 7;
+            return h ^ (h >> 7);
+        }
+        return ((JsSymbol)key).Hash >> 16;
+    }
     public override string ToString() => Value is string s ? s : Value.ToString()!;
 
     public JsValue ToJsValue() => Value is string s ? new JsValue(s) : JsValue.FromSymbol((JsSymbol)Value);
