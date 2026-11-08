@@ -20,4 +20,8 @@
   <ItemGroup>
     <ProjectReference Include="../../src/Jaunt/Jaunt.csproj" />
   </ItemGroup>
+  <ItemGroup>
+    <!-- cross-engine measurement protocol shared with samples/Jaunt.AotHost -->
+    <Compile Include="../cross/dotnet/CrossProtocol.cs" Link="CrossProtocol.cs" />
+  </ItemGroup>
 </Project>

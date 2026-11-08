@@ -340,96 +340,78 @@ bench` as the published NativeAOT binary (`PublishAot=true`, 7.1 MB, osx-arm64) 
 (`bench/cross/dotnet/CrossProtocol.cs`: compile, cold call checked against Node, warm-up until the tiers settle, 7 samples of
 ~60 ms, wall and CPU time per call). Script: `bench/cross/aot-vs-jit.sh`; raw results `artifacts/cross/jaunt-{aot,jit}.jsonl`.
 
-Environment: Apple M4 developer workstation (load average ~3 during the run), .NET SDK 10.0.300; CoreCLR runtime
-**10.0.8**, ILCompiler/runtime pack **10.0.14** for the native binary — the two sides therefore run slightly different BCL
-builds. The host sets `InvariantGlobalization=true`, so `String.prototype.normalize` is a no-op for non-ASCII text on both
-sides (`strings/unicode-text` is flagged `mismatch` against Node on both for that reason; its timings are still comparable
-between AOT and JIT). Engine source as of this commit plus the uncommitted working tree of that day. 59 workloads, one pass.
+Environment: Apple M4 developer workstation (load average ~3; other builds ran on the machine during the first AOT pass, so
+the AOT side is the best of two passes), .NET SDK 10.0.300; CoreCLR runtime **10.0.8**, ILCompiler/runtime pack **10.0.14**
+for the native binary — the two sides therefore run slightly different BCL builds. The host sets
+`InvariantGlobalization=true`, so `String.prototype.normalize` is a no-op for non-ASCII text on both sides
+(`strings/unicode-text` is flagged `mismatch` against Node on both for that reason; its timings are still comparable between
+AOT and JIT). Engine source as of this commit plus the uncommitted working tree of that day. 59 workloads.
 
 | Geometric mean, AOT time / JIT time | |
 | --- | ---: |
-| warm per-call wall time | **1.10** |
-| warm per-call CPU time | 1.10 |
-| cold (new engine + load + first call) | **0.70** |
+| warm per-call wall time | **1.08** |
+| warm per-call CPU time | 1.09 |
+| cold (new engine + load + first call) | **0.69** |
 | bytes allocated per call | 1.00 |
 
-Per category (warm): strings 1.04, collections 1.07, async 1.08, apps 1.08, compute 1.09, objects 1.12, advanced 1.13,
-functional 1.26. 20 of 59 workloads were within ±3% either way; AOT was faster on 14 (best: compute/float-loop 0.94,
+Per category (warm): strings 1.04, compute 1.05, collections 1.07, async 1.08, apps 1.08, objects 1.12, advanced 1.13,
+functional 1.14. 20 of 59 workloads were within ±3% either way; AOT was faster on 14 (best: compute/float-loop 0.94,
 compute/matmul 0.96, strings/string-hash-codec 0.97, apps/huffman-lz 0.98).
 
 Largest gaps:
 
 | Workload | JIT | NativeAOT | AOT/JIT |
 | --- | ---: | ---: | ---: |
-| compute/fib | 3.05 ms | 6.16 ms | 2.02 |
-| functional/control-flow | 4.37 ms | 7.54 ms | 1.73 |
 | apps/state-reducer | 47.3 ms | 75.8 ms | 1.60 |
-| advanced/iterator-helpers | 3.42 ms | 4.71 ms | 1.37 |
+| advanced/iterator-helpers | 3.42 ms | 4.61 ms | 1.35 |
 | objects/prototype-chain | 6.87 ms | 8.95 ms | 1.30 |
 | advanced/dynamic-code | 1.81 ms | 2.28 ms | 1.26 |
 | compute/sieve | 16.1 ms | 20.0 ms | 1.24 |
 | async/event-loop-scheduler | 2.39 ms | 2.91 ms | 1.22 |
 | compute/sort-compare | 13.9 ms | 16.7 ms | 1.21 |
+| compute/fib | 3.05 ms | 3.45 ms | 1.13 |
+| functional/control-flow | 4.37 ms | 4.80 ms | 1.10 |
 
-Reading: on these workloads NativeAOT costs about 10% of warm throughput overall and gains 30% on the cold call (no JIT, no
-type loading). Allocation is identical, so the gap is code quality, not behaviour: NativeAOT compiles once, without the
-tiered PGO the JIT applies on CoreCLR (guarded devirtualization of interface and virtual calls, hot/cold block layout,
-profile-driven inlining). The workloads that lose most are the ones dominated by interpreter dispatch and call/return
-(`fib`, `control-flow`, `state-reducer`, `prototype-chain`); the numeric kernels whose time is in straight-line arithmetic
-(`float-loop`, `matmul`, `mandelbrot`, `nqueens`) are even. A follow-up that wants to close the gap should look at the
-Vm call path and the interpreter's dispatch for virtual/interface calls that PGO devirtualizes on CoreCLR but AOT cannot
-(static PGO via `dotnet publish` with MIBC data, or making those call sites monomorphic in the source).
+Where the gap comes from (same host, `DOTNET_TieredPGO=0` and `DOTNET_TieredCompilation=0` on the CoreCLR side, workloads run
+one per process; best of 5 samples):
 
-## Third cross-engine pass: the call path (2026-11-07)
-
-Same harness, two rounds, best of both; MoeJS measured the same as in the previous pass (×0.999). **MoeJS/Jaunt
-geometric mean 1.013 → 1.028**, Jint/Jaunt 2.68 → 2.72; Jaunt alone ×0.985. Fastest per workload: Jaunt 28, MoeJS 29,
-Jint 2. Per category (MoeJS/Jaunt): apps 0.97 → 1.00, compute 0.97 → 1.00, functional 1.16 → 1.21, the rest within ±0.01.
-
-| Workload | Jaunt before | Jaunt after | Δ | MoeJS/Jaunt before → after |
+| Workload | JIT | JIT, no PGO | JIT, no tiering | NativeAOT |
 | --- | ---: | ---: | ---: | ---: |
-| compute/fib | 3.57 ms | 3.00 ms | −16% | 0.64 → 0.78 |
-| compute/sha256 | 2.51 ms | 2.28 ms | −9% | 1.08 → 1.18 |
-| apps/raytracer | 6.58 ms | 5.98 ms | −9% | 1.10 → 1.23 |
-| functional/higher-order | 10.9 ms | 9.9 ms | −9% | 0.62 → 0.68 |
-| compute/nqueens | 1.06 ms | 0.99 ms | −6% | 1.18 → 1.27 |
-| objects/prototype-chain | 7.25 ms | 6.83 ms | −6% | 1.44 → 1.53 |
-| apps/mini-interpreter | 1.57 ms | 1.50 ms | −5% | 0.87 → 0.90 |
-| compute/spectral-norm / sort-compare | 5.84 / 13.8 ms | 5.61 / 13.3 ms | −4% | 0.98 → 1.02 / 0.69 → 0.72 |
+| compute/fib | 2.77 ms | 3.17 ms | 3.23 ms | 3.34 ms |
+| functional/control-flow | 4.07 ms | 4.57 ms | 4.76 ms | 4.75 ms |
+| objects/prototype-chain | 6.23 ms | 7.11 ms | 7.39 ms | 9.00 ms |
+| apps/state-reducer | 45.0 ms | 62.4 ms | 53.3 ms | 76.0 ms |
+| compute/float-loop | 10.7 ms | 10.7 ms | 10.7 ms | 11.9 ms |
 
-Workloads with few JS→JS calls moved within the usual ±4% (sieve +4%, map-set +3%, classes-inheritance +2%,
-destructure-spread +2%: noise, the code they run is unchanged).
+Reading: for the interpreter-dispatch workloads (`fib`, `control-flow`) the whole AOT gap is the JIT's dynamic PGO — with PGO
+off, CoreCLR lands within 3% of the native binary; the JS→JS call path (`Op.Call` → `PushCallFrame`, sealed `JsClosure` and
+`Frame`) contains no virtual call for either compiler to devirtualize. The workloads that stay slower under AOT even against
+the PGO-less JIT are the ones that re-enter the interpreter from native code: callbacks from builtin loops, `Function.prototype
+.call/apply`, bound functions, accessors, sort comparators. Isolated JS micro-workloads (300k operations each, same two hosts)
+put the extra NativeAOT cost at about **12 ns per native→JS re-entry** and at most 2–4 ns for everything else:
 
-What changed (`design/08`, §10; every step measured on four call micro-benchmarks and the JIT's disassembly of
-`PushCallFrame`):
+| Operation | JIT | NativeAOT | Δ per op |
+| --- | ---: | ---: | ---: |
+| JS→JS call `f(s)` | 16.5 ns | 18.7 ns | +2.2 ns |
+| `f.call(null, s)` (delegate → virtual `Call` → `CallClosure` → `Run` → `RunLoop`) | 31.6 ns | 44.3 ns | +12.7 ns |
+| bound function `g(s)` (two virtual `Call`s, two stack probes, re-entry) | 30.7 ns | 42.2 ns | +11.5 ns |
+| `arr.forEach(cb)` per callback (`CallClosureFast`, no virtual call, re-entry) | 20.7 ns | 32.6 ns | +11.9 ns |
+| builtin call `Math.abs(i)` (`NativeFn` delegate, no re-entry) | 20.1 ns | 18.4 ns | −1.7 ns |
+| property read, inline-cache hit through a 3-deep prototype chain | 9.6 ns | 10.4 ns | +0.8 ns |
+| megamorphic property read (16 shapes; virtual `CanCacheNamed`, Vm-wide cache) | 25.1 ns | 28.7 ns | +3.7 ns |
+| dictionary-mode property read (virtual `JsObject.Get` every time) | 20.3 ns | 20.4 ns | +0.1 ns |
 
-* **Overlapping register windows.** The callee's register window now starts at the caller's first argument
-  register for `Call`, `CallMethod` and `New`, so arguments are never copied (each copy was ~20 instructions plus a
-  GC write barrier). This relies on the compiler's stack-shaped register allocation: a call's arguments are the
-  topmost live registers at the call, so the callee may clobber everything above them. Coroutine frames own their
-  registers and keep the copying path, as do callees that do not fit in the current chunk. Frames record the stack
-  position they were pushed at and restore it exactly on return. The `JAUNT_POISON_REGISTERS=1` mode now also
-  poisons the caller's registers from the first argument up when such a frame returns, so a later read would fail
-  a test; unit tests and test262 pass in that mode.
-* **Frames addressed by depth.** The frame stack is an array indexed by depth instead of a linked list with a
-  "current frame" field: three fewer reference stores (write barriers) per call and return. Measured −3% on fib:
-  the barriers were a small part of the cost, which is why the design's C5 (frames as structs) is not pursued.
-  The depth budget now counts bytecode frames and native nesting separately (`Sp + _nativeDepth`).
-* Smaller items: `this` for a plain call of a sloppy function is compared against the realm's global object
-  directly instead of being materialized and compared as a 16-byte value; the constant pool is cached on the frame;
-  `PopFrame` is inlined into the interpreter loop; the class-constructor check folded into the template flag mask
-  (the design's C3: no measurable gain on its own).
-
-Micro-benchmarks (`--run-loop`, µs per run): fib(24) 3498 → 2862 (−18%), 100k plain calls 2160 → 1704 (−21%),
-100k method calls 2976 → ~2850 (−4%), 600k two-argument calls 14247 → 9977 (−30%), 100k `new P(x, y)` 5335 → 4990
-(−6.5%). JS→JS call ≈ 21.7 → 17 ns (fib), inside the 16–19 ns MoeJS range; the remaining gap on fib is the
-dispatch of the arithmetic and comparison around the call.
-
-Verified: unit tests 578/578 plain and poisoned, 11 new `FastPathSemanticsTests` cases for the call path (extra
-and missing arguments with `arguments`/rest, parameter mutation, nested calls inside argument lists, temporaries
-live across calls, catch/finally in the caller, sloppy/strict `this` with primitive receivers, legacy `caller`,
-stack traces, calls from generators and async functions, `new` with extra arguments and derived classes, proper
-tail calls), test262 100,167/100,169 in both modes.
+So the virtual calls on the call path (`JsFunctionObject.Call`, six implementations; `JsObject.Get/Set/...`, seven
+overriding classes each; the `NativeFn` delegate) are not what NativeAOT loses on — a polymorphic virtual call costs ~1.5 ns
+there against ~0.8 ns on CoreCLR. The re-entry cost is in `Vm.RunLoop` itself: RyuJIT disassembly (`DOTNET_JitDisasm` on
+CoreCLR, `--codegenopt:JitDisasm` on ILC) shows ILC's RunLoop at 28.7 KB with a 1,472-byte frame of which 1,240 bytes are
+zeroed on every entry (store-pair loop), against 24.6 KB, a 624-byte frame and ~570 zeroed bytes (`dc zva`) at Tier1; ILC also
+emits 142 write-barrier calls (44 of them byref struct copies of `JsValue`) against 78. Smaller items on the same path:
+`Vm.Run`'s `[ThreadStatic]` round trip (4.2 ns vs 2.0 ns) and `TryEnsureSufficientExecutionStack` in `CallClosure` and
+`JsBoundFunction.Call` (3.8 ns vs 1.8 ns), and the `Vm.PoisonRegisters` static read in every pushed frame, which the JIT folds
+to a constant while ILC guards it with a class-initialization check (`Vm`'s static constructor reads an environment variable,
+so it cannot be pre-initialized). Raising the gen0 budget (`DOTNET_GCgen0size`) changes nothing on the AOT side. Allocation is
+identical throughout.
 
 ## Fourth cross-engine pass: Map/Set tables, JSON reviver, result arrays, GC guidance (2026-11-08)
 

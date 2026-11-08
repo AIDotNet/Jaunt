@@ -22,3 +22,22 @@ generation) against MoeJS's default.
 
 Process cold start and the process-wide shared state of Jaunt are measured separately (`--cold`, see
 `docs/benchmarks.md`, "Cold start and shared costs").
+
+## NativeAOT vs CoreCLR JIT (`aot-vs-jit.sh`)
+
+The measurement protocol is one source file, `dotnet/CrossProtocol.cs`, linked into both `bench/Jaunt.Benchmarks`
+(`--cross`) and `samples/Jaunt.AotHost` (`bench` subcommand). `aot-vs-jit.sh` publishes the AOT host (`PublishAot=true`,
+net10.0, this machine's RID), builds the same project framework-dependent, and runs the corpus on each — the native binary
+reports itself as engine `jaunt-aot`, `dotnet Jaunt.AotHost.dll` as `jaunt-jit` (told apart by the JIT's compiled-method
+counter; `RuntimeFeature.IsDynamicCodeSupported` is false in both because `PublishAot` writes that switch into the JIT
+build's runtimeconfig too). Every result is checked against `expected.json`, and the report flags any workload whose AOT and
+JIT results differ. `report_aot.py` prints warm, CPU and cold figures side by side with the AOT/JIT ratio and geomeans
+(overall and per category); `METRIC=cpu` compares CPU time. Results go to `artifacts/cross/jaunt-{aot,jit}.jsonl` and
+`artifacts/cross/aot-vs-jit.json`; a published comparison is in `docs/benchmarks.md`, "NativeAOT vs CoreCLR JIT".
+
+```bash
+bench/cross/aot-vs-jit.sh                         # whole corpus
+bench/cross/aot-vs-jit.sh --filter apps/ --samples 3
+TFM=net8.0 bench/cross/aot-vs-jit.sh              # another framework channel
+artifacts/cross/aot-host/Jaunt.AotHost bench bench/cross/workloads bench/cross/expected.json --filter compute/   # one side by hand
+```

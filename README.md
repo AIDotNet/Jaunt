@@ -65,8 +65,9 @@ Errors: `JsCompileException` (with code/line/column), `JsException` (JS throw; e
 | `src/Jaunt` | the engine (`net8.0;net10.0`, plus `net11.0` when built with the .NET 11 SDK) |
 | `src/Jaunt.Generators` | Roslyn source generator for DTO bindings (diagnostics `JAUNT001`–`JAUNT005`) |
 | `tests/Jaunt.Tests` | xUnit: language semantics, API contracts, limits, isolation, modules, async, DTO/JSON, generator |
-| `samples/Jaunt.AotHost` | NativeAOT consumer host used by the release gate |
+| `samples/Jaunt.AotHost` | NativeAOT consumer host used by the release gate; its `bench` subcommand measures hot-path throughput under NativeAOT vs CoreCLR JIT |
 | `bench/Jaunt.Benchmarks` | BenchmarkDotNet suites + `--quick` harness, compared with Jint 4.17.0 |
+| `bench/cross` | shared workload corpus, cross-engine protocol (`dotnet/CrossProtocol.cs`), `run.sh` (Jaunt/Jint/MoeJS) and `aot-vs-jit.sh` (NativeAOT vs JIT) |
 | `tools/Jaunt.Test262` | test262 runner (pinned revision, feature-manifest skips, per-variant results) |
 | `eng/verify-aot.sh` | publishes the AOT host for net8.0/net10.0/net11.0, writes **new** JS after publishing, runs the native binaries |
 | `docs/` | feature manifest, benchmark and conformance reports |
@@ -78,6 +79,7 @@ dotnet test tests/Jaunt.Tests                      # unit + contract tests
 ./eng/verify-aot.sh                                # NativeAOT gate (needs .NET 10 SDK; .NET 11 RC via eng/sdk11)
 dotnet run -c Release --project bench/Jaunt.Benchmarks -- --quick
 dotnet run -c Release --project bench/Jaunt.Benchmarks -- --filter '*'   # BenchmarkDotNet
+bench/cross/aot-vs-jit.sh                          # hot-path throughput: NativeAOT binary vs the same host on CoreCLR
 git -C artifacts/test262 checkout 045bf6f9966ce3291b8fbc1e0403cd97b9201b00   # see docs/test262.md
 dotnet run -c Release --project tools/Jaunt.Test262 -- artifacts/test262
 ```
