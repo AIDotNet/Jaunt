@@ -62,14 +62,14 @@ internal sealed partial class Vm
                 {
                     switch ((Op)ip)
                     {
-                        case Op.Mov: Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = Unsafe.Add(ref r0, Unsafe.Add(ref ip, 2)); ip = ref Unsafe.Add(ref ip, 3); continue;
+                        case Op.Mov: StoreValue(ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)), Unsafe.Add(ref r0, Unsafe.Add(ref ip, 2))); ip = ref Unsafe.Add(ref ip, 3); continue;
                         case Op.LoadUndef: Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = default; ip = ref Unsafe.Add(ref ip, 2); continue;
                         case Op.LoadNull: Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = JsValue.Null; ip = ref Unsafe.Add(ref ip, 2); continue;
                         case Op.LoadTrue: Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = JsValue.True; ip = ref Unsafe.Add(ref ip, 2); continue;
                         case Op.LoadFalse: Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = JsValue.False; ip = ref Unsafe.Add(ref ip, 2); continue;
                         case Op.LoadEmpty: Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = JsValue.Empty; ip = ref Unsafe.Add(ref ip, 2); continue;
                         case Op.LoadInt: Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = new JsValue((double)Unsafe.Add(ref ip, 2)); ip = ref Unsafe.Add(ref ip, 3); continue;
-                        case Op.LoadConst: Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = f.K[Unsafe.Add(ref ip, 2)]; ip = ref Unsafe.Add(ref ip, 3); continue;
+                        case Op.LoadConst: StoreValue(ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)), f.K[Unsafe.Add(ref ip, 2)]); ip = ref Unsafe.Add(ref ip, 3); continue;
                         case Op.LoadThis:
                         {
                             var t = f.This;
@@ -92,7 +92,7 @@ internal sealed partial class Vm
                         {
                             var e = f.Env!;
                             for (int d = Unsafe.Add(ref ip, 2); d > 0; d--) e = e.Parent!;
-                            Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = e.Slots[Unsafe.Add(ref ip, 3)];
+                            StoreValue(ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)), e.Slots[Unsafe.Add(ref ip, 3)]);
                             ip = ref Unsafe.Add(ref ip, 4);
                             continue;
                         }
@@ -141,12 +141,12 @@ internal sealed partial class Vm
                             if (ic.Kind == IcKind.GlobalProp && ic.Epoch == Realm.GlobalVersion)
                             {
                                 var v = Realm.GlobalObject.Dict!.Values[ic.Slot];
-                                if (v.IsNotEmpty) { Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = v; ip = ref Unsafe.Add(ref ip, 4); continue; }
+                                if (v.IsNotEmpty) { StoreValue(ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)), v); ip = ref Unsafe.Add(ref ip, 4); continue; }
                             }
                             else if (ic.Kind == IcKind.GlobalCell)
                             {
                                 var v = Unsafe.As<GlobalCell>(ic.Cell!).Value;
-                                if (v.IsNotEmpty) { Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = v; ip = ref Unsafe.Add(ref ip, 4); continue; }
+                                if (v.IsNotEmpty) { StoreValue(ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)), v); ip = ref Unsafe.Add(ref ip, 4); continue; }
                             }
                             f.Pc = PcAt(ref code0, ref ip) + 1;
                             Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = GetGlobalSlow(f.K[Unsafe.Add(ref ip, 2)].AsStringUnchecked, ref ic, false);
@@ -181,12 +181,12 @@ internal sealed partial class Vm
                                     if (ic.Kind == IcKind.OwnData)
                                     {
                                         var v = obj.Slots[ic.Slot];
-                                        if (v.IsNotEmpty) { Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = v; ip = ref Unsafe.Add(ref ip, 5); continue; }
+                                        if (v.IsNotEmpty) { StoreValue(ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)), v); ip = ref Unsafe.Add(ref ip, 5); continue; }
                                     }
                                     else if (ic.Kind == IcKind.ProtoData && ic.Epoch == ProtoEpoch)
                                     {
                                         var v = ic.Holder!.Slots[ic.Slot];
-                                        if (v.IsNotEmpty) { Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = v; ip = ref Unsafe.Add(ref ip, 5); continue; }
+                                        if (v.IsNotEmpty) { StoreValue(ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)), v); ip = ref Unsafe.Add(ref ip, 5); continue; }
                                     }
                                     else if (ic.Kind == IcKind.ProtoGetter && ic.Epoch == ProtoEpoch)
                                     {
@@ -237,7 +237,7 @@ internal sealed partial class Vm
                                 if (ic.Kind == IcKind.StringProtoData && ic.Epoch == ProtoEpoch && ReferenceEquals(ic.Holder!.Shape, ic.Shape))
                                 {
                                     var v = ic.Holder.Slots[ic.Slot];
-                                    if (v.IsNotEmpty) { Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = v; ip = ref Unsafe.Add(ref ip, 5); continue; }
+                                    if (v.IsNotEmpty) { StoreValue(ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)), v); ip = ref Unsafe.Add(ref ip, 5); continue; }
                                 }
                             }
                             f.Pc = PcAt(ref code0, ref ip) + 1;
@@ -286,7 +286,7 @@ internal sealed partial class Vm
                                     {
                                         double dk = kv.Num;
                                         uint idx = (uint)dk;
-                                        if (idx == dk && arr.TryGetDense(idx, out var ev)) { Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = ev; ip = ref Unsafe.Add(ref ip, 5); continue; }
+                                        if (idx == dk && arr.TryGetDense(idx, out var ev)) { StoreValue(ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)), ev); ip = ref Unsafe.Add(ref ip, 5); continue; }
                                     }
                                     else if (ov.Ref is JsTypedArray ta && TypedGetFast(ta, kv.Num, ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)))) { ip = ref Unsafe.Add(ref ip, 5); continue; }
                                 }
@@ -298,7 +298,7 @@ internal sealed partial class Vm
                                     if (ReferenceEquals(obj.Shape, ic.Shape) && (kv.IsNumber ? ic.Cell == null && kv.Num == ic.Epoch : ReferenceEquals(ic.Cell, kv.Ref)))
                                     {
                                         var v = obj.Slots[ic.Slot];
-                                        if (v.IsNotEmpty) { Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = v; ip = ref Unsafe.Add(ref ip, 5); continue; }
+                                        if (v.IsNotEmpty) { StoreValue(ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)), v); ip = ref Unsafe.Add(ref ip, 5); continue; }
                                     }
                                 }
                                 f.Pc = PcAt(ref code0, ref ip) + 1;
@@ -893,7 +893,7 @@ internal sealed partial class Vm
             if ((flags & FrameFlags.Entry) != 0) return result;
             f = FrameAt(Sp - 1);
             ref JsValue regs0 = ref MemoryMarshal.GetArrayDataReference(f.Regs);
-            Unsafe.Add(ref regs0, ret) = result;
+            StoreValue(ref Unsafe.Add(ref regs0, ret), result);
             r0 = ref Unsafe.Add(ref regs0, f.Base);
             code0 = ref MemoryMarshal.GetArrayDataReference(f.Code);
             ip = ref Unsafe.Add(ref code0, f.Pc);
@@ -920,6 +920,17 @@ internal sealed partial class Vm
         if (a.IsNumber && b.IsNumber) return a.Num == b.Num;
         if (a.Bits != b.Bits) return false;
         return ReferenceEquals(a.Ref, b.Ref) || StrictEqualsSlow(a, b);
+    }
+
+    /// <summary>
+    /// A store of a value into a register or slot: a value without a reference (numbers, booleans, undefined, null) needs no GC
+    /// write barrier, and in numeric code the barrier call is a large part of what a register move costs.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void StoreValue(ref JsValue dst, in JsValue v)
+    {
+        if (v.Ref == null) dst = JsValue.FromBits(v.Bits);
+        else dst = v;
     }
 
     /// <summary>The index of the instruction at <paramref name="ip"/>.</summary>

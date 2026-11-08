@@ -78,6 +78,10 @@ public readonly struct JsValue : IEquatable<JsValue>
         };
     }
 
+    /// <summary>A value without a reference from its <see cref="Bits"/>; the store of it needs no GC write barrier.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal static JsValue FromBits(ulong bits) => new(null, bits);
+
     /// <summary>Internal number constructor. Callers guarantee <paramref name="number"/> is not a payload-carrying NaN
     /// from the reserved range (true for all arithmetic results); external doubles go through <see cref="From(double)"/>.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
