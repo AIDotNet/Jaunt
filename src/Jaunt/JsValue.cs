@@ -59,6 +59,17 @@ public readonly struct JsValue : IEquatable<JsValue>
 
     internal bool IsTrue => Bits == TrueBits;
 
+    /// <summary>
+    /// <c>slot = value</c> that skips the GC write barrier when the value holds no reference: storing a null never needs
+    /// one, and the barrier (a call, a store-release and several loads of GC globals) is a large part of copying a number.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal static void Store(ref JsValue slot, in JsValue value)
+    {
+        if (value.Ref == null) slot = new JsValue((object?)null, value.Bits);
+        else slot = value;
+    }
+
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private JsValue(object? reference, ulong bits)
     {

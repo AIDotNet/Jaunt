@@ -263,7 +263,7 @@ internal sealed class JsArray : JsObject
             if (_queue != null) { QueuePush(v); return; }
             EnsureCapacity(Length + 1);
         }
-        Items[Length++] = v;
+        JsValue.Store(ref Items[Length++], v);
     }
 
     /// <summary>

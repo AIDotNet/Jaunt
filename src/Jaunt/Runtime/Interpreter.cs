@@ -52,7 +52,7 @@ internal sealed partial class Vm
                 {
                     switch ((Op)code[pc])
                     {
-                        case Op.Mov: regs[bp + code[pc + 1]] = regs[bp + code[pc + 2]]; pc += 3; continue;
+                        case Op.Mov: JsValue.Store(ref regs[bp + code[pc + 1]], regs[bp + code[pc + 2]]); pc += 3; continue;
                         case Op.LoadUndef: regs[bp + code[pc + 1]] = default; pc += 2; continue;
                         case Op.LoadNull: regs[bp + code[pc + 1]] = JsValue.Null; pc += 2; continue;
                         case Op.LoadTrue: regs[bp + code[pc + 1]] = JsValue.True; pc += 2; continue;
@@ -82,7 +82,7 @@ internal sealed partial class Vm
                         {
                             var e = f.Env!;
                             for (int d = code[pc + 2]; d > 0; d--) e = e.Parent!;
-                            regs[bp + code[pc + 1]] = e.Slots[code[pc + 3]];
+                            JsValue.Store(ref regs[bp + code[pc + 1]], e.Slots[code[pc + 3]]);
                             pc += 4;
                             continue;
                         }
@@ -92,7 +92,7 @@ internal sealed partial class Vm
                             for (int d = code[pc + 2]; d > 0; d--) e = e.Parent!;
                             var v = e.Slots[code[pc + 3]];
                             if (v.IsEmpty) { f.Pc = pc + 1; thrown = TdzError(k[code[pc + 4]]); goto Unwind; }
-                            regs[bp + code[pc + 1]] = v;
+                            JsValue.Store(ref regs[bp + code[pc + 1]], v);
                             pc += 5;
                             continue;
                         }
@@ -100,7 +100,7 @@ internal sealed partial class Vm
                         {
                             var e = f.Env!;
                             for (int d = code[pc + 1]; d > 0; d--) e = e.Parent!;
-                            e.Slots[code[pc + 2]] = regs[bp + code[pc + 3]];
+                            JsValue.Store(ref e.Slots[code[pc + 2]], regs[bp + code[pc + 3]]);
                             pc += 4;
                             continue;
                         }
@@ -109,7 +109,7 @@ internal sealed partial class Vm
                             var e = f.Env!;
                             for (int d = code[pc + 1]; d > 0; d--) e = e.Parent!;
                             if (e.Slots[code[pc + 2]].IsEmpty) { f.Pc = pc + 1; thrown = TdzError(k[code[pc + 4]]); goto Unwind; }
-                            e.Slots[code[pc + 2]] = regs[bp + code[pc + 3]];
+                            JsValue.Store(ref e.Slots[code[pc + 2]], regs[bp + code[pc + 3]]);
                             pc += 5;
                             continue;
                         }
@@ -131,12 +131,12 @@ internal sealed partial class Vm
                             if (ic.Kind == IcKind.GlobalProp && ic.Epoch == Realm.GlobalVersion)
                             {
                                 var v = Realm.GlobalObject.Dict!.Values[ic.Slot];
-                                if (v.IsNotEmpty) { regs[bp + code[pc + 1]] = v; pc += 4; continue; }
+                                if (v.IsNotEmpty) { JsValue.Store(ref regs[bp + code[pc + 1]], v); pc += 4; continue; }
                             }
                             else if (ic.Kind == IcKind.GlobalCell)
                             {
                                 var v = Unsafe.As<GlobalCell>(ic.Cell!).Value;
-                                if (v.IsNotEmpty) { regs[bp + code[pc + 1]] = v; pc += 4; continue; }
+                                if (v.IsNotEmpty) { JsValue.Store(ref regs[bp + code[pc + 1]], v); pc += 4; continue; }
                             }
                             f.Pc = pc + 1;
                             regs[bp + code[pc + 1]] = GetGlobalSlow(k[code[pc + 2]].AsStringUnchecked, ref ic, false);
@@ -171,12 +171,12 @@ internal sealed partial class Vm
                                     if (ic.Kind == IcKind.OwnData)
                                     {
                                         var v = obj.Slots[ic.Slot];
-                                        if (v.IsNotEmpty) { regs[bp + code[pc + 1]] = v; pc += 5; continue; }
+                                        if (v.IsNotEmpty) { JsValue.Store(ref regs[bp + code[pc + 1]], v); pc += 5; continue; }
                                     }
                                     else if (ic.Kind == IcKind.ProtoData && ic.Epoch == ProtoEpoch)
                                     {
                                         var v = ic.Holder!.Slots[ic.Slot];
-                                        if (v.IsNotEmpty) { regs[bp + code[pc + 1]] = v; pc += 5; continue; }
+                                        if (v.IsNotEmpty) { JsValue.Store(ref regs[bp + code[pc + 1]], v); pc += 5; continue; }
                                     }
                                     else if (ic.Kind == IcKind.ProtoGetter && ic.Epoch == ProtoEpoch)
                                     {
@@ -229,7 +229,7 @@ internal sealed partial class Vm
                                 if (ic.Kind == IcKind.StringProtoData && ic.Epoch == ProtoEpoch && ReferenceEquals(ic.Holder!.Shape, ic.Shape))
                                 {
                                     var v = ic.Holder.Slots[ic.Slot];
-                                    if (v.IsNotEmpty) { regs[bp + code[pc + 1]] = v; pc += 5; continue; }
+                                    if (v.IsNotEmpty) { JsValue.Store(ref regs[bp + code[pc + 1]], v); pc += 5; continue; }
                                 }
                             }
                             f.Pc = pc + 1;
@@ -247,12 +247,12 @@ internal sealed partial class Vm
                                 var obj = Unsafe.As<JsObject>(ov.Ref!);
                                 if (ReferenceEquals(obj.Shape, ic.Shape))
                                 {
-                                    if (ic.Kind == IcKind.OwnData) { obj.Slots[ic.Slot] = regs[bp + code[pc + 3]]; pc += 5; continue; }
+                                    if (ic.Kind == IcKind.OwnData) { JsValue.Store(ref obj.Slots[ic.Slot], regs[bp + code[pc + 3]]); pc += 5; continue; }
                                     if (ic.Kind == IcKind.AddTransition && ic.Epoch == ProtoEpoch && obj.Extensible)
                                     {
                                         int slot = ic.Slot;
                                         if (slot >= obj.Slots.Length) GrowSlots(obj, slot);
-                                        obj.Slots[slot] = regs[bp + code[pc + 3]];
+                                        JsValue.Store(ref obj.Slots[slot], regs[bp + code[pc + 3]]);
                                         obj.Shape = ic.NewShape!;
                                         Realm.ChargeProperty();
                                         pc += 5;
@@ -278,7 +278,7 @@ internal sealed partial class Vm
                                     {
                                         double dk = kv.Num;
                                         uint idx = (uint)dk;
-                                        if (idx == dk && arr.TryGetDense(idx, out var ev)) { regs[bp + code[pc + 1]] = ev; pc += 5; continue; }
+                                        if (idx == dk && arr.TryGetDense(idx, out var ev)) { JsValue.Store(ref regs[bp + code[pc + 1]], ev); pc += 5; continue; }
                                     }
                                     else if (ov.Ref is JsTypedArray ta && ta.TryGetElementFast(kv.Num, out var tv)) { regs[bp + code[pc + 1]] = tv; pc += 5; continue; }
                                 }
@@ -290,7 +290,7 @@ internal sealed partial class Vm
                                     if (ReferenceEquals(obj.Shape, ic.Shape) && (kv.IsNumber ? ic.Cell == null && kv.Num == ic.Epoch : ReferenceEquals(ic.Cell, kv.Ref)))
                                     {
                                         var v = obj.Slots[ic.Slot];
-                                        if (v.IsNotEmpty) { regs[bp + code[pc + 1]] = v; pc += 5; continue; }
+                                        if (v.IsNotEmpty) { JsValue.Store(ref regs[bp + code[pc + 1]], v); pc += 5; continue; }
                                     }
                                 }
                                 f.Pc = pc + 1;
@@ -316,7 +316,7 @@ internal sealed partial class Vm
                                     uint idx = (uint)dk;
                                     if (idx == dk && idx < arr.Length && idx < (uint)arr.Items.Length && arr.Items[idx].IsNotEmpty)
                                     {
-                                        arr.Items[idx] = regs[bp + code[pc + 3]];
+                                        JsValue.Store(ref arr.Items[idx], regs[bp + code[pc + 3]]);
                                         pc += 5;
                                         continue;
                                     }
@@ -337,7 +337,7 @@ internal sealed partial class Vm
                                     var obj = Unsafe.As<JsObject>(ov.Ref!);
                                     if (ReferenceEquals(obj.Shape, ic.Shape) && (kv.IsNumber ? ic.Cell == null && kv.Num == ic.Epoch : ReferenceEquals(ic.Cell, kv.Ref)))
                                     {
-                                        obj.Slots[ic.Slot] = regs[bp + code[pc + 3]];
+                                        JsValue.Store(ref obj.Slots[ic.Slot], regs[bp + code[pc + 3]]);
                                         pc += 5;
                                         continue;
                                     }
@@ -919,7 +919,7 @@ internal sealed partial class Vm
                 PopFrame(done);
                 f = FrameAt(Sp - 1);
                 regs = f.Regs;
-                regs[ret] = result;
+                JsValue.Store(ref regs[ret], result);
                 code = f.Code; bp = f.Base; pc = f.Pc; k = f.K;
                 continue;
             }
