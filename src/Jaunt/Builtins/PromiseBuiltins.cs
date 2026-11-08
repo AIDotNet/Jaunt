@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Runtime.CompilerServices;
 
 namespace Jaunt.Runtime;
 
@@ -9,6 +10,56 @@ internal sealed partial class Realm
     public JsBuiltin SetAddFunction = null!;
     private HashSet<JsObject>? _joinStack;
     public HashSet<JsObject> JoinStack => _joinStack ??= new HashSet<JsObject>(ReferenceEqualityComparer.Instance);
+
+    /// <summary>The intrinsic %Promise.prototype.then%.</summary>
+    public JsBuiltin PromiseThenFunction = null!;
+    private Shape? _promiseInstanceShape;
+    private object? _promiseSpeciesAccessor;
+    private Shape? _promiseProtoShape;
+    private Shape? _promiseCtorShape;
+    private int _promiseProtoConstructorSlot;
+    private int _promiseProtoThenSlot;
+    private int _promiseCtorSpeciesSlot;
+
+    internal void InitPromiseGuard(JsObject proto, JsObject ctor, JsBuiltin then)
+    {
+        PromiseThenFunction = then;
+        _promiseInstanceShape = RootShapeFor(proto);
+        _promiseSpeciesAccessor = ctor.ReadSlot(ctor.FindOwn(JsSymbol.Species, out _)).Ref;
+    }
+
+    /// <summary>
+    /// True when <paramref name="p"/> is a promise of this realm that has no own properties and inherits directly from an
+    /// unmodified %Promise.prototype%: looking up its <c>then</c> and <c>constructor</c>, and the species of that
+    /// constructor, run no user code and yield the intrinsics, so the lookups can be skipped.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal bool IsPristinePromise(JsPromise p)
+    {
+        if (!ReferenceEquals(p.Shape, _promiseInstanceShape)) return false;
+        var proto = _promisePrototype!;
+        var ctor = _promiseConstructor!;
+        if ((!ReferenceEquals(proto.Shape, _promiseProtoShape) || !ReferenceEquals(ctor.Shape, _promiseCtorShape)) && !LocatePromiseSlots(proto, ctor)) return false;
+        // A changed value, or a data property turned into an accessor (which stores an Accessor), fails the identity test.
+        return ReferenceEquals(proto.Slots[_promiseProtoConstructorSlot].Ref, ctor)
+            && ReferenceEquals(proto.Slots[_promiseProtoThenSlot].Ref, PromiseThenFunction)
+            && ReferenceEquals(ctor.Slots[_promiseCtorSpeciesSlot].Ref, _promiseSpeciesAccessor);
+    }
+
+    /// <summary>Finds the guarded slots for the current layouts (adding an unrelated property only moves the guard to a new shape).</summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private bool LocatePromiseSlots(JsObject proto, JsObject ctor)
+    {
+        if (proto.Dict != null || ctor.Dict != null) return false;
+        int c = proto.Shape.IndexOf("constructor"), t = proto.Shape.IndexOf("then"), s = ctor.Shape.IndexOf(JsSymbol.Species);
+        if (c < 0 || t < 0 || s < 0) return false;
+        _promiseProtoConstructorSlot = c;
+        _promiseProtoThenSlot = t;
+        _promiseCtorSpeciesSlot = s;
+        _promiseProtoShape = proto.Shape;
+        _promiseCtorShape = ctor.Shape;
+        return true;
+    }
 }
 
 internal static class PromiseBuiltins
@@ -23,12 +74,14 @@ internal static class PromiseBuiltins
             if (!a.IsConstruct) throw JsErrors.TypeError(realm, "Promise constructor cannot be invoked without 'new'");
             var executor = a[0];
             if (!executor.IsFunction) throw JsErrors.TypeError(realm, $"Promise resolver {executor} is not a function");
-            var p = Operations.GetPrototypeFromConstructor(realm, a.NewTarget.AsObjectUnchecked, realm.PromisePrototype);
+            // %Promise%.prototype is not writable or configurable
+            var p = ReferenceEquals(a.NewTarget.Ref, realm.PromiseConstructor) ? realm.PromisePrototype : Operations.GetPrototypeFromConstructor(realm, a.NewTarget.AsObjectUnchecked, realm.PromisePrototype);
             var promise = new JsPromise(realm, p);
             var (res, rej) = promise.CreateResolvingFunctions();
             try
             {
-                realm.Vm.Call(executor, JsValue.Undefined, new[] { JsValue.FromObject(res), JsValue.FromObject(rej) });
+                ReadOnlySpan<JsValue> args = [JsValue.FromObject(res), JsValue.FromObject(rej)];
+                realm.Vm.Call(executor, JsValue.Undefined, args);
             }
             catch (JsThrowException ex)
             {
@@ -41,13 +94,20 @@ internal static class PromiseBuiltins
         r.Getter(ctor, JsSymbol.Species, "[Symbol.species]", static (in NativeArgs a) => a.This);
         proto.AddOwnProperty(JsSymbol.ToStringTag, new JsValue("Promise"), PropFlags.Configurable);
 
-        r.Method(proto, "then", 2, static (in NativeArgs a) =>
+        var then = r.MethodEager(proto, "then", 2, static (in NativeArgs a) =>
         {
             var realm = a.Realm;
             if (a.This.Ref is not JsPromise p) throw JsErrors.TypeError(realm, "Promise.prototype.then called on incompatible receiver");
+            if (realm.IsPristinePromise(p))
+            {
+                // SpeciesConstructor yields %Promise%, and nothing else can reach the derived promise's resolving functions
+                var derived = new JsPromise(realm);
+                p.AddReaction(new ThenReaction(a[0].Ref as JsFunctionObject, a[1].Ref as JsFunctionObject, derived));
+                return JsValue.FromObject(derived);
+            }
             var c = Operations.SpeciesConstructorDefault(realm, p, realm.PromiseConstructor);
             var cap = NewCapability(realm, JsValue.FromObject(c));
-            PerformThen(p, a[0], a[1], cap);
+            p.AddReaction(new ThenReaction(a[0].Ref as JsFunctionObject, a[1].Ref as JsFunctionObject, cap));
             return JsValue.FromObject(cap.Promise);
         });
         r.Method(proto, "catch", 1, static (in NativeArgs a) =>
@@ -97,7 +157,7 @@ internal static class PromiseBuiltins
             var cap = NewCapability(realm, a.This);
             var o = realm.NewObject();
             o.FastAdd("promise", JsValue.FromObject(cap.Promise));
-            var (res, rej) = Materialize(realm, cap);
+            var (res, rej) = cap.Functions(realm);
             o.FastAdd("resolve", res);
             o.FastAdd("reject", rej);
             return JsValue.FromObject(o);
@@ -109,21 +169,23 @@ internal static class PromiseBuiltins
         r.Method(ctor, "allKeyed", 1, static (in NativeArgs a) => KeyedCombinator(a, settled: false));
         r.Method(ctor, "allSettledKeyed", 1, static (in NativeArgs a) => KeyedCombinator(a, settled: true));
         Es2025Builtins.InstallPromise(r, ctor);
-    }
-
-    private static (JsValue resolve, JsValue reject) Materialize(Realm realm, PromiseCapability cap)
-    {
-        if (!cap.Resolve.IsUndefined) return (cap.Resolve, cap.Reject);
-        var (res, rej) = ((JsPromise)cap.Promise).CreateResolvingFunctions();
-        return (JsValue.FromObject(res), JsValue.FromObject(rej));
+        r.InitPromiseGuard(proto, ctor, then);
     }
 
     public static JsValue PromiseResolveWith(Realm realm, JsObject c, JsValue x)
     {
+        bool intrinsic = ReferenceEquals(c, realm.PromiseConstructor);
         if (x.Ref is JsPromise xp)
         {
+            if (intrinsic && realm.IsPristinePromise(xp)) return x;
             var xc = xp.Get("constructor");
             if (xc.IsObject && ReferenceEquals(xc.Ref, c)) return x;
+        }
+        if (intrinsic)
+        {
+            var p = new JsPromise(realm);
+            p.ResolveWith(x);
+            return JsValue.FromObject(p);
         }
         var cap = NewCapability(realm, JsValue.FromObject(c));
         cap.DoResolve(realm, x);
@@ -148,13 +210,6 @@ internal static class PromiseBuiltins
         var promise = realm.Vm.Construct(c, new[] { JsValue.FromObject(executor) });
         if (!box[0].IsFunction || !box[1].IsFunction) throw JsErrors.TypeError(realm, "Promise resolve or reject function is not callable");
         return new PromiseCapability(promise.AsObjectUnchecked, box[0], box[1]);
-    }
-
-    public static void PerformThen(JsPromise p, JsValue onFulfilled, JsValue onRejected, PromiseCapability? cap)
-    {
-        p.Then(
-            new PromiseReaction { Capability = cap, IsFulfillReaction = true, Handler = onFulfilled.IsFunction ? onFulfilled : JsValue.Undefined },
-            new PromiseReaction { Capability = cap, IsFulfillReaction = false, Handler = onRejected.IsFunction ? onRejected : JsValue.Undefined });
     }
 
     /// <summary>0 all, 1 allSettled, 2 any, 3 race.</summary>
@@ -182,9 +237,16 @@ internal static class PromiseBuiltins
                 try
                 {
                     var nextPromise = realm.Vm.Call(resolveFn, c, new ReadOnlySpan<JsValue>(in next));
+                    // nextPromise.then(...) observes nothing here: no element functions, no derived promise
+                    bool direct = cap.IsIntrinsic && nextPromise.Ref is JsPromise np && realm.IsPristinePromise(np);
+                    if (kind == 3 && direct)
+                    {
+                        ((JsPromise)nextPromise.Ref!).AddReaction(new ElementContext { State = state });
+                        continue;
+                    }
                     if (kind == 3)
                     {
-                        var (res, rej) = Materialize(realm, cap);
+                        var (res, rej) = cap.Functions(realm);
                         Operations.Invoke(realm, nextPromise, "then", new[] { res, rej });
                         continue;
                     }
@@ -193,11 +255,17 @@ internal static class PromiseBuiltins
                     int myIndex = index++;
                     JsValue onFul, onRej;
                     var ctx = new ElementContext { State = state, Index = myIndex };
+                    if (direct)
+                    {
+                        ((JsPromise)nextPromise.Ref!).AddReaction(ctx);
+                        realm.Vm.Tick();
+                        continue;
+                    }
                     switch (kind)
                     {
                         case 0:
                             onFul = JsValue.FromObject(new JsBuiltin(realm, "", 1, static (in NativeArgs b) => ((ElementContext)b.Callee.State!).Resolve(b.Realm, b[0], 0)) { State = ctx });
-                            var (_, rej0) = Materialize(realm, cap);
+                            var (_, rej0) = cap.Functions(realm);
                             onRej = rej0;
                             break;
                         case 1:
@@ -205,7 +273,7 @@ internal static class PromiseBuiltins
                             onRej = JsValue.FromObject(new JsBuiltin(realm, "", 1, static (in NativeArgs b) => ((ElementContext)b.Callee.State!).Resolve(b.Realm, b[0], 2)) { State = ctx });
                             break;
                         default:
-                            var (res2, _) = Materialize(realm, cap);
+                            var (res2, _) = cap.Functions(realm);
                             onFul = res2;
                             onRej = JsValue.FromObject(new JsBuiltin(realm, "", 1, static (in NativeArgs b) => ((ElementContext)b.Callee.State!).Resolve(b.Realm, b[0], 3)) { State = ctx });
                             break;
@@ -268,7 +336,7 @@ internal static class PromiseBuiltins
                 if (!settled)
                 {
                     onFul = JsValue.FromObject(new JsBuiltin(realm, "", 1, static (in NativeArgs b) => ((ElementContext)b.Callee.State!).Resolve(b.Realm, b[0], 0)) { State = ctx });
-                    onRej = Materialize(realm, cap).reject;
+                    onRej = cap.Functions(realm).reject;
                 }
                 else
                 {
@@ -317,11 +385,35 @@ internal static class PromiseBuiltins
         }
     }
 
-    private sealed class ElementContext
+    /// <summary>The per-element state of a combinator: behind its element functions, or itself the reaction of a pristine promise.</summary>
+    private sealed class ElementContext : PromiseReaction
     {
         public required CombinatorState State;
         public int Index;
         private bool _called;
+
+        public override void Run(Realm realm, bool fulfilled, in JsValue argument)
+        {
+            var cap = State.Capability;
+            switch (State.Kind)
+            {
+                case 0:
+                    if (fulfilled) Resolve(realm, argument, 0);
+                    else cap.DoReject(realm, argument);
+                    break;
+                case 1:
+                    Resolve(realm, argument, fulfilled ? 1 : 2);
+                    break;
+                case 2:
+                    if (fulfilled) cap.DoResolve(realm, argument);
+                    else Resolve(realm, argument, 3);
+                    break;
+                default:
+                    if (fulfilled) cap.DoResolve(realm, argument);
+                    else cap.DoReject(realm, argument);
+                    break;
+            }
+        }
 
         public JsValue Resolve(Realm realm, JsValue v, int mode)
         {

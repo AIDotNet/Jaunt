@@ -19,9 +19,11 @@ internal enum FrameFlags : byte
     RealmSwitch = 8,
     /// <summary>Entry frame of a <c>RunLoop</c> invocation: returning from or unwinding past it leaves the loop.</summary>
     Entry = 16,
+    /// <summary>Entry coroutine frame whose driver takes an uncaught throw as a return value with <see cref="SuspendKind.Thrown"/>, instead of a CLR exception.</summary>
+    ThrowAsResult = 32,
 }
 
-internal enum SuspendKind : byte { None, Yield, YieldRaw, Await, Initial }
+internal enum SuspendKind : byte { None, Yield, YieldRaw, Await, Initial, Thrown }
 
 /// <summary>One captured stack frame: the function and the pc of the instruction it was executing.</summary>
 internal readonly struct StackFrameRecord
@@ -687,6 +689,7 @@ internal sealed partial class Vm
     {
         ClearRegisterStack();
         if (_sortScratch != null && _sortScratch.Length > 1 << 12) _sortScratch = null;   // an idle engine keeps at most 64 KB of sort scratch
+        TrimJobs();
         var pool = _frames;   // Sp is 0 here: every slot holds a pooled frame (or nothing)
         for (int i = 0; i < pool.Length; i++)
         {

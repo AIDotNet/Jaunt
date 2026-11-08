@@ -953,7 +953,17 @@ internal sealed partial class Vm
                 var done = f;
                 if ((done.Flags & FrameFlags.Entry) != 0)
                 {
-                    if ((done.Flags & FrameFlags.Coroutine) != 0) { done.Suspend = SuspendKind.None; LastSuspend = SuspendKind.None; DetachFrame(done); }
+                    if ((done.Flags & FrameFlags.Coroutine) != 0)
+                    {
+                        done.Suspend = SuspendKind.None;
+                        LastSuspend = SuspendKind.None;
+                        DetachFrame(done);
+                        if ((done.Flags & FrameFlags.ThrowAsResult) != 0)
+                        {
+                            done.Suspend = SuspendKind.Thrown;
+                            return thrown;
+                        }
+                    }
                     else PopFrame(done);
                     throw new JsThrowException(thrown);
                 }
