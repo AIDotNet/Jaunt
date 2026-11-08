@@ -70,6 +70,12 @@ internal sealed class Shape
     /// <summary>Shared layout of a JSON.parse reviver's context object for a primitive value: source.</summary>
     public static readonly Shape SharedJsonContextShape = SharedObjectRoot.AddProperty("source", PropFlags.Default)!;
 
+    /// <summary>Identity hash for the Vm's lookup caches (the CLR's object hash means a call and a header read per lookup).</summary>
+    internal readonly int Hash = NextHash();
+    private static int s_nextHash;
+    // racing increments only make two shapes hash alike
+    private static int NextHash() => (int)((uint)(s_nextHash += unchecked((int)0x9E3779B1)) >> 16);
+
     private Shape(JsObject? proto, ProtoRole role)
     {
         Prototype = proto;

@@ -79,14 +79,17 @@ internal readonly struct PropertyKey : IEquatable<PropertyKey>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     internal static int CheapHash(object key)
     {
-        if (key is string s)
-        {
-            int n = s.Length;
-            if (n == 0) return 0;
-            int h = (s[0] * 31 + s[n - 1]) * 31 + s[n >> 1] + n * 7;
-            return h ^ (h >> 7);
-        }
+        if (key is string s) return CheapHash(s);
         return ((JsSymbol)key).Hash >> 16;
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal static int CheapHash(string s)
+    {
+        int n = s.Length;
+        if (n == 0) return 0;
+        int h = (s[0] * 31 + s[n - 1]) * 31 + s[n >> 1] + n * 7;
+        return h ^ (h >> 7);
     }
     public override string ToString() => Value is string s ? s : Value.ToString()!;
 

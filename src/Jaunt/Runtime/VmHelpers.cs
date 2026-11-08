@@ -347,7 +347,7 @@ internal sealed partial class Vm
     private readonly int[] _npEpoch = new int[NamedCacheSize];
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static int NamedHash(Shape shape, string key) => (RuntimeHelpers.GetHashCode(shape) * 31 + RuntimeHelpers.GetHashCode(key)) & (NamedCacheSize - 1);
+    private static int NamedHash(Shape shape, string key) => (shape.Hash ^ PropertyKey.CheapHash(key)) & (NamedCacheSize - 1);
 
     /// <summary>Invokes the getter of a cached accessor slot (an <see cref="Accessor"/> value) on <paramref name="receiver"/>.</summary>
     internal JsValue CallCachedGetter(Accessor accessor, in JsValue receiver)
@@ -378,6 +378,7 @@ internal sealed partial class Vm
             return;
         }
         var obj = ov.AsObjectUnchecked;
+        if (ic.Kind == IcKind.Megamorphic && TrySetNamedCached(obj, key, value)) return;
         if (ic.Kind != IcKind.Megamorphic && obj.Dict == null && obj.CanCacheNamed(key))
         {
             int slot = obj.FindOwn(key, out var flags);
@@ -390,32 +391,79 @@ internal sealed partial class Vm
                     return;
                 }
             }
-            else if (obj.Extensible && !obj.IsPrototypeObject)
+            else if (obj.Extensible && !obj.IsPrototypeObject && CanAppendNamed(obj, key))
             {
-                // check the prototype chain for setters / read-only properties
-                bool plain = true;
-                for (var p = obj.Proto; p != null; p = p.Proto)
+                var oldShape = obj.Shape;
+                obj.AddOwnProperty(key, value, PropFlags.Default);
+                if (obj.Dict == null)
                 {
-                    if (p.IsExotic && !p.CanCacheNamed(key)) { plain = false; break; }
-                    if (p.Dict != null) { plain = false; break; }
-                    int ps = p.FindOwn(key, out var pf);
-                    if (ps >= 0) { plain = false; break; }
+                    FillIc(ref ic, IcKind.AddTransition, oldShape, null, oldShape.Count);
+                    ic.NewShape = obj.Shape;
                 }
-                if (plain)
-                {
-                    var oldShape = obj.Shape;
-                    obj.AddOwnProperty(key, value, PropFlags.Default);
-                    if (obj.Dict == null)
-                    {
-                        FillIc(ref ic, IcKind.AddTransition, oldShape, null, oldShape.Count);
-                        ic.NewShape = obj.Shape;
-                    }
-                    return;
-                }
+                return;
             }
         }
         if (!obj.Set(key, value, ov) && strict)
             throw JsErrors.TypeError(Realm, $"Cannot assign to read only property '{key}' of object");
+    }
+
+    /// <summary>Whether no object on the prototype chain has a say in adding <paramref name="key"/> (setter, read-only property, exotic).</summary>
+    private static bool CanAppendNamed(JsObject obj, in PropertyKey key)
+    {
+        for (var p = obj.Proto; p != null; p = p.Proto)
+        {
+            if (p.IsExotic && !p.CanCacheNamed(key)) return false;
+            if (p.Dict != null) return false;
+            if (p.FindOwn(key, out _) >= 0) return false;
+        }
+        return true;
+    }
+
+    // The store side of the Vm-wide named cache, for sites that cycle through shapes (a base class constructor assigning
+    // fields of several subclasses): (shape, name) → own writable data slot, or append with the next shape while
+    // ProtoEpoch stands. Same exactness argument as the load side.
+    private readonly Shape?[] _nsShape = new Shape?[NamedCacheSize];
+    private readonly string?[] _nsKey = new string?[NamedCacheSize];
+    private readonly Shape?[] _nsNext = new Shape?[NamedCacheSize];
+    private readonly int[] _nsSlot = new int[NamedCacheSize];
+    private readonly int[] _nsEpoch = new int[NamedCacheSize];
+
+    private bool TrySetNamedCached(JsObject obj, in PropertyKey key, JsValue value)
+    {
+        if (obj.Dict != null || !obj.CanCacheNamed(key)) return false;
+        var shape = obj.Shape;
+        var ks = key.Value as string;
+        if (ks == null || shape.IsUnique) return false;
+        int h = NamedHash(shape, ks);
+        if (ReferenceEquals(_nsShape[h], shape) && ReferenceEquals(_nsKey[h], ks))
+        {
+            var cachedNext = _nsNext[h];
+            if (cachedNext == null) { obj.Slots[_nsSlot[h]] = value; return true; }
+            if (_nsEpoch[h] == ProtoEpoch && obj.Extensible && !obj.IsPrototypeObject)
+            {
+                int to = _nsSlot[h];
+                if (to >= obj.Slots.Length) GrowSlots(obj, to);
+                obj.Slots[to] = value;
+                obj.Shape = cachedNext;
+                Realm.ChargeProperty();
+                return true;
+            }
+        }
+        int slot = obj.FindOwn(key, out var flags);
+        if (slot >= 0)
+        {
+            if ((flags & (PropFlags.Accessor | PropFlags.Writable)) != PropFlags.Writable) return false;
+            obj.Slots[slot] = value;
+            _nsShape[h] = shape; _nsKey[h] = ks; _nsNext[h] = null; _nsSlot[h] = slot;
+            return true;
+        }
+        if (!obj.Extensible || obj.IsPrototypeObject || !CanAppendNamed(obj, key)) return false;
+        obj.AddOwnProperty(key, value, PropFlags.Default);
+        if (obj.Dict == null)
+        {
+            _nsShape[h] = shape; _nsKey[h] = ks; _nsNext[h] = obj.Shape; _nsSlot[h] = shape.Count; _nsEpoch[h] = ProtoEpoch;
+        }
+        return true;
     }
 
     private void SetOnPrimitive(in JsValue ov, in PropertyKey key, JsValue value, bool strict)
@@ -473,9 +521,8 @@ internal sealed partial class Vm
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static int KeyedHash(Shape shape, object? keyRef, int index)
     {
-        int h = RuntimeHelpers.GetHashCode(shape) * 31;
-        h += keyRef != null ? RuntimeHelpers.GetHashCode(keyRef) : index;
-        return h & (KeyedCacheSize - 1);
+        int h = keyRef != null ? PropertyKey.CheapHash(Unsafe.As<string>(keyRef)) : index;
+        return (shape.Hash ^ h) & (KeyedCacheSize - 1);
     }
 
     /// <summary>The cacheable form of a computed key: a string instance, or an array index (keyRef null). False otherwise.</summary>
