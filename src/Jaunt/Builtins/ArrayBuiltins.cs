@@ -1001,9 +1001,16 @@ internal static class ArrayBuiltins
             var tmp = vm.TakeScratch(count);
             try
             {
-                if (cmp.IsUndefined) { var c = new DefaultSortCmp(realm); MergeSort(items, tmp, count, ref c); }
-                else if (vm.TryPrepareFastCalls(cmp, out var closure)) { var c = new ClosureSortCmp(vm, closure, new JsValue[2]); MergeSort(items, tmp, count, ref c); }
-                else { var c = new GenericSortCmp(realm, cmp, new JsValue[2]); MergeSort(items, tmp, count, ref c); }
+                if (cmp.IsUndefined)
+                {
+                    if (!TrySortByStringKeys(realm, items, tmp, count)) { var c = new DefaultSortCmp(realm); StableSort(items, tmp, count, ref c); }
+                }
+                else if (vm.TryPrepareFastCalls(cmp, out var closure))
+                {
+                    var c = new ClosureSortCmp(vm, closure, new JsValue[2]);
+                    StableSort(items, tmp, count, ref c);
+                }
+                else { var c = new GenericSortCmp(realm, cmp, new JsValue[2]); StableSort(items, tmp, count, ref c); }
             }
             finally { vm.ReturnScratch(tmp, count); }
         }
@@ -1011,7 +1018,7 @@ internal static class ArrayBuiltins
         for (long i = count; i < len; i++) { DeleteOrThrow(realm, o, Key(i)); vm.Tick(); }
     }
 
-    private interface ISortCmp { int Compare(in JsValue x, in JsValue y); }
+    private interface ISortCmp<T> { int Compare(in T x, in T y); }
 
     /// <summary>Undefined sorts last; returns false when both are defined (the comparator decides).</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -1024,10 +1031,10 @@ internal static class ArrayBuiltins
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static int Sign(double v) => double.IsNaN(v) ? 0 : v < 0 ? -1 : v > 0 ? 1 : 0;
+    private static int Sign(double v) => (v > 0 ? 1 : 0) - (v < 0 ? 1 : 0);   // no branch on the data; NaN gives 0
 
     /// <summary>A plain closure comparator: pushed and run directly (no delegate, no per-call native stack probe).</summary>
-    private struct ClosureSortCmp(Vm vm, JsClosure closure, JsValue[] args) : ISortCmp
+    private struct ClosureSortCmp(Vm vm, JsClosure closure, JsValue[] args) : ISortCmp<JsValue>
     {
         public int Compare(in JsValue x, in JsValue y)
         {
@@ -1039,7 +1046,7 @@ internal static class ArrayBuiltins
         }
     }
 
-    private struct GenericSortCmp(Realm realm, JsValue cmp, JsValue[] args) : ISortCmp
+    private struct GenericSortCmp(Realm realm, JsValue cmp, JsValue[] args) : ISortCmp<JsValue>
     {
         public int Compare(in JsValue x, in JsValue y)
         {
@@ -1050,36 +1057,160 @@ internal static class ArrayBuiltins
         }
     }
 
-    private struct DefaultSortCmp(Realm realm) : ISortCmp
+    private struct DefaultSortCmp(Realm realm) : ISortCmp<JsValue>
     {
         public int Compare(in JsValue x, in JsValue y)
         {
             if (UndefinedOrder(x, y, out int r)) return r;
             realm.Vm.Tick();
-            if (x.IsNumber && y.IsNumber)
-            {
-                // default sort compares string forms; fast path for integers keeps correct ordering only if equal strings
-                return string.CompareOrdinal(NumberFormatting.ToString(x.Num), NumberFormatting.ToString(y.Num));
-            }
             return string.CompareOrdinal(Operations.ToString(realm, x), Operations.ToString(realm, y));
         }
     }
 
-    /// <summary>Stable bottom-up merge sort of <c>a[0..n)</c>, tolerant of inconsistent comparators.</summary>
-    private static void MergeSort<TCmp>(JsValue[] a, JsValue[] tmp, int n, ref TCmp cmp) where TCmp : struct, ISortCmp
+    /// <summary>
+    /// Default sort when every value is a primitive other than a symbol. Their string forms can be computed once and in any
+    /// order, since no user code runs and nothing can throw; a number's default order otherwise formats two strings per
+    /// comparison. Sorts positions rather than values because equal strings can come from different values (1 and "1").
+    /// False when some value's ToString is observable (object) or throws (symbol): SortCompare converts per comparison then.
+    /// </summary>
+    private static bool TrySortByStringKeys(Realm realm, JsValue[] items, JsValue[] tmp, int count)
     {
-        for (int width = 1; width < n; width *= 2)
+        for (int i = 0; i < count; i++)
         {
-            for (int lo = 0; lo < n - width; lo += 2 * width)
+            var tag = items[i].Tag;
+            if (tag == JsTag.Object || tag == JsTag.Symbol) return false;
+        }
+        var keys = new string[count];
+        var order = new int[count];
+        int defined = 0;
+        for (int i = 0; i < count; i++)
+        {
+            ref readonly var v = ref items[i];
+            if (v.IsUndefined) continue;   // these sort last, and all are alike
+            keys[i] = v.IsString ? v.AsStringUnchecked : Operations.ToString(realm, v);
+            order[defined++] = i;
+        }
+        var cmp = new KeySortCmp(realm.Vm, keys);
+        StableSort(order, new int[defined], defined, ref cmp);
+        Array.Copy(items, tmp, count);
+        for (int i = 0; i < defined; i++) items[i] = tmp[order[i]];
+        Array.Clear(items, defined, count - defined);
+        return true;
+    }
+
+    private struct KeySortCmp(Vm vm, string[] keys) : ISortCmp<int>
+    {
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public int Compare(in int x, in int y)
+        {
+            vm.Tick();
+            return string.CompareOrdinal(keys[x], keys[y]);
+        }
+    }
+
+    private const int MaxMinRun = 32;
+
+    /// <summary>
+    /// Stable merge sort of <c>a[0..n)</c> with natural runs (TimSort's run detection, run extension by binary insertion and
+    /// merge policy, without galloping): an ordered or reversed input takes n comparisons, and a random one fewer comparisons
+    /// and far fewer element copies than merging from single elements. <paramref name="tmp"/> holds at least n elements.
+    /// A comparator's result only steers indices that stay in bounds, so an inconsistent comparator leaves a permutation.
+    /// </summary>
+    private static void StableSort<T, TCmp>(T[] a, T[] tmp, int n, ref TCmp cmp) where TCmp : struct, ISortCmp<T>
+    {
+        if (n < 2) return;
+        int minRun = n, extra = 0;
+        while (minRun >= MaxMinRun) { extra |= minRun & 1; minRun >>= 1; }
+        minRun += extra;
+        Span<int> runStart = stackalloc int[64], runLen = stackalloc int[64];   // run lengths grow at least like Fibonacci numbers
+        int sp = 0;
+        for (int lo = 0; lo < n;)
+        {
+            int run = 1;
+            if (lo + 1 < n)
             {
-                int mid = lo + width, hi = Math.Min(lo + 2 * width, n);
-                int i = lo, j = mid, k = lo;
-                while (i < mid && j < hi) tmp[k++] = cmp.Compare(a[j], a[i]) < 0 ? a[j++] : a[i++];
-                while (i < mid) tmp[k++] = a[i++];
-                while (j < hi) tmp[k++] = a[j++];
-                Array.Copy(tmp, lo, a, lo, hi - lo);
+                run = 2;
+                if (cmp.Compare(a[lo + 1], a[lo]) < 0)
+                {
+                    while (lo + run < n && cmp.Compare(a[lo + run], a[lo + run - 1]) < 0) run++;
+                    Array.Reverse(a, lo, run);   // strictly descending, so no equal elements change order
+                }
+                else
+                {
+                    while (lo + run < n && cmp.Compare(a[lo + run], a[lo + run - 1]) >= 0) run++;
+                }
+            }
+            if (run < minRun)
+            {
+                int end = Math.Min(lo + minRun, n);
+                BinaryInsertion(a, lo, lo + run, end, ref cmp);
+                run = end - lo;
+            }
+            runStart[sp] = lo;
+            runLen[sp++] = run;
+            lo += run;
+            // merge policy with the invariant fix of de Gouw et al. (2015)
+            while (sp > 1)
+            {
+                int i = sp - 2;
+                if ((i > 0 && runLen[i - 1] <= runLen[i] + runLen[i + 1]) || (i > 1 && runLen[i - 2] <= runLen[i - 1] + runLen[i]))
+                {
+                    if (runLen[i - 1] < runLen[i + 1]) i--;
+                }
+                else if (runLen[i] > runLen[i + 1]) break;
+                MergeAt(a, tmp, runStart, runLen, ref sp, i, ref cmp);
             }
         }
+        while (sp > 1)
+        {
+            int i = sp - 2;
+            if (i > 0 && runLen[i - 1] < runLen[i + 1]) i--;
+            MergeAt(a, tmp, runStart, runLen, ref sp, i, ref cmp);
+        }
+    }
+
+    private static void MergeAt<T, TCmp>(T[] a, T[] tmp, Span<int> runStart, Span<int> runLen, ref int sp, int i, ref TCmp cmp) where TCmp : struct, ISortCmp<T>
+    {
+        Merge(a, tmp, runStart[i], runStart[i + 1], runStart[i + 1] + runLen[i + 1], ref cmp);
+        runLen[i] += runLen[i + 1];
+        if (i == sp - 3) { runStart[i + 1] = runStart[i + 2]; runLen[i + 1] = runLen[i + 2]; }
+        sp--;
+    }
+
+    /// <summary>Extends the sorted <c>a[lo..start)</c> to <c>a[lo..end)</c>. Which half a comparison selects is unpredictable by nature, so it does not take a branch.</summary>
+    private static void BinaryInsertion<T, TCmp>(T[] a, int lo, int start, int end, ref TCmp cmp) where TCmp : struct, ISortCmp<T>
+    {
+        for (int i = start; i < end; i++)
+        {
+            T pivot = a[i];
+            int l = lo, r = i;
+            while (l < r)
+            {
+                int m = (l + r) >>> 1;
+                int below = cmp.Compare(pivot, a[m]) >> 31;   // -1 when pivot < a[m], else 0
+                r = (m & below) | (r & ~below);
+                l = (l & below) | ((m + 1) & ~below);
+            }
+            a.AsSpan(l, i - l).CopyTo(a.AsSpan(l + 1));
+            a[l] = pivot;
+        }
+    }
+
+    /// <summary>Merges the sorted <c>a[lo..mid)</c> and <c>a[mid..hi)</c>; the left element wins ties. Selects without a branch, like <see cref="BinaryInsertion"/>.</summary>
+    private static void Merge<T, TCmp>(T[] a, T[] tmp, int lo, int mid, int hi, ref TCmp cmp) where TCmp : struct, ISortCmp<T>
+    {
+        if (cmp.Compare(a[mid], a[mid - 1]) >= 0) return;   // already in order
+        Array.Copy(a, lo, tmp, lo, hi - lo);
+        int i = lo, j = mid, k = lo;
+        while (i < mid && j < hi)
+        {
+            int right = cmp.Compare(tmp[j], tmp[i]) >> 31;   // -1 when the right element comes first, else 0
+            a[k++] = tmp[i + ((j - i) & right)];
+            j -= right;
+            i += 1 + right;
+        }
+        // what remains of the right run is already in place: j == k once the left run is used up
+        if (i < mid) Array.Copy(tmp, i, a, k, mid - i);
     }
 
     /// <summary>FlattenIntoArray (23.1.3.13.1).</summary>
