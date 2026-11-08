@@ -1,5 +1,6 @@
 using System;
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
 using Jaunt.Compiler;
 
 namespace Jaunt.Runtime;
@@ -38,11 +39,13 @@ internal sealed partial class Vm
     private JsValue RunLoop(Frame start, bool recovering)
     {
         Frame f = start;
-        int[] code = f.Code;
-        JsValue[] regs = f.Regs;
-        int bp = f.Base;
-        int pc = f.Pc;
-        JsValue[] k = f.K;
+        // Bytecode is verified when it is compiled (BytecodeVerifier: operands in range, jumps on instruction boundaries) and a
+        // frame's register window covers the function's registers, so the loop addresses both directly: ip is the executing
+        // instruction, r0 the frame's first register, code0 the first instruction. The arrays cannot move out from under
+        // these while the frame is live (the GC tracks interior references; register chunks are never reallocated while in use).
+        ref int code0 = ref MemoryMarshal.GetArrayDataReference(f.Code);
+        ref int ip = ref Unsafe.Add(ref code0, f.Pc);
+        ref JsValue r0 = ref Unsafe.Add(ref MemoryMarshal.GetArrayDataReference(f.Regs), f.Base);
         JsValue thrown;
         JsValue result;
         JsClosure callee;
@@ -57,119 +60,119 @@ internal sealed partial class Vm
     Dispatch:
                 while (true)
                 {
-                    switch ((Op)code[pc])
+                    switch ((Op)ip)
                     {
-                        case Op.Mov: regs[bp + code[pc + 1]] = regs[bp + code[pc + 2]]; pc += 3; continue;
-                        case Op.LoadUndef: regs[bp + code[pc + 1]] = default; pc += 2; continue;
-                        case Op.LoadNull: regs[bp + code[pc + 1]] = JsValue.Null; pc += 2; continue;
-                        case Op.LoadTrue: regs[bp + code[pc + 1]] = JsValue.True; pc += 2; continue;
-                        case Op.LoadFalse: regs[bp + code[pc + 1]] = JsValue.False; pc += 2; continue;
-                        case Op.LoadEmpty: regs[bp + code[pc + 1]] = JsValue.Empty; pc += 2; continue;
-                        case Op.LoadInt: regs[bp + code[pc + 1]] = new JsValue((double)code[pc + 2]); pc += 3; continue;
-                        case Op.LoadConst: regs[bp + code[pc + 1]] = k[code[pc + 2]]; pc += 3; continue;
+                        case Op.Mov: Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = Unsafe.Add(ref r0, Unsafe.Add(ref ip, 2)); ip = ref Unsafe.Add(ref ip, 3); continue;
+                        case Op.LoadUndef: Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = default; ip = ref Unsafe.Add(ref ip, 2); continue;
+                        case Op.LoadNull: Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = JsValue.Null; ip = ref Unsafe.Add(ref ip, 2); continue;
+                        case Op.LoadTrue: Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = JsValue.True; ip = ref Unsafe.Add(ref ip, 2); continue;
+                        case Op.LoadFalse: Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = JsValue.False; ip = ref Unsafe.Add(ref ip, 2); continue;
+                        case Op.LoadEmpty: Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = JsValue.Empty; ip = ref Unsafe.Add(ref ip, 2); continue;
+                        case Op.LoadInt: Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = new JsValue((double)Unsafe.Add(ref ip, 2)); ip = ref Unsafe.Add(ref ip, 3); continue;
+                        case Op.LoadConst: Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = f.K[Unsafe.Add(ref ip, 2)]; ip = ref Unsafe.Add(ref ip, 3); continue;
                         case Op.LoadThis:
                         {
                             var t = f.This;
                             if (t.IsEmpty)
                             {
                                 if (f.ThisBox != null && f.ThisBox.Value.IsNotEmpty) t = f.This = f.ThisBox.Value;
-                                else { f.Pc = pc + 1; thrown = ThisTdzError(); goto Unwind; }
+                                else { f.Pc = PcAt(ref code0, ref ip) + 1; thrown = ThisTdzError(); goto Unwind; }
                             }
-                            regs[bp + code[pc + 1]] = t;
-                            pc += 2;
+                            Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = t;
+                            ip = ref Unsafe.Add(ref ip, 2);
                             continue;
                         }
                         case Op.CheckTdz:
-                            if (regs[bp + code[pc + 1]].IsEmpty) { f.Pc = pc + 1; thrown = TdzError(k[code[pc + 2]]); goto Unwind; }
-                            pc += 3;
+                            if (Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)).IsEmpty) { f.Pc = PcAt(ref code0, ref ip) + 1; thrown = TdzError(f.K[Unsafe.Add(ref ip, 2)]); goto Unwind; }
+                            ip = ref Unsafe.Add(ref ip, 3);
                             continue;
 
                         // ---------------------------------------------------------- environments
                         case Op.LdEnv:
                         {
                             var e = f.Env!;
-                            for (int d = code[pc + 2]; d > 0; d--) e = e.Parent!;
-                            regs[bp + code[pc + 1]] = e.Slots[code[pc + 3]];
-                            pc += 4;
+                            for (int d = Unsafe.Add(ref ip, 2); d > 0; d--) e = e.Parent!;
+                            Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = e.Slots[Unsafe.Add(ref ip, 3)];
+                            ip = ref Unsafe.Add(ref ip, 4);
                             continue;
                         }
                         case Op.LdEnvChk:
                         {
                             var e = f.Env!;
-                            for (int d = code[pc + 2]; d > 0; d--) e = e.Parent!;
-                            var v = e.Slots[code[pc + 3]];
-                            if (v.IsEmpty) { f.Pc = pc + 1; thrown = TdzError(k[code[pc + 4]]); goto Unwind; }
-                            regs[bp + code[pc + 1]] = v;
-                            pc += 5;
+                            for (int d = Unsafe.Add(ref ip, 2); d > 0; d--) e = e.Parent!;
+                            var v = e.Slots[Unsafe.Add(ref ip, 3)];
+                            if (v.IsEmpty) { f.Pc = PcAt(ref code0, ref ip) + 1; thrown = TdzError(f.K[Unsafe.Add(ref ip, 4)]); goto Unwind; }
+                            Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = v;
+                            ip = ref Unsafe.Add(ref ip, 5);
                             continue;
                         }
                         case Op.StEnv:
                         {
                             var e = f.Env!;
-                            for (int d = code[pc + 1]; d > 0; d--) e = e.Parent!;
-                            e.Slots[code[pc + 2]] = regs[bp + code[pc + 3]];
-                            pc += 4;
+                            for (int d = Unsafe.Add(ref ip, 1); d > 0; d--) e = e.Parent!;
+                            e.Slots[Unsafe.Add(ref ip, 2)] = Unsafe.Add(ref r0, Unsafe.Add(ref ip, 3));
+                            ip = ref Unsafe.Add(ref ip, 4);
                             continue;
                         }
                         case Op.StEnvChk:
                         {
                             var e = f.Env!;
-                            for (int d = code[pc + 1]; d > 0; d--) e = e.Parent!;
-                            if (e.Slots[code[pc + 2]].IsEmpty) { f.Pc = pc + 1; thrown = TdzError(k[code[pc + 4]]); goto Unwind; }
-                            e.Slots[code[pc + 2]] = regs[bp + code[pc + 3]];
-                            pc += 5;
+                            for (int d = Unsafe.Add(ref ip, 1); d > 0; d--) e = e.Parent!;
+                            if (e.Slots[Unsafe.Add(ref ip, 2)].IsEmpty) { f.Pc = PcAt(ref code0, ref ip) + 1; thrown = TdzError(f.K[Unsafe.Add(ref ip, 4)]); goto Unwind; }
+                            e.Slots[Unsafe.Add(ref ip, 2)] = Unsafe.Add(ref r0, Unsafe.Add(ref ip, 3));
+                            ip = ref Unsafe.Add(ref ip, 5);
                             continue;
                         }
                         case Op.PushEnv:
                         {
-                            int imm = code[pc + 1];
+                            int imm = Unsafe.Add(ref ip, 1);
                             f.Env = new Env(f.Env, imm & 0xFFFF, imm >> 16);
                             f.EnvDepth++;
-                            pc += 2;
+                            ip = ref Unsafe.Add(ref ip, 2);
                             continue;
                         }
-                        case Op.PopEnv: f.Env = f.Env!.Parent; f.EnvDepth--; pc++; continue;
-                        case Op.CopyEnv: f.Env = f.Env!.CopyForIteration(); pc++; continue;
+                        case Op.PopEnv: f.Env = f.Env!.Parent; f.EnvDepth--; ip = ref Unsafe.Add(ref ip, 1); continue;
+                        case Op.CopyEnv: f.Env = f.Env!.CopyForIteration(); ip = ref Unsafe.Add(ref ip, 1); continue;
 
                         // ---------------------------------------------------------- globals
                         case Op.GetGlobal:
                         {
-                            ref var ic = ref f.Feedback.Ics[code[pc + 3]];
+                            ref var ic = ref f.Feedback.Ics[Unsafe.Add(ref ip, 3)];
                             if (ic.Kind == IcKind.GlobalProp && ic.Epoch == Realm.GlobalVersion)
                             {
                                 var v = Realm.GlobalObject.Dict!.Values[ic.Slot];
-                                if (v.IsNotEmpty) { regs[bp + code[pc + 1]] = v; pc += 4; continue; }
+                                if (v.IsNotEmpty) { Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = v; ip = ref Unsafe.Add(ref ip, 4); continue; }
                             }
                             else if (ic.Kind == IcKind.GlobalCell)
                             {
                                 var v = Unsafe.As<GlobalCell>(ic.Cell!).Value;
-                                if (v.IsNotEmpty) { regs[bp + code[pc + 1]] = v; pc += 4; continue; }
+                                if (v.IsNotEmpty) { Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = v; ip = ref Unsafe.Add(ref ip, 4); continue; }
                             }
-                            f.Pc = pc + 1;
-                            regs[bp + code[pc + 1]] = GetGlobalSlow(k[code[pc + 2]].AsStringUnchecked, ref ic, false);
-                            pc += 4;
+                            f.Pc = PcAt(ref code0, ref ip) + 1;
+                            Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = GetGlobalSlow(f.K[Unsafe.Add(ref ip, 2)].AsStringUnchecked, ref ic, false);
+                            ip = ref Unsafe.Add(ref ip, 4);
                             continue;
                         }
                         case Op.SetGlobal:
                         {
-                            ref var ic = ref f.Feedback.Ics[code[pc + 3]];
+                            ref var ic = ref f.Feedback.Ics[Unsafe.Add(ref ip, 3)];
                             if (ic.Kind == IcKind.GlobalProp && ic.Epoch == Realm.GlobalVersion)
                             {
-                                Realm.GlobalObject.Dict!.Values[ic.Slot] = regs[bp + code[pc + 2]];
-                                pc += 4;
+                                Realm.GlobalObject.Dict!.Values[ic.Slot] = Unsafe.Add(ref r0, Unsafe.Add(ref ip, 2));
+                                ip = ref Unsafe.Add(ref ip, 4);
                                 continue;
                             }
-                            f.Pc = pc + 1;
-                            SetGlobalSlow(k[code[pc + 1]].AsStringUnchecked, regs[bp + code[pc + 2]], ref ic, f.T.IsStrict);
-                            pc += 4;
+                            f.Pc = PcAt(ref code0, ref ip) + 1;
+                            SetGlobalSlow(f.K[Unsafe.Add(ref ip, 1)].AsStringUnchecked, Unsafe.Add(ref r0, Unsafe.Add(ref ip, 2)), ref ic, f.T.IsStrict);
+                            ip = ref Unsafe.Add(ref ip, 4);
                             continue;
                         }
 
                         // ---------------------------------------------------------- properties
                         case Op.GetProp:
                         {
-                            ref readonly var ov = ref regs[bp + code[pc + 2]];
-                            ref var ic = ref f.Feedback.Ics[code[pc + 4]];
+                            ref readonly var ov = ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 2));
+                            ref var ic = ref f.Feedback.Ics[Unsafe.Add(ref ip, 4)];
                             if (ov.IsObject)
                             {
                                 var obj = Unsafe.As<JsObject>(ov.Ref!);
@@ -178,12 +181,12 @@ internal sealed partial class Vm
                                     if (ic.Kind == IcKind.OwnData)
                                     {
                                         var v = obj.Slots[ic.Slot];
-                                        if (v.IsNotEmpty) { regs[bp + code[pc + 1]] = v; pc += 5; continue; }
+                                        if (v.IsNotEmpty) { Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = v; ip = ref Unsafe.Add(ref ip, 5); continue; }
                                     }
                                     else if (ic.Kind == IcKind.ProtoData && ic.Epoch == ProtoEpoch)
                                     {
                                         var v = ic.Holder!.Slots[ic.Slot];
-                                        if (v.IsNotEmpty) { regs[bp + code[pc + 1]] = v; pc += 5; continue; }
+                                        if (v.IsNotEmpty) { Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = v; ip = ref Unsafe.Add(ref ip, 5); continue; }
                                     }
                                     else if (ic.Kind == IcKind.ProtoGetter && ic.Epoch == ProtoEpoch)
                                     {
@@ -191,11 +194,10 @@ internal sealed partial class Vm
                                         // an accessor slot carries the Accessor as an Empty-tagged reference
                                         if (ic.Holder!.Slots[ic.Slot].Ref is Accessor acc)
                                         {
-                                            f.Pc = pc + 1;
+                                            f.Pc = PcAt(ref code0, ref ip) + 1;
                                             var gv = CallCachedGetter(acc, ov);
-                                            regs = f.Regs;
-                                            regs[bp + code[pc + 1]] = gv;
-                                            pc += 5;
+                                            Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = gv;
+                                            ip = ref Unsafe.Add(ref ip, 5);
                                             continue;
                                         }
                                     }
@@ -203,25 +205,24 @@ internal sealed partial class Vm
                                     {
                                         if (obj.Slots[ic.Slot].Ref is Accessor acc)
                                         {
-                                            f.Pc = pc + 1;
+                                            f.Pc = PcAt(ref code0, ref ip) + 1;
                                             var gv = CallCachedGetter(acc, ov);
-                                            regs = f.Regs;
-                                            regs[bp + code[pc + 1]] = gv;
-                                            pc += 5;
+                                            Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = gv;
+                                            ip = ref Unsafe.Add(ref ip, 5);
                                             continue;
                                         }
                                     }
                                     else if (ic.Kind == IcKind.NotFound && ic.Epoch == ProtoEpoch)
                                     {
-                                        regs[bp + code[pc + 1]] = default;
-                                        pc += 5;
+                                        Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = default;
+                                        ip = ref Unsafe.Add(ref ip, 5);
                                         continue;
                                     }
                                 }
                                 else if (ic.Kind == IcKind.ArrayLength && obj is JsArray la)
                                 {
-                                    regs[bp + code[pc + 1]] = new JsValue((double)la.Length);
-                                    pc += 5;
+                                    Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = new JsValue((double)la.Length);
+                                    ip = ref Unsafe.Add(ref ip, 5);
                                     continue;
                                 }
                             }
@@ -229,54 +230,54 @@ internal sealed partial class Vm
                             {
                                 if (ic.Kind == IcKind.StringLength)
                                 {
-                                    regs[bp + code[pc + 1]] = new JsValue((double)ov.StringLength);
-                                    pc += 5;
+                                    Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = new JsValue((double)ov.StringLength);
+                                    ip = ref Unsafe.Add(ref ip, 5);
                                     continue;
                                 }
                                 if (ic.Kind == IcKind.StringProtoData && ic.Epoch == ProtoEpoch && ReferenceEquals(ic.Holder!.Shape, ic.Shape))
                                 {
                                     var v = ic.Holder.Slots[ic.Slot];
-                                    if (v.IsNotEmpty) { regs[bp + code[pc + 1]] = v; pc += 5; continue; }
+                                    if (v.IsNotEmpty) { Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = v; ip = ref Unsafe.Add(ref ip, 5); continue; }
                                 }
                             }
-                            f.Pc = pc + 1;
-                            if (ov.IsNullOrUndefined) { thrown = NullishReadError(ov, k[code[pc + 3]]); goto Unwind; }
-                            regs[bp + code[pc + 1]] = GetPropSlow(ov, k[code[pc + 3]], ref ic);
-                            pc += 5;
+                            f.Pc = PcAt(ref code0, ref ip) + 1;
+                            if (ov.IsNullOrUndefined) { thrown = NullishReadError(ov, f.K[Unsafe.Add(ref ip, 3)]); goto Unwind; }
+                            Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = GetPropSlow(ov, f.K[Unsafe.Add(ref ip, 3)], ref ic);
+                            ip = ref Unsafe.Add(ref ip, 5);
                             continue;
                         }
                         case Op.SetProp:
                         {
-                            ref readonly var ov = ref regs[bp + code[pc + 1]];
-                            ref var ic = ref f.Feedback.Ics[code[pc + 4]];
+                            ref readonly var ov = ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1));
+                            ref var ic = ref f.Feedback.Ics[Unsafe.Add(ref ip, 4)];
                             if (ov.IsObject)
                             {
                                 var obj = Unsafe.As<JsObject>(ov.Ref!);
                                 if (ReferenceEquals(obj.Shape, ic.Shape))
                                 {
-                                    if (ic.Kind == IcKind.OwnData) { obj.Slots[ic.Slot] = regs[bp + code[pc + 3]]; pc += 5; continue; }
+                                    if (ic.Kind == IcKind.OwnData) { obj.Slots[ic.Slot] = Unsafe.Add(ref r0, Unsafe.Add(ref ip, 3)); ip = ref Unsafe.Add(ref ip, 5); continue; }
                                     if (ic.Kind == IcKind.AddTransition && ic.Epoch == ProtoEpoch && obj.Extensible)
                                     {
                                         int slot = ic.Slot;
                                         if (slot >= obj.Slots.Length) GrowSlots(obj, slot);
-                                        obj.Slots[slot] = regs[bp + code[pc + 3]];
+                                        obj.Slots[slot] = Unsafe.Add(ref r0, Unsafe.Add(ref ip, 3));
                                         obj.Shape = ic.NewShape!;
                                         Realm.ChargeProperty();
-                                        pc += 5;
+                                        ip = ref Unsafe.Add(ref ip, 5);
                                         continue;
                                     }
                                 }
                             }
-                            f.Pc = pc + 1;
-                            if (ov.IsNullOrUndefined) { thrown = NullishSetError(ov, k[code[pc + 2]]); goto Unwind; }
-                            SetPropSlow(ov, k[code[pc + 2]], regs[bp + code[pc + 3]], ref ic, f.T.IsStrict);
-                            pc += 5;
+                            f.Pc = PcAt(ref code0, ref ip) + 1;
+                            if (ov.IsNullOrUndefined) { thrown = NullishSetError(ov, f.K[Unsafe.Add(ref ip, 2)]); goto Unwind; }
+                            SetPropSlow(ov, f.K[Unsafe.Add(ref ip, 2)], Unsafe.Add(ref r0, Unsafe.Add(ref ip, 3)), ref ic, f.T.IsStrict);
+                            ip = ref Unsafe.Add(ref ip, 5);
                             continue;
                         }
                         case Op.GetElem:
                         {
-                            ref readonly var ov = ref regs[bp + code[pc + 2]];
-                            ref readonly var kv = ref regs[bp + code[pc + 3]];
+                            ref readonly var ov = ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 2));
+                            ref readonly var kv = ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 3));
                             if (ov.IsObject)
                             {
                                 if (kv.IsNumber)
@@ -285,36 +286,36 @@ internal sealed partial class Vm
                                     {
                                         double dk = kv.Num;
                                         uint idx = (uint)dk;
-                                        if (idx == dk && arr.TryGetDense(idx, out var ev)) { regs[bp + code[pc + 1]] = ev; pc += 5; continue; }
+                                        if (idx == dk && arr.TryGetDense(idx, out var ev)) { Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = ev; ip = ref Unsafe.Add(ref ip, 5); continue; }
                                     }
-                                    else if (ov.Ref is JsTypedArray ta && TypedGetFast(ta, kv.Num, ref regs[bp + code[pc + 1]])) { pc += 5; continue; }
+                                    else if (ov.Ref is JsTypedArray ta && TypedGetFast(ta, kv.Num, ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)))) { ip = ref Unsafe.Add(ref ip, 5); continue; }
                                 }
                                 // ordinary object with a computed key: cached (shape, key) → slot
-                                ref var ic = ref f.Feedback.Ics[code[pc + 4]];
+                                ref var ic = ref f.Feedback.Ics[Unsafe.Add(ref ip, 4)];
                                 if (ic.Kind == IcKind.KeyedOwnData)
                                 {
                                     var obj = Unsafe.As<JsObject>(ov.Ref!);
                                     if (ReferenceEquals(obj.Shape, ic.Shape) && (kv.IsNumber ? ic.Cell == null && kv.Num == ic.Epoch : ReferenceEquals(ic.Cell, kv.Ref)))
                                     {
                                         var v = obj.Slots[ic.Slot];
-                                        if (v.IsNotEmpty) { regs[bp + code[pc + 1]] = v; pc += 5; continue; }
+                                        if (v.IsNotEmpty) { Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = v; ip = ref Unsafe.Add(ref ip, 5); continue; }
                                     }
                                 }
-                                f.Pc = pc + 1;
-                                regs[bp + code[pc + 1]] = GetElemKeyed(ov, kv, ref ic);
-                                pc += 5;
+                                f.Pc = PcAt(ref code0, ref ip) + 1;
+                                Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = GetElemKeyed(ov, kv, ref ic);
+                                ip = ref Unsafe.Add(ref ip, 5);
                                 continue;
                             }
-                            f.Pc = pc + 1;
+                            f.Pc = PcAt(ref code0, ref ip) + 1;
                             if (ov.IsNullOrUndefined) { thrown = NullishReadError(ov, kv); goto Unwind; }
-                            regs[bp + code[pc + 1]] = GetElemSlow(ov, kv);
-                            pc += 5;
+                            Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = GetElemSlow(ov, kv);
+                            ip = ref Unsafe.Add(ref ip, 5);
                             continue;
                         }
                         case Op.SetElem:
                         {
-                            ref readonly var ov = ref regs[bp + code[pc + 1]];
-                            ref readonly var kv = ref regs[bp + code[pc + 2]];
+                            ref readonly var ov = ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1));
+                            ref readonly var kv = ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 2));
                             if (ov.IsObject)
                             {
                                 if (kv.IsNumber && ov.Ref is JsArray arr && arr.Dense)
@@ -323,102 +324,102 @@ internal sealed partial class Vm
                                     uint idx = (uint)dk;
                                     if (idx == dk && idx < arr.Length && idx < (uint)arr.Items.Length && arr.Items[idx].IsNotEmpty)
                                     {
-                                        arr.Items[idx] = regs[bp + code[pc + 3]];
-                                        pc += 5;
+                                        arr.Items[idx] = Unsafe.Add(ref r0, Unsafe.Add(ref ip, 3));
+                                        ip = ref Unsafe.Add(ref ip, 5);
                                         continue;
                                     }
                                     // append (a[a.length] = v): no setters/indices can intercept on a clean prototype chain
                                     if (idx == dk && idx == arr.Length && idx < uint.MaxValue - 1 && arr.LengthWritable && arr.Extensible
                                         && !JsArray.ProtoChainMayHaveIndices(arr.Proto))
                                     {
-                                        f.Pc = pc + 1;
-                                        arr.Push(regs[bp + code[pc + 3]]);
-                                        pc += 5;
+                                        f.Pc = PcAt(ref code0, ref ip) + 1;
+                                        arr.Push(Unsafe.Add(ref r0, Unsafe.Add(ref ip, 3)));
+                                        ip = ref Unsafe.Add(ref ip, 5);
                                         continue;
                                     }
                                 }
-                                else if (kv.IsNumber && ov.Ref is JsTypedArray ta && TypedSetFast(ta, kv.Num, regs[bp + code[pc + 3]])) { pc += 5; continue; }
-                                ref var ic = ref f.Feedback.Ics[code[pc + 4]];
+                                else if (kv.IsNumber && ov.Ref is JsTypedArray ta && TypedSetFast(ta, kv.Num, Unsafe.Add(ref r0, Unsafe.Add(ref ip, 3)))) { ip = ref Unsafe.Add(ref ip, 5); continue; }
+                                ref var ic = ref f.Feedback.Ics[Unsafe.Add(ref ip, 4)];
                                 if (ic.Kind == IcKind.KeyedOwnData)
                                 {
                                     var obj = Unsafe.As<JsObject>(ov.Ref!);
                                     if (ReferenceEquals(obj.Shape, ic.Shape) && (kv.IsNumber ? ic.Cell == null && kv.Num == ic.Epoch : ReferenceEquals(ic.Cell, kv.Ref)))
                                     {
-                                        obj.Slots[ic.Slot] = regs[bp + code[pc + 3]];
-                                        pc += 5;
+                                        obj.Slots[ic.Slot] = Unsafe.Add(ref r0, Unsafe.Add(ref ip, 3));
+                                        ip = ref Unsafe.Add(ref ip, 5);
                                         continue;
                                     }
                                 }
-                                f.Pc = pc + 1;
-                                SetElemKeyed(ov, kv, regs[bp + code[pc + 3]], f.T.IsStrict, ref ic);
-                                pc += 5;
+                                f.Pc = PcAt(ref code0, ref ip) + 1;
+                                SetElemKeyed(ov, kv, Unsafe.Add(ref r0, Unsafe.Add(ref ip, 3)), f.T.IsStrict, ref ic);
+                                ip = ref Unsafe.Add(ref ip, 5);
                                 continue;
                             }
-                            f.Pc = pc + 1;
+                            f.Pc = PcAt(ref code0, ref ip) + 1;
                             if (ov.IsNullOrUndefined && (kv.IsString || kv.IsNumber)) { thrown = NullishSetError(ov, kv); goto Unwind; }
-                            SetElemSlow(ov, kv, regs[bp + code[pc + 3]], f.T.IsStrict);
-                            pc += 5;
+                            SetElemSlow(ov, kv, Unsafe.Add(ref r0, Unsafe.Add(ref ip, 3)), f.T.IsStrict);
+                            ip = ref Unsafe.Add(ref ip, 5);
                             continue;
                         }
                         case Op.NewObject:
-                            regs[bp + code[pc + 1]] = JsValue.FromObject(new JsObject(Realm, Shape.SharedObjectRoot, 0));
-                            pc += 2;
+                            Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = JsValue.FromObject(new JsObject(Realm, Shape.SharedObjectRoot, 0));
+                            ip = ref Unsafe.Add(ref ip, 2);
                             continue;
                         case Op.NewArray:
-                            f.Pc = pc + 1;
-                            regs[bp + code[pc + 1]] = NewArrayValue(code[pc + 2]);
-                            pc += 3;
+                            f.Pc = PcAt(ref code0, ref ip) + 1;
+                            Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = NewArrayValue(Unsafe.Add(ref ip, 2));
+                            ip = ref Unsafe.Add(ref ip, 3);
                             continue;
                         case Op.ArrayPush:
-                            f.Pc = pc + 1;
-                            Unsafe.As<JsArray>(regs[bp + code[pc + 1]].Ref!).Push(regs[bp + code[pc + 2]]);
-                            pc += 3;
+                            f.Pc = PcAt(ref code0, ref ip) + 1;
+                            Unsafe.As<JsArray>(Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)).Ref!).Push(Unsafe.Add(ref r0, Unsafe.Add(ref ip, 2)));
+                            ip = ref Unsafe.Add(ref ip, 3);
                             continue;
 
                         // ---------------------------------------------------------- arithmetic (number fast paths)
                         case Op.Add:
                         {
-                            ref var a = ref regs[bp + code[pc + 2]];
-                            ref var b = ref regs[bp + code[pc + 3]];
-                            if (a.IsNumber && b.IsNumber) regs[bp + code[pc + 1]] = new JsValue(a.Num + b.Num);
-                            else { f.Pc = pc + 1; regs[bp + code[pc + 1]] = AddSlow(a, b); }
-                            pc += 4;
+                            ref var a = ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 2));
+                            ref var b = ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 3));
+                            if (a.IsNumber && b.IsNumber) Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = new JsValue(a.Num + b.Num);
+                            else { f.Pc = PcAt(ref code0, ref ip) + 1; Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = AddSlow(a, b); }
+                            ip = ref Unsafe.Add(ref ip, 4);
                             continue;
                         }
                         case Op.Sub:
                         {
-                            ref var a = ref regs[bp + code[pc + 2]];
-                            ref var b = ref regs[bp + code[pc + 3]];
-                            if (a.IsNumber && b.IsNumber) regs[bp + code[pc + 1]] = new JsValue(a.Num - b.Num);
-                            else { f.Pc = pc + 1; regs[bp + code[pc + 1]] = ArithSlow(Op.Sub, a, b); }
-                            pc += 4;
+                            ref var a = ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 2));
+                            ref var b = ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 3));
+                            if (a.IsNumber && b.IsNumber) Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = new JsValue(a.Num - b.Num);
+                            else { f.Pc = PcAt(ref code0, ref ip) + 1; Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = ArithSlow(Op.Sub, a, b); }
+                            ip = ref Unsafe.Add(ref ip, 4);
                             continue;
                         }
                         case Op.Mul:
                         {
-                            ref var a = ref regs[bp + code[pc + 2]];
-                            ref var b = ref regs[bp + code[pc + 3]];
-                            if (a.IsNumber && b.IsNumber) regs[bp + code[pc + 1]] = new JsValue(a.Num * b.Num);
-                            else { f.Pc = pc + 1; regs[bp + code[pc + 1]] = ArithSlow(Op.Mul, a, b); }
-                            pc += 4;
+                            ref var a = ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 2));
+                            ref var b = ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 3));
+                            if (a.IsNumber && b.IsNumber) Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = new JsValue(a.Num * b.Num);
+                            else { f.Pc = PcAt(ref code0, ref ip) + 1; Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = ArithSlow(Op.Mul, a, b); }
+                            ip = ref Unsafe.Add(ref ip, 4);
                             continue;
                         }
                         case Op.Div:
                         {
-                            ref var a = ref regs[bp + code[pc + 2]];
-                            ref var b = ref regs[bp + code[pc + 3]];
-                            if (a.IsNumber && b.IsNumber) regs[bp + code[pc + 1]] = new JsValue(a.Num / b.Num);
-                            else { f.Pc = pc + 1; regs[bp + code[pc + 1]] = ArithSlow(Op.Div, a, b); }
-                            pc += 4;
+                            ref var a = ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 2));
+                            ref var b = ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 3));
+                            if (a.IsNumber && b.IsNumber) Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = new JsValue(a.Num / b.Num);
+                            else { f.Pc = PcAt(ref code0, ref ip) + 1; Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = ArithSlow(Op.Div, a, b); }
+                            ip = ref Unsafe.Add(ref ip, 4);
                             continue;
                         }
                         case Op.Mod:
                         {
-                            ref var a = ref regs[bp + code[pc + 2]];
-                            ref var b = ref regs[bp + code[pc + 3]];
-                            if (a.IsNumber && b.IsNumber) regs[bp + code[pc + 1]] = new JsValue(JsMod(a.Num, b.Num));
-                            else { f.Pc = pc + 1; regs[bp + code[pc + 1]] = ArithSlow(Op.Mod, a, b); }
-                            pc += 4;
+                            ref var a = ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 2));
+                            ref var b = ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 3));
+                            if (a.IsNumber && b.IsNumber) Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = new JsValue(JsMod(a.Num, b.Num));
+                            else { f.Pc = PcAt(ref code0, ref ip) + 1; Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = ArithSlow(Op.Mod, a, b); }
+                            ip = ref Unsafe.Add(ref ip, 4);
                             continue;
                         }
                         case Op.BitAnd:
@@ -428,18 +429,18 @@ internal sealed partial class Vm
                         case Op.Shr:
                         case Op.UShr:
                         {
-                            ref var a = ref regs[bp + code[pc + 2]];
-                            ref var b = ref regs[bp + code[pc + 3]];
+                            ref var a = ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 2));
+                            ref var b = ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 3));
                             int x, y;
                             if (a.IsNumber && b.IsNumber) { x = Operations.DoubleToInt32(a.Num); y = Operations.DoubleToInt32(b.Num); }
                             else
                             {
-                                f.Pc = pc + 1;
-                                regs[bp + code[pc + 1]] = ArithSlow((Op)code[pc], a, b);
-                                pc += 4;
+                                f.Pc = PcAt(ref code0, ref ip) + 1;
+                                Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = ArithSlow((Op)ip, a, b);
+                                ip = ref Unsafe.Add(ref ip, 4);
                                 continue;
                             }
-                            regs[bp + code[pc + 1]] = (Op)code[pc] switch
+                            Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = (Op)ip switch
                             {
                                 Op.BitAnd => new JsValue(x & y),
                                 Op.BitOr => new JsValue(x | y),
@@ -448,17 +449,17 @@ internal sealed partial class Vm
                                 Op.Shr => new JsValue(x >> (y & 31)),
                                 _ => new JsValue((double)((uint)x >> (y & 31))),
                             };
-                            pc += 4;
+                            ip = ref Unsafe.Add(ref ip, 4);
                             continue;
                         }
                         case Op.StrictEq:
                         case Op.StrictNe:
                         {
-                            ref var a = ref regs[bp + code[pc + 2]];
-                            ref var b = ref regs[bp + code[pc + 3]];
+                            ref var a = ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 2));
+                            ref var b = ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 3));
                             bool eq = a.IsNumber && b.IsNumber ? a.Num == b.Num : StrictEqualsSlow(a, b);
-                            regs[bp + code[pc + 1]] = JsValue.FromBool(eq == ((Op)code[pc] == Op.StrictEq));
-                            pc += 4;
+                            Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = JsValue.FromBool(eq == ((Op)ip == Op.StrictEq));
+                            ip = ref Unsafe.Add(ref ip, 4);
                             continue;
                         }
                         case Op.Lt:
@@ -466,77 +467,77 @@ internal sealed partial class Vm
                         case Op.Gt:
                         case Op.Ge:
                         {
-                            ref var a = ref regs[bp + code[pc + 2]];
-                            ref var b = ref regs[bp + code[pc + 3]];
-                            var op = (Op)code[pc];
+                            ref var a = ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 2));
+                            ref var b = ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 3));
+                            var op = (Op)ip;
                             bool r;
                             if (a.IsNumber && b.IsNumber)
                             {
                                 double x = a.Num, y = b.Num;
                                 r = op == Op.Lt ? x < y : op == Op.Le ? x <= y : op == Op.Gt ? x > y : x >= y;
                             }
-                            else { f.Pc = pc + 1; r = CompareSlow(op, a, b); }
-                            regs[bp + code[pc + 1]] = JsValue.FromBool(r);
-                            pc += 4;
+                            else { f.Pc = PcAt(ref code0, ref ip) + 1; r = CompareSlow(op, a, b); }
+                            Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = JsValue.FromBool(r);
+                            ip = ref Unsafe.Add(ref ip, 4);
                             continue;
                         }
                         case Op.Neg:
                         {
-                            ref readonly var a = ref regs[bp + code[pc + 2]];
-                            if (a.IsNumber) regs[bp + code[pc + 1]] = new JsValue(-a.Num);
-                            else { f.Pc = pc + 1; regs[bp + code[pc + 1]] = BigIntOps.Negate(Realm, a); }
-                            pc += 3;
+                            ref readonly var a = ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 2));
+                            if (a.IsNumber) Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = new JsValue(-a.Num);
+                            else { f.Pc = PcAt(ref code0, ref ip) + 1; Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = BigIntOps.Negate(Realm, a); }
+                            ip = ref Unsafe.Add(ref ip, 3);
                             continue;
                         }
                         case Op.Plus:
                         case Op.ToNumeric:
                         {
-                            ref readonly var a = ref regs[bp + code[pc + 2]];
-                            if (a.IsNumber) regs[bp + code[pc + 1]] = a;
+                            ref readonly var a = ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 2));
+                            if (a.IsNumber) Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = a;
                             else
                             {
-                                f.Pc = pc + 1;
-                                regs[bp + code[pc + 1]] = (Op)code[pc] == Op.ToNumeric ? Operations.ToNumericValue(Realm, a) : new JsValue(ToNumberSlow(a));
+                                f.Pc = PcAt(ref code0, ref ip) + 1;
+                                Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = (Op)ip == Op.ToNumeric ? Operations.ToNumericValue(Realm, a) : new JsValue(ToNumberSlow(a));
                             }
-                            pc += 3;
+                            ip = ref Unsafe.Add(ref ip, 3);
                             continue;
                         }
                         case Op.Inc:
                         {
-                            ref readonly var a = ref regs[bp + code[pc + 2]];
-                            if (a.IsNumber) regs[bp + code[pc + 1]] = new JsValue(a.Num + 1);
-                            else { f.Pc = pc + 1; regs[bp + code[pc + 1]] = BigIntOps.Increment(Realm, a, 1); }
-                            pc += 3;
+                            ref readonly var a = ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 2));
+                            if (a.IsNumber) Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = new JsValue(a.Num + 1);
+                            else { f.Pc = PcAt(ref code0, ref ip) + 1; Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = BigIntOps.Increment(Realm, a, 1); }
+                            ip = ref Unsafe.Add(ref ip, 3);
                             continue;
                         }
                         case Op.Dec:
                         {
-                            ref readonly var a = ref regs[bp + code[pc + 2]];
-                            if (a.IsNumber) regs[bp + code[pc + 1]] = new JsValue(a.Num - 1);
-                            else { f.Pc = pc + 1; regs[bp + code[pc + 1]] = BigIntOps.Increment(Realm, a, -1); }
-                            pc += 3;
+                            ref readonly var a = ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 2));
+                            if (a.IsNumber) Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = new JsValue(a.Num - 1);
+                            else { f.Pc = PcAt(ref code0, ref ip) + 1; Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = BigIntOps.Increment(Realm, a, -1); }
+                            ip = ref Unsafe.Add(ref ip, 3);
                             continue;
                         }
                         case Op.Not:
                         {
-                            ulong bits = regs[bp + code[pc + 2]].Bits;
-                            regs[bp + code[pc + 1]] = bits == JsValue.TrueBits ? JsValue.False
+                            ulong bits = Unsafe.Add(ref r0, Unsafe.Add(ref ip, 2)).Bits;
+                            Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = bits == JsValue.TrueBits ? JsValue.False
                                 : bits == JsValue.FalseBits ? JsValue.True
-                                : JsValue.FromBool(!ToBooleanSlow(regs[bp + code[pc + 2]]));
-                            pc += 3;
+                                : JsValue.FromBool(!ToBooleanSlow(Unsafe.Add(ref r0, Unsafe.Add(ref ip, 2))));
+                            ip = ref Unsafe.Add(ref ip, 3);
                             continue;
                         }
                         case Op.Typeof:
-                            regs[bp + code[pc + 1]] = TypeofValue(regs[bp + code[pc + 2]]);
-                            pc += 3;
+                            Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = TypeofValue(Unsafe.Add(ref r0, Unsafe.Add(ref ip, 2)));
+                            ip = ref Unsafe.Add(ref ip, 3);
                             continue;
                         case Op.ToPropertyKey:
                         {
                             // strings, symbols and array-index numbers are already keys (see Operations.ToPropertyKeyValue)
-                            ref readonly var a = ref regs[bp + code[pc + 2]];
-                            if (a.IsString || a.IsSymbol || (a.IsNumber && Operations.IsArrayIndexNumber(a.Num))) regs[bp + code[pc + 1]] = a;
-                            else { f.Pc = pc + 1; regs[bp + code[pc + 1]] = Operations.ToPropertyKeyValue(Realm, a); }
-                            pc += 3;
+                            ref readonly var a = ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 2));
+                            if (a.IsString || a.IsSymbol || (a.IsNumber && Operations.IsArrayIndexNumber(a.Num))) Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = a;
+                            else { f.Pc = PcAt(ref code0, ref ip) + 1; Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = Operations.ToPropertyKeyValue(Realm, a); }
+                            ip = ref Unsafe.Add(ref ip, 3);
                             continue;
                         }
 
@@ -546,9 +547,9 @@ internal sealed partial class Vm
                         case Op.GtJmpFalse:
                         case Op.GeJmpFalse:
                         {
-                            ref var a = ref regs[bp + code[pc + 1]];
-                            ref var b = ref regs[bp + code[pc + 2]];
-                            var op = (Op)code[pc];
+                            ref var a = ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1));
+                            ref var b = ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 2));
+                            var op = (Op)ip;
                             bool r;
                             if (a.IsNumber && b.IsNumber)
                             {
@@ -557,80 +558,89 @@ internal sealed partial class Vm
                             }
                             else
                             {
-                                f.Pc = pc + 1;
+                                f.Pc = PcAt(ref code0, ref ip) + 1;
                                 r = CompareSlow(op == Op.LtJmpFalse ? Op.Lt : op == Op.LeJmpFalse ? Op.Le : op == Op.GtJmpFalse ? Op.Gt : Op.Ge, a, b);
                             }
-                            if (r) { pc += 4; continue; }
-                            int target = code[pc + 3];
-                            if (target <= pc && --_ticks <= 0) { f.Pc = pc + 1; Checkpoint(); }
-                            pc = target;
+                            if (r) { ip = ref Unsafe.Add(ref ip, 4); continue; }
+                            int target = Unsafe.Add(ref ip, 3);
+                            ref int tip = ref Unsafe.Add(ref code0, target);
+                            if (!Unsafe.IsAddressGreaterThan(ref tip, ref ip) && --_ticks <= 0) { f.Pc = PcAt(ref code0, ref ip) + 1; Checkpoint(); }
+                            ip = ref tip;
                             continue;
                         }
                         case Op.StrictEqJmpFalse:
                         case Op.StrictNeJmpFalse:
                         {
-                            ref var a = ref regs[bp + code[pc + 1]];
-                            ref var b = ref regs[bp + code[pc + 2]];
+                            ref var a = ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1));
+                            ref var b = ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 2));
                             bool eq = a.IsNumber && b.IsNumber ? a.Num == b.Num : StrictEqualsSlow(a, b);
-                            if (eq == ((Op)code[pc] == Op.StrictEqJmpFalse)) { pc += 4; continue; }
-                            int target = code[pc + 3];
-                            if (target <= pc && --_ticks <= 0) { f.Pc = pc + 1; Checkpoint(); }
-                            pc = target;
+                            if (eq == ((Op)ip == Op.StrictEqJmpFalse)) { ip = ref Unsafe.Add(ref ip, 4); continue; }
+                            int target = Unsafe.Add(ref ip, 3);
+                            ref int tip = ref Unsafe.Add(ref code0, target);
+                            if (!Unsafe.IsAddressGreaterThan(ref tip, ref ip) && --_ticks <= 0) { f.Pc = PcAt(ref code0, ref ip) + 1; Checkpoint(); }
+                            ip = ref tip;
                             continue;
                         }
 
                         // ---------------------------------------------------------- jumps
                         case Op.Jmp:
                         {
-                            int target = code[pc + 1];
-                            if (target <= pc && --_ticks <= 0) { f.Pc = pc + 1; Checkpoint(); }
-                            pc = target;
+                            int target = Unsafe.Add(ref ip, 1);
+                            ref int tip = ref Unsafe.Add(ref code0, target);
+                            if (!Unsafe.IsAddressGreaterThan(ref tip, ref ip) && --_ticks <= 0) { f.Pc = PcAt(ref code0, ref ip) + 1; Checkpoint(); }
+                            ip = ref tip;
                             continue;
                         }
                         case Op.JmpTrue:
                         case Op.JmpFalse:
                         {
-                            ulong bits = regs[bp + code[pc + 1]].Bits;
-                            bool truthy = bits == JsValue.TrueBits || (bits != JsValue.FalseBits && ToBooleanSlow(regs[bp + code[pc + 1]]));
-                            if (truthy == ((Op)code[pc] == Op.JmpTrue))
+                            ulong bits = Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)).Bits;
+                            bool truthy = bits == JsValue.TrueBits || (bits != JsValue.FalseBits && ToBooleanSlow(Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1))));
+                            if (truthy == ((Op)ip == Op.JmpTrue))
                             {
-                                int target = code[pc + 2];
-                                if (target <= pc && --_ticks <= 0) { f.Pc = pc + 1; Checkpoint(); }
-                                pc = target;
+                                int target = Unsafe.Add(ref ip, 2);
+                                ref int tip = ref Unsafe.Add(ref code0, target);
+                                if (!Unsafe.IsAddressGreaterThan(ref tip, ref ip) && --_ticks <= 0) { f.Pc = PcAt(ref code0, ref ip) + 1; Checkpoint(); }
+                                ip = ref tip;
                             }
-                            else pc += 3;
+                            else ip = ref Unsafe.Add(ref ip, 3);
                             continue;
                         }
                         case Op.JmpNullish:
-                            pc = regs[bp + code[pc + 1]].IsNullOrUndefined ? code[pc + 2] : pc + 3;
+                            if (Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)).IsNullOrUndefined) ip = ref Unsafe.Add(ref code0, Unsafe.Add(ref ip, 2));
+                            else ip = ref Unsafe.Add(ref ip, 3);
                             continue;
                         case Op.JmpNotNullish:
-                            pc = regs[bp + code[pc + 1]].IsNotNullish ? code[pc + 2] : pc + 3;
+                            if (Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)).IsNotNullish) ip = ref Unsafe.Add(ref code0, Unsafe.Add(ref ip, 2));
+                            else ip = ref Unsafe.Add(ref ip, 3);
                             continue;
                         case Op.JmpUndef:
-                            pc = regs[bp + code[pc + 1]].IsUndefined ? code[pc + 2] : pc + 3;
+                            if (Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)).IsUndefined) ip = ref Unsafe.Add(ref code0, Unsafe.Add(ref ip, 2));
+                            else ip = ref Unsafe.Add(ref ip, 3);
                             continue;
                         case Op.JmpNotUndef:
-                            pc = regs[bp + code[pc + 1]].IsNotUndefined ? code[pc + 2] : pc + 3;
+                            if (Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)).IsNotUndefined) ip = ref Unsafe.Add(ref code0, Unsafe.Add(ref ip, 2));
+                            else ip = ref Unsafe.Add(ref ip, 3);
                             continue;
                         case Op.SwitchInt:
                         {
-                            int v = (int)regs[bp + code[pc + 1]].Num;
-                            int n = code[pc + 2];
-                            pc = (uint)v < (uint)n ? code[pc + 3 + v] : pc + 3 + n;
+                            int v = (int)Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)).Num;
+                            int n = Unsafe.Add(ref ip, 2);
+                            if ((uint)v < (uint)n) ip = ref Unsafe.Add(ref code0, Unsafe.Add(ref ip, 3 + v));
+                            else ip = ref Unsafe.Add(ref ip, 3 + n);
                             continue;
                         }
 
                         // ---------------------------------------------------------- returns and throws
                         case Op.Ret:
-                            result = regs[bp + code[pc + 1]];
+                            result = Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1));
                             goto Return;
                         case Op.RetUndef:
                             result = default;
                             goto Return;
                         case Op.Throw:
-                            f.Pc = pc + 1;
-                            thrown = regs[bp + code[pc + 1]];
+                            f.Pc = PcAt(ref code0, ref ip) + 1;
+                            thrown = Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1));
                             goto Unwind;
 
                         // ---------------------------------------------------------- calls
@@ -639,32 +649,32 @@ internal sealed partial class Vm
                         case Op.TailCallSpread:
                         case Op.TailCallEval:
                         {
-                            var nf = TailCallOp(f, pc);
+                            var nf = TailCallOp(f, PcAt(ref code0, ref ip));
                             if (nf != null) f = nf;
                             goto Reload;
                         }
                         case Op.Call:
                         {
-                            ref readonly var fv = ref regs[bp + code[pc + 2]];
-                            f.Pc = pc + 6;
+                            ref readonly var fv = ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 2));
+                            f.Pc = PcAt(ref code0, ref ip) + 6;
                             if (fv.IsObject && fv.Ref is JsClosure c && (c.Template.Flags & InlineCallMask) == 0)
                             {
                                 callee = c;
-                                int tr = code[pc + 3];
-                                callThis = tr < 0 ? -1 : bp + tr;
-                                callArgs = bp + code[pc + 4];
-                                callArgc = code[pc + 5];
+                                int tr = Unsafe.Add(ref ip, 3);
+                                callThis = tr;
+                                callArgs = Unsafe.Add(ref ip, 4);
+                                callArgc = Unsafe.Add(ref ip, 5);
                                 goto EnterClosure;
                             }
-                            var rf = CallOutOfLoop(f, pc, fv);
+                            var rf = CallOutOfLoop(f, PcAt(ref code0, ref ip), fv);
                             if (rf != null) { f = rf; goto Reload; }
-                            pc += 6;
+                            ip = ref Unsafe.Add(ref ip, 6);
                             continue;
                         }
                         case Op.CallMethod:
                         {
-                            ref readonly var ov = ref regs[bp + code[pc + 2]];
-                            ref var ic = ref f.Feedback.Ics[code[pc + 4]];
+                            ref readonly var ov = ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 2));
+                            ref var ic = ref f.Feedback.Ics[Unsafe.Add(ref ip, 4)];
                             JsValue fv = default;
                             bool hit = false;
                             if (ov.IsObject)
@@ -683,81 +693,93 @@ internal sealed partial class Vm
                             }
                             if (!hit)
                             {
-                                f.Pc = pc + 1;
-                                if (ov.IsNullOrUndefined) { thrown = NullishReadError(ov, k[code[pc + 3]]); goto Unwind; }
-                                fv = GetPropSlow(ov, k[code[pc + 3]], ref ic);
+                                f.Pc = PcAt(ref code0, ref ip) + 1;
+                                if (ov.IsNullOrUndefined) { thrown = NullishReadError(ov, f.K[Unsafe.Add(ref ip, 3)]); goto Unwind; }
+                                fv = GetPropSlow(ov, f.K[Unsafe.Add(ref ip, 3)], ref ic);
                             }
-                            f.Pc = pc + 7;
+                            f.Pc = PcAt(ref code0, ref ip) + 7;
                             if (fv.IsObject && fv.Ref is JsClosure c && (c.Template.Flags & InlineCallMask) == 0)
                             {
                                 callee = c;
-                                callThis = bp + code[pc + 2];
-                                callArgs = bp + code[pc + 5];
-                                callArgc = code[pc + 6];
+                                callThis = Unsafe.Add(ref ip, 2);
+                                callArgs = Unsafe.Add(ref ip, 5);
+                                callArgc = Unsafe.Add(ref ip, 6);
                                 goto EnterClosure;
                             }
                             // arr.push(v) on a plain array: append without building NativeArgs
-                            if (code[pc + 6] == 1 && fv.Ref is JsBuiltin pb && ReferenceEquals(pb.Fn, ArrayBuiltins.PushFn) && ov.Ref is JsArray pa
+                            if (Unsafe.Add(ref ip, 6) == 1 && fv.Ref is JsBuiltin pb && ReferenceEquals(pb.Fn, ArrayBuiltins.PushFn) && ov.Ref is JsArray pa
                                 && pa.Dense && pa.LengthWritable && pa.Extensible && pa.Length < uint.MaxValue - 1 && !JsArray.ProtoChainMayHaveIndices(pa.Proto))
                             {
-                                pa.Push(regs[bp + code[pc + 5]]);
-                                regs[bp + code[pc + 1]] = new JsValue((double)pa.Length);
-                                pc += 7;
+                                pa.Push(Unsafe.Add(ref r0, Unsafe.Add(ref ip, 5)));
+                                Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = new JsValue((double)pa.Length);
+                                ip = ref Unsafe.Add(ref ip, 7);
                                 continue;
                             }
-                            var rf = CallOutOfLoop(f, pc, fv);
+                            var rf = CallOutOfLoop(f, PcAt(ref code0, ref ip), fv);
                             if (rf != null) { f = rf; goto Reload; }
-                            pc += 7;
+                            ip = ref Unsafe.Add(ref ip, 7);
                             continue;
                         }
                         case Op.New:
                         {
-                            f.Pc = pc + 5;
-                            var nf = NewOp(f, pc);
-                            if (nf == null) { pc += 5; continue; }
+                            f.Pc = PcAt(ref code0, ref ip) + 5;
+                            var nf = NewOp(f, PcAt(ref code0, ref ip));
+                            if (nf == null) { ip = ref Unsafe.Add(ref ip, 5); continue; }
                             f = nf;
                             goto Reload;
                         }
                         case Op.Closure:
                         {
-                            int fi = code[pc + 2];
-                            regs[bp + code[pc + 1]] = JsValue.FromObject(CreateClosure(f.T.Functions[fi], f.Env, f.Feedback.Child(fi), f));
-                            pc += 3;
+                            int fi = Unsafe.Add(ref ip, 2);
+                            Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = JsValue.FromObject(CreateClosure(f.T.Functions[fi], f.Env, f.Feedback.Child(fi), f));
+                            ip = ref Unsafe.Add(ref ip, 3);
                             continue;
                         }
 
                         // ---------------------------------------------------------- loops over iterators
                         case Op.IterNext:
+                        {
+                            int pc = PcAt(ref code0, ref ip);
                             f.Pc = pc + 1;
-                            pc = IterNextOp(f, pc);
+                            ip = ref Unsafe.Add(ref code0, IterNextOp(f, pc));
                             continue;
+                        }
                         case Op.ForInNext:
+                        {
+                            int pc = PcAt(ref code0, ref ip);
                             f.Pc = pc + 1;
-                            pc = ForInNextOp(f, pc);
+                            ip = ref Unsafe.Add(ref code0, ForInNextOp(f, pc));
                             continue;
+                        }
 
                         // ---------------------------------------------------------- coroutines
                         case Op.Yield:
                         case Op.YieldRaw:
                         case Op.Await:
-                            return SuspendOp(f, pc);
+                            return SuspendOp(f, PcAt(ref code0, ref ip));
                         case Op.InitialYield:
-                            return InitialYieldOp(f, pc);
+                            return InitialYieldOp(f, PcAt(ref code0, ref ip));
 
                         default:
+                        {
+                            int pc = PcAt(ref code0, ref ip);
                             f.Pc = pc + 1;
-                            pc = RareOp(f, pc);
+                            ip = ref Unsafe.Add(ref code0, RareOp(f, pc));
                             continue;
+                        }
                     }
                 }
 
     EnterClosure:
         {
             if (--_ticks <= 0) Checkpoint();
-            int dst = bp + code[pc + 1];
-            f = PushCallFrame(callee, regs, callThis, callArgs, callArgc);
+            int bp = f.Base;
+            int dst = bp + Unsafe.Add(ref ip, 1);
+            f = PushCallFrame(callee, f.Regs, callThis < 0 ? -1 : bp + callThis, bp + callArgs, callArgc);
             f.RetIndex = dst;
-            code = f.Code; regs = f.Regs; bp = f.Base; pc = 0; k = f.K;
+            code0 = ref MemoryMarshal.GetArrayDataReference(f.Code);
+            ip = ref code0;
+            r0 = ref Unsafe.Add(ref MemoryMarshal.GetArrayDataReference(f.Regs), f.Base);
             goto Dispatch;
         }
 
@@ -778,18 +800,26 @@ internal sealed partial class Vm
             PopFrame(f);
             if ((flags & FrameFlags.Entry) != 0) return result;
             f = FrameAt(Sp - 1);
-            regs = f.Regs;
-            regs[ret] = result;
-            code = f.Code; bp = f.Base; pc = f.Pc; k = f.K;
+            ref JsValue regs0 = ref MemoryMarshal.GetArrayDataReference(f.Regs);
+            Unsafe.Add(ref regs0, ret) = result;
+            r0 = ref Unsafe.Add(ref regs0, f.Base);
+            code0 = ref MemoryMarshal.GetArrayDataReference(f.Code);
+            ip = ref Unsafe.Add(ref code0, f.Pc);
             goto Dispatch;
         }
 
     Unwind:
         f = UnwindToHandler(f, thrown);
     Reload:
-        code = f.Code; regs = f.Regs; bp = f.Base; pc = f.Pc; k = f.K;
+        code0 = ref MemoryMarshal.GetArrayDataReference(f.Code);
+        ip = ref Unsafe.Add(ref code0, f.Pc);
+        r0 = ref Unsafe.Add(ref MemoryMarshal.GetArrayDataReference(f.Regs), f.Base);
         goto Dispatch;
     }
+
+    /// <summary>The index of the instruction at <paramref name="ip"/>.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static int PcAt(ref int code0, ref int ip) => (int)(Unsafe.ByteOffset(ref code0, ref ip) >> 2);
 
     /// <summary>
     /// Runs the loop with a handler for exceptions thrown by the helpers and builtins it calls: JS <c>throw</c> inside the
