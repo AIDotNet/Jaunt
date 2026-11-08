@@ -924,6 +924,54 @@ internal sealed partial class Vm
         return Run(f);
     }
 
+    /// <summary>
+    /// <see cref="CallClosureFast"/> for a builtin's callback of up to four arguments (<paramref name="argc"/> of them are
+    /// passed; the others are ignored): only the ones the callee declares are written, straight into its registers. Most
+    /// callbacks declare fewer than the builtin passes, and each element of an arguments array is a store with a GC write barrier.
+    /// </summary>
+    internal JsValue CallCallback(JsClosure c, JsValue thisValue, in JsValue a0, in JsValue a1, in JsValue a2, in JsValue a3, int argc)
+    {
+        if (Depth + 1 > MaxDepth) StackOverflowFrame();
+        var t = c.Template;
+        var f = RentFrame();
+        f.SavedTop = _top;
+        f.SavedChunkIndex = _chunkIndex;
+        var regs = AllocRegs(t.RegisterCount, out f.Base, out f.ChunkIndex);
+        if (!ReferenceEquals(f.Regs, regs)) f.Regs = regs;
+        int b = f.Base;
+        int n = argc < t.ParamCount ? argc : t.ParamCount;
+        if (n > 0)
+        {
+            JsValue.Store(ref regs[b], a0);
+            if (n > 1)
+            {
+                JsValue.Store(ref regs[b + 1], a1);
+                if (n > 2)
+                {
+                    JsValue.Store(ref regs[b + 2], a2);
+                    if (n > 3) JsValue.Store(ref regs[b + 3], a3);
+                }
+            }
+        }
+        // as in PushFrame: the bindings and missing parameters start as undefined, every other register is written before it is read
+        int initEnd = t.InitUndefEnd < 0 ? t.RegisterCount : t.InitUndefEnd;
+        for (int i = n; i < initEnd; i++) regs[b + i] = default;
+        if (_poisonRegisters) for (int i = initEnd; i < t.RegisterCount; i++) regs[b + i] = s_poison;
+        if ((t.Flags & FunctionFlags.NeedsArgsArray) != 0) f.Args = CallbackArgsArray(a0, a1, a2, a3, argc);
+        SetupFrame(f, c, thisValue, JsValue.Undefined, FrameFlags.None);
+        return Run(f);
+    }
+
+    private static JsValue[] CallbackArgsArray(in JsValue a0, in JsValue a1, in JsValue a2, in JsValue a3, int argc)
+    {
+        var args = new JsValue[argc];
+        if (argc > 0) args[0] = a0;
+        if (argc > 1) args[1] = a1;
+        if (argc > 2) args[2] = a2;
+        if (argc > 3) args[3] = a3;
+        return args;
+    }
+
     private JsValue[]? _sortScratch;
 
     /// <summary>A scratch buffer of at least <paramref name="n"/> elements (sort merges, result-array collection); taken out of the Vm while in use, so a re-entrant use allocates its own.</summary>

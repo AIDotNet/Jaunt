@@ -757,7 +757,7 @@ internal static class JsonBuiltins
                     if (i > 0) Sb.Append(',');
                     if (Gap.Length > 0) Sb.Append('\n').Append(_indent);
                     JsValue v;
-                    if (!(o is JsArray da && da.TryGetDense((uint)i, out v))) v = o.GetIndex((uint)i, self);
+                    if (!(o is JsArray da && da.TryGetElement((uint)i, out v))) v = o.GetIndex((uint)i, self);
                     if (!SerializeProperty(o, null, v, (uint)i)) Sb.Append("null");
                 }
                 if (len > 0 && Gap.Length > 0) Sb.Append('\n').Append(stepback);

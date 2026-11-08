@@ -31,15 +31,24 @@ internal sealed class TableEpoch { public int[]? Remap; public TableEpoch? Next;
 /// <summary>
 /// Insertion-ordered hash table with live-iteration semantics (Map/Set). Entries live in parallel arrays in insertion
 /// order (a deleted entry leaves a dead slot until the next compaction); a chained hash index over the slots replaces
-/// the previous <c>Dictionary&lt;JsValue, int&gt;</c>: ~40 bytes per entry instead of ~70 (fewer and smaller
-/// large-object-heap arrays for big collections), the hash is computed once per operation with number/string fast
-/// paths, and a Set stores no value array.
+/// the previous <c>Dictionary&lt;JsValue, int&gt;</c>: ~40 bytes per entry instead of ~70, the hash is computed once per
+/// operation with number/string fast paths, and a Set stores no value array.
+/// <para>
+/// Keys and values are stored in pages of at most <see cref="PageSize"/> entries, each below the GC's large object
+/// threshold. A table of more than about 5300 entries in one array would be a large object: every 3 MB of those, however
+/// short-lived, triggers a blocking gen2 collection of the whole heap. Pages also mean that growth past one page copies
+/// nothing. Page 0 starts small and doubles up to <see cref="PageSize"/>; every later page is full size.
+/// </para>
 /// </summary>
 internal sealed class OrderedTable
 {
-    private JsValue[] _keys = new JsValue[8];
+    private const int PageShift = 12;
+    private const int PageSize = 1 << PageShift;
+    private const int PageMask = PageSize - 1;
+
+    private JsValue[][] _keys = [new JsValue[8]];
     /// <summary>null for a Set: the key is the value.</summary>
-    private JsValue[]? _values;
+    private JsValue[][]? _values;
     /// <summary>31-bit hash of each slot's key; -1 marks a dead (deleted) slot.</summary>
     private int[] _hashes = new int[8];
     /// <summary>Next slot in the same bucket's chain, or -1.</summary>
@@ -54,11 +63,15 @@ internal sealed class OrderedTable
 
     public OrderedTable(bool isSet)
     {
-        if (!isSet) _values = new JsValue[8];
+        if (!isSet) _values = [new JsValue[8]];
     }
 
     public int Size => _liveCount;
     public int End => _count;
+
+    /// <summary>The element of slot <paramref name="i"/>.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static ref JsValue At(JsValue[][] pages, int i) => ref pages[i >> PageShift][i & PageMask];
 
     /// <summary>SameValueZero hash (31-bit): numbers by value (-0 and 0 alike, every NaN alike), strings by content
     /// (the runtime's randomized ordinal hash, so attacker-chosen keys cannot be made to collide), objects by identity.</summary>
@@ -101,14 +114,14 @@ internal sealed class OrderedTable
         var hashes = _hashes;
         var keys = _keys;
         for (int i = buckets[h & (buckets.Length - 1)] - 1; i >= 0; i = _next[i])
-            if (hashes[i] == h && KeyEquals(keys[i], key)) return i;
+            if (hashes[i] == h && KeyEquals(At(keys, i), key)) return i;
         return -1;
     }
 
     public bool TryGet(in JsValue key, out JsValue value)
     {
         int i = Find(key, HashOf(key));
-        if (i >= 0) { value = _values == null ? _keys[i] : _values[i]; return true; }
+        if (i >= 0) { value = At(_values ?? _keys, i); return true; }
         value = default;
         return false;
     }
@@ -120,12 +133,12 @@ internal sealed class OrderedTable
         if (key.IsNumber && key.Num == 0) key = JsValue.Zero; // normalize -0
         int h = HashOf(key);
         int i = Find(key, h);
-        if (i >= 0) { if (_values != null) _values[i] = value; return; }
-        if (_count == _keys.Length) Grow();
+        if (i >= 0) { if (_values != null) At(_values, i) = value; return; }
+        if (_count == _hashes.Length) Grow();
         realm.ChargeBytes(64);
         i = _count++;
-        _keys[i] = key;
-        if (_values != null) _values[i] = value;
+        At(_keys, i) = key;
+        if (_values != null) At(_values, i) = value;
         _hashes[i] = h;
         int b = h & (_buckets.Length - 1);
         _next[i] = _buckets[b] - 1;
@@ -140,12 +153,12 @@ internal sealed class OrderedTable
         int prev = -1;
         for (int i = _buckets[b] - 1; i >= 0; prev = i, i = _next[i])
         {
-            if (_hashes[i] != h || !KeyEquals(_keys[i], key)) continue;
+            if (_hashes[i] != h || !KeyEquals(At(_keys, i), key)) continue;
             if (prev < 0) _buckets[b] = _next[i] + 1;
             else _next[prev] = _next[i];
             _hashes[i] = -1;
-            _keys[i] = default;
-            if (_values != null) _values[i] = default;
+            At(_keys, i) = default;
+            if (_values != null) At(_values, i) = default;
             _liveCount--;
             if (i == _head) { while (_head < _count && _hashes[_head] < 0) _head++; }
             return true;
@@ -155,8 +168,9 @@ internal sealed class OrderedTable
 
     public void Clear()
     {
-        for (int i = 0; i < _count; i++) { _hashes[i] = -1; _keys[i] = default; }
-        if (_values != null) Array.Clear(_values, 0, _count);
+        _hashes.AsSpan(0, _count).Fill(-1);
+        ClearPages(_keys, 0, _count);
+        if (_values != null) ClearPages(_values, 0, _count);
         Array.Clear(_buckets);
         _liveCount = 0;
         _head = _count;
@@ -177,7 +191,7 @@ internal sealed class OrderedTable
         while (c.Index < _count)
         {
             int i = c.Index++;
-            if (_hashes[i] >= 0) { key = _keys[i]; value = _values == null ? key : _values[i]; return true; }
+            if (_hashes[i] >= 0) { key = At(_keys, i); value = _values == null ? key : At(_values, i); return true; }
         }
         key = default;
         value = default;
@@ -188,12 +202,31 @@ internal sealed class OrderedTable
     private void Grow()
     {
         if (_liveCount < _count / 2) { Compact(); return; }
-        int n = _keys.Length * 2;
-        Array.Resize(ref _keys, n);
-        if (_values != null) Array.Resize(ref _values, n);
+        int n = _hashes.Length * 2;
+        AddCapacity(ref _keys, n);
+        if (_values != null) AddCapacity(ref _values, n);
         Array.Resize(ref _hashes, n);
         Array.Resize(ref _next, n);
         RebuildIndex(n * 2);
+    }
+
+    /// <summary>Extends the pages to <paramref name="capacity"/> (twice the present capacity) entries.</summary>
+    private static void AddCapacity(ref JsValue[][] pages, int capacity)
+    {
+        if (capacity <= PageSize) { Array.Resize(ref pages[0], capacity); return; }
+        int have = pages.Length, want = capacity >> PageShift;
+        Array.Resize(ref pages, want);
+        for (int p = have; p < want; p++) pages[p] = new JsValue[PageSize];
+    }
+
+    private static void ClearPages(JsValue[][] pages, int from, int to)
+    {
+        while (from < to)
+        {
+            int inPage = from & PageMask, n = Math.Min(to - from, pages[from >> PageShift].Length - inPage);
+            Array.Clear(pages[from >> PageShift], inPage, n);
+            from += n;
+        }
     }
 
     private void RebuildIndex(int bucketCount)
@@ -220,14 +253,15 @@ internal sealed class OrderedTable
         {
             remap[r] = w;
             if (_hashes[r] < 0) continue;
-            _keys[w] = _keys[r];
-            if (_values != null) _values[w] = _values[r];
+            At(_keys, w) = At(_keys, r);
+            if (_values != null) At(_values, w) = At(_values, r);
             _hashes[w] = _hashes[r];
             w++;
         }
         remap[_count] = w;
-        for (int i = w; i < _count; i++) { _keys[i] = default; _hashes[i] = -1; }
-        if (_values != null) Array.Clear(_values, w, _count - w);
+        _hashes.AsSpan(w, _count - w).Fill(-1);
+        ClearPages(_keys, w, _count);
+        if (_values != null) ClearPages(_values, w, _count);
         _count = w;
         _head = 0;
         RebuildIndex(_buckets.Length);

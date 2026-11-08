@@ -174,7 +174,7 @@ internal sealed partial class Vm
                 var arr = ((JsArray)regs[bp + code[pc + 4]].Ref!);
                 int dst = bp + code[pc + 1];
                 f.Pc = pc + 5;
-                regs[dst] = CallValue(fv, tr < 0 ? default : regs[bp + tr], new ReadOnlySpan<JsValue>(arr.Items, 0, (int)arr.Length));
+                regs[dst] = CallValue(fv, tr < 0 ? default : regs[bp + tr], arr.ContiguousElements());
                 return pc + 5;
             }
             case Op.NewSpread:
@@ -183,7 +183,7 @@ internal sealed partial class Vm
                 var arr = ((JsArray)regs[bp + code[pc + 3]].Ref!);
                 int dst = bp + code[pc + 1];
                 f.Pc = pc + 4;
-                regs[dst] = Construct(fv, new ReadOnlySpan<JsValue>(arr.Items, 0, (int)arr.Length));
+                regs[dst] = Construct(fv, arr.ContiguousElements());
                 return pc + 4;
             }
             case Op.SuperCallSpread:
@@ -191,7 +191,7 @@ internal sealed partial class Vm
                 int dst = bp + code[pc + 1];
                 var arr = ((JsArray)regs[bp + code[pc + 2]].Ref!);
                 f.Pc = pc + 3;
-                regs[dst] = SuperConstruct(f, new ReadOnlySpan<JsValue>(arr.Items, 0, (int)arr.Length));
+                regs[dst] = SuperConstruct(f, arr.ContiguousElements());
                 return pc + 3;
             }
             case Op.SuperBind:

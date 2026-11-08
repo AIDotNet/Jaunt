@@ -1165,7 +1165,7 @@ internal sealed partial class Vm
             if (top == Op.TailCallSpread)
             {
                 var sarr = (JsArray)regs[bp + code[pc + 4]].Ref!;
-                targs = new ReadOnlySpan<JsValue>(sarr.Items, 0, (int)sarr.Length);
+                targs = sarr.ContiguousElements();
             }
             else targs = new ReadOnlySpan<JsValue>(regs, bp + code[pc + 4], code[pc + 5]);
             if (top == Op.TailCallEval && fv.IsObject && ReferenceEquals(fv.Ref, Realm.EvalFunction))
