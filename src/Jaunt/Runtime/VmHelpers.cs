@@ -206,41 +206,102 @@ internal sealed partial class Vm
             ic.Holder = null;
             return new JsValue((double)arrObj.Length);
         }
-        if (ic.Kind == IcKind.Megamorphic || obj.Dict != null || !obj.CanCacheNamed(key))
-            return obj.Get(key, ov);
+        if (obj.Dict != null || !obj.CanCacheNamed(key)) return obj.Get(key, ov);
 
-        int slot = obj.FindOwn(key, out var flags);
+        if (ic.Kind == IcKind.Megamorphic)
+        {
+            // a site that has seen many shapes: Vm-wide (shape, name) → lookup result, so the lookup is a hash probe
+            // instead of a walk of the prototype chain with a dictionary lookup per object
+            if (keyValue.Ref is string ks && !obj.Shape.IsUnique)
+            {
+                var shape = obj.Shape;
+                int h = NamedHash(shape, ks);
+                if (ReferenceEquals(_npShape[h], shape) && ReferenceEquals(_npKey[h], ks))
+                {
+                    byte ck = _npKind[h];
+                    if (ck is IcKind.OwnData or IcKind.OwnGetter || _npEpoch[h] == Realm.ProtoEpoch)
+                        return NamedResult(ck, obj, _npHolder[h], _npSlot[h], ov);
+                }
+                if (!LookupNamed(obj, key, out var mk, out var mh, out var ms, out bool mc)) return obj.Get(key, ov);
+                if (mc || mk is IcKind.OwnData or IcKind.OwnGetter)
+                {
+                    _npShape[h] = shape; _npKey[h] = ks; _npKind[h] = mk; _npHolder[h] = mh; _npSlot[h] = ms; _npEpoch[h] = Realm.ProtoEpoch;
+                }
+                return NamedResult(mk, obj, mh, ms, ov);
+            }
+            return obj.Get(key, ov);
+        }
+
+        if (!LookupNamed(obj, key, out var kind, out var holder, out var slot, out bool cacheable)) return obj.Get(key, ov);
+        if (cacheable || kind is IcKind.OwnData or IcKind.OwnGetter) FillIc(ref ic, kind, obj.Shape, holder, slot);
+        return NamedResult(kind, obj, holder, slot, ov);
+    }
+
+    /// <summary>
+    /// Resolves a named property on an ordinary (shape-mode) receiver the way the inline caches model it: own data,
+    /// own accessor, data or accessor on a shape-mode prototype, or absent. False when an exotic prototype must answer
+    /// (the caller falls back to the generic [[Get]]). <paramref name="cacheable"/> is false when a dictionary-mode
+    /// object on the chain makes a prototype result or an absence unsafe to cache.
+    /// </summary>
+    private static bool LookupNamed(JsObject obj, in PropertyKey key, out byte kind, out JsObject? holder, out int slot, out bool cacheable)
+    {
+        holder = null;
+        cacheable = true;
+        slot = obj.FindOwn(key, out var flags);
         if (slot >= 0)
         {
-            var v = obj.ReadSlot(slot);
-            if ((flags & PropFlags.Accessor) != 0)
-            {
-                var getter = ((Accessor)v.Ref!).Getter;
-                return getter == null ? JsValue.Undefined : Call(JsValue.FromObject(getter), ov, ReadOnlySpan<JsValue>.Empty);
-            }
-            FillIc(ref ic, IcKind.OwnData, obj.Shape, null, slot);
-            return v;
+            kind = (flags & PropFlags.Accessor) != 0 ? IcKind.OwnGetter : IcKind.OwnData;
+            return true;
         }
-        // prototype chain
-        bool cacheable = true;
         for (var p = obj.Proto; p != null; p = p.Proto)
         {
-            if (p.IsExotic && !p.CanCacheNamed(key)) return p.Get(key, ov);
+            if (p.IsExotic && !p.CanCacheNamed(key)) { kind = IcKind.None; return false; }
             if (p.Dict != null) cacheable = false;
             int ps = p.FindOwn(key, out var pf);
             if (ps >= 0)
             {
-                var v = p.ReadSlot(ps);
-                if ((pf & PropFlags.Accessor) != 0)
-                {
-                    var getter = ((Accessor)v.Ref!).Getter;
-                    return getter == null ? JsValue.Undefined : Call(JsValue.FromObject(getter), ov, ReadOnlySpan<JsValue>.Empty);
-                }
-                if (cacheable) FillIc(ref ic, IcKind.ProtoData, obj.Shape, p, ps);
-                return v;
+                holder = p;
+                slot = ps;
+                kind = (pf & PropFlags.Accessor) != 0 ? IcKind.ProtoGetter : IcKind.ProtoData;
+                return true;
             }
         }
-        return JsValue.Undefined;
+        kind = IcKind.NotFound;
+        return true;
+    }
+
+    /// <summary>The value of a <see cref="LookupNamed"/> result (runs the getter for accessor kinds).</summary>
+    private JsValue NamedResult(byte kind, JsObject obj, JsObject? holder, int slot, in JsValue receiver)
+    {
+        switch (kind)
+        {
+            case IcKind.OwnData: return obj.ReadSlot(slot);
+            case IcKind.ProtoData: return holder!.ReadSlot(slot);
+            case IcKind.OwnGetter: return CallCachedGetter((Accessor)obj.ReadSlot(slot).Ref!, receiver);
+            case IcKind.ProtoGetter: return CallCachedGetter((Accessor)holder!.ReadSlot(slot).Ref!, receiver);
+            default: return JsValue.Undefined;
+        }
+    }
+
+    // Vm-wide named-property cache behind megamorphic sites: (shape, name) → kind/holder/slot (+ ProtoEpoch for
+    // prototype results and absences). A shape is an immutable layout and names are the sites' constant strings
+    // (matched by reference), so an entry is either exact or a miss.
+    private const int NamedCacheSize = 1024;
+    private readonly Shape?[] _npShape = new Shape?[NamedCacheSize];
+    private readonly object?[] _npKey = new object?[NamedCacheSize];
+    private readonly byte[] _npKind = new byte[NamedCacheSize];
+    private readonly JsObject?[] _npHolder = new JsObject?[NamedCacheSize];
+    private readonly int[] _npSlot = new int[NamedCacheSize];
+    private readonly int[] _npEpoch = new int[NamedCacheSize];
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static int NamedHash(Shape shape, string key) => (RuntimeHelpers.GetHashCode(shape) * 31 + RuntimeHelpers.GetHashCode(key)) & (NamedCacheSize - 1);
+
+    /// <summary>Invokes the getter of a cached accessor slot (an <see cref="Accessor"/> value) on <paramref name="receiver"/>.</summary>
+    internal JsValue CallCachedGetter(Accessor accessor, in JsValue receiver)
+    {
+        var getter = accessor.Getter;
+        return getter == null ? JsValue.Undefined : Call(JsValue.FromObject(getter), receiver, ReadOnlySpan<JsValue>.Empty);
     }
 
     private void FillIc(ref IcEntry ic, byte kind, Shape shape, JsObject? holder, int slot)

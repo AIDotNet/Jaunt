@@ -10,66 +10,88 @@ namespace Jaunt.Runtime;
 
 internal sealed class JsRegExp : JsObject
 {
+    /// <summary>
+    /// The compiled program (backends, group tables, source and flags): one shared, immutable object per
+    /// (pattern, flags), so a RegExp object carries a single reference instead of a copy of every field — a literal
+    /// evaluated in a loop allocates the object and its lastIndex slot, nothing else.
+    /// </summary>
+    internal RegExpProgram Program;
+
     /// <summary>.NET backend (patterns Acornima can adapt exactly); null when <see cref="Native"/> is used.</summary>
-    public SysRegex? Regex;
+    public SysRegex? Regex => Program.Regex;
     /// <summary>Native ECMAScript backend for patterns .NET cannot express (property escapes, v sets, modifiers...).</summary>
-    public JsRegex? Native;
+    public JsRegex? Native => Program.Native;
     /// <summary>
     /// Non-Unicode ignore-case patterns: .NET case equivalence differs from ECMAScript Canonicalize for some
     /// non-ASCII characters (e.g. U+212A KELVIN SIGN ~ k), so subjects containing non-ASCII text use this engine.
     /// </summary>
-    public JsRegex? NativeIgnoreCase;
+    public JsRegex? NativeIgnoreCase => Program.NativeIgnoreCase;
     /// <summary>Group indices per name (duplicate named groups map to several indices).</summary>
-    public int[][] NameGroups = Array.Empty<int[]>();
+    public int[][] NameGroups => Program.NameGroups;
     /// <summary>.NET backend: highest group number (named groups are numbered after the numbered ones).</summary>
-    public int DotnetMaxGroup;
+    public int DotnetMaxGroup => Program.DotnetMaxGroup;
     /// <summary>
     /// .NET backend: the same pattern on the native engine, used when a .NET match exceeds its time slice (the native
     /// engine charges the execution budget, so Timeout / cancellation / Interrupt apply). <see cref="SliceFallbackGroups"/>
     /// gives, per native group, the extra .NET number of a named group (0 for unnamed). Null when the native engine
     /// cannot compile the pattern.
     /// </summary>
-    public JsRegex? SliceFallback;
-    public int[]? SliceFallbackGroups;
-    public string Source = "";
-    private string _flags = "";
-    private bool _global, _sticky, _unicode, _hasIndices;
-    /// <summary>The flags string; the individual flags are cached because every exec reads them.</summary>
-    public string Flags
-    {
-        get => _flags;
-        set
-        {
-            _flags = value;
-            _global = value.Contains('g');
-            _sticky = value.Contains('y');
-            _unicode = value.Contains('u') || value.Contains('v');
-            _hasIndices = value.Contains('d');
-        }
-    }
+    public JsRegex? SliceFallback => Program.SliceFallback;
+    public int[]? SliceFallbackGroups => Program.SliceFallbackGroups;
+    public string Source => Program.Source;
+    /// <summary>The flags string; the individual flags are precomputed in the program because every exec reads them.</summary>
+    public string Flags => Program.Flags;
     /// <summary>lastIndex is the first (and, being non-configurable, permanent) own property: its value lives in slot 0.</summary>
     internal bool LastIndexInSlot0;
-    public int GroupCount;
-    public string[] GroupNames = Array.Empty<string>();
+    public int GroupCount => Program.Groups;
+    public string[] GroupNames => Program.Names;
     /// <summary>[[LegacyFeaturesEnabled]]: false for instances allocated with a new.target other than %RegExp%.</summary>
     public bool LegacyFeatures = true;
 
-    public JsRegExp(Realm realm, JsObject proto) : base(realm, proto) { }
+    public JsRegExp(Realm realm, JsObject proto, RegExpProgram program) : base(realm, proto) => Program = program;
     public override string ClassName => "RegExp";
 
-    public bool Global => _global;
-    public bool Sticky => _sticky;
-    public bool Unicode => _unicode;
-    public bool HasIndices => _hasIndices;
+    public bool Global => Program.Global;
+    public bool Sticky => Program.Sticky;
+    public bool Unicode => Program.Unicode;
+    public bool HasIndices => Program.HasIndices;
 
     /// <summary>[[Get]] of lastIndex without a property lookup in the common case (an ordinary object with a data slot).</summary>
     internal JsValue GetLastIndex() => LastIndexInSlot0 && Dict == null ? Slots[0] : Get("lastIndex");
 }
 
+/// <summary>A compiled regular expression: immutable after creation, shared by every RegExp object with the same pattern and flags.</summary>
+internal sealed class RegExpProgram
+{
+    public bool Cacheable;
+    public SysRegex? Regex;
+    public JsRegex? Native;
+    public JsRegex? NativeIgnoreCase;
+    public int Groups;
+    public string[] Names = Array.Empty<string>();
+    public int[][] NameGroups = Array.Empty<int[]>();
+    public int DotnetMaxGroup;
+    public JsRegex? SliceFallback;
+    public int[]? SliceFallbackGroups;
+    public long Bytes;
+    public string Source = "";
+    public string Flags = "";
+    public bool Global, Sticky, Unicode, HasIndices;
+
+    public void SetSourceAndFlags(string source, string flags)
+    {
+        Source = source;
+        Flags = flags;
+        Global = flags.Contains('g');
+        Sticky = flags.Contains('y');
+        Unicode = flags.Contains('u') || flags.Contains('v');
+        HasIndices = flags.Contains('d');
+    }
+}
+
 internal static class RegExpBuiltins
 {
-    private sealed class CacheEntry { public bool Cacheable; public SysRegex? Regex; public JsRegex? Native; public JsRegex? NativeIgnoreCase; public int Groups; public string[] Names = Array.Empty<string>(); public int[][] NameGroups = Array.Empty<int[]>(); public int DotnetMaxGroup; public JsRegex? SliceFallback; public int[]? SliceFallbackGroups; public long Bytes; }
-    private static readonly Dictionary<(string, string), CacheEntry> s_cache = new();
+    private static readonly Dictionary<(string, string), RegExpProgram> s_cache = new();
     private const int CacheLimit = 512;
     private const int MaxCachedPatternLength = 16 * 1024;
     private const long MaxCachedProgramBytes = 1L << 20, MaxCacheBytes = 32L << 20;
@@ -163,7 +185,7 @@ internal static class RegExpBuiltins
                 f = a[1].IsUndefined ? "" : Operations.ToString(realm, a[1]);
             }
             var fresh = Create(realm, p, f);
-            re.Regex = fresh.Regex; re.Native = fresh.Native; re.NativeIgnoreCase = fresh.NativeIgnoreCase; re.Source = fresh.Source; re.Flags = fresh.Flags; re.GroupCount = fresh.GroupCount; re.GroupNames = fresh.GroupNames; re.NameGroups = fresh.NameGroups; re.DotnetMaxGroup = fresh.DotnetMaxGroup; re.SliceFallback = fresh.SliceFallback; re.SliceFallbackGroups = fresh.SliceFallbackGroups;
+            re.Program = fresh.Program;
             re.SetOrThrow("lastIndex", JsValue.Zero);
             return a.This;
         });
@@ -349,7 +371,7 @@ internal static class RegExpBuiltins
     /// </summary>
     internal static JsRegExp CreateAtSite(Realm realm, string pattern, string flags, ref object? siteCache)
     {
-        if (siteCache is not CacheEntry entry)
+        if (siteCache is not RegExpProgram entry)
         {
             entry = GetEntry(realm, pattern, flags);
             if (entry.Cacheable) siteCache = entry;   // same size limits as the process-wide cache
@@ -357,14 +379,14 @@ internal static class RegExpBuiltins
         return FromEntry(realm, entry, pattern, flags, null);
     }
 
-    private static CacheEntry GetEntry(Realm realm, string pattern, string flags)
+    private static RegExpProgram GetEntry(Realm realm, string pattern, string flags)
     {
         foreach (char c in flags)
         {
             if ("dgimsuvy".IndexOf(c) < 0 || flags.IndexOf(c) != flags.LastIndexOf(c))
                 throw JsErrors.SyntaxError(realm, $"Invalid regular expression flags '{flags}'");
         }
-        CacheEntry? entry;
+        RegExpProgram? entry;
         lock (s_cache)
         {
             s_cache.TryGetValue((pattern, flags), out entry);
@@ -416,7 +438,7 @@ internal static class RegExpBuiltins
                 // ActualRegexGroupCount counts group 0 (the whole match); JS capture count excludes it
                 int maxNum = 0;
                 foreach (var gn in regex.GetGroupNumbers()) if (gn > maxNum) maxNum = gn;
-                entry = new CacheEntry { Regex = regex, Groups = Math.Max(0, result.ActualRegexGroupCount - 1), Names = names.ToArray(), NameGroups = nameGroups.ToArray(), DotnetMaxGroup = maxNum };
+                entry = new RegExpProgram { Regex = regex, Groups = Math.Max(0, result.ActualRegexGroupCount - 1), Names = names.ToArray(), NameGroups = nameGroups.ToArray(), DotnetMaxGroup = maxNum };
                 if (preparsed != null && preparsed.CaptureCount - 1 == entry.Groups)
                 {
                     // Acornima's adaptation wraps every named group in an unnamed one, so .NET group g is JS group g
@@ -453,7 +475,7 @@ internal static class RegExpBuiltins
                     if (at < 0) { names.Add(n); nameGroups.Add(new[] { g }); }
                     else nameGroups[at] = [.. nameGroups[at], g];
                 }
-                entry = new CacheEntry { Native = native, Groups = native.CaptureCount - 1, Names = names.ToArray(), NameGroups = nameGroups.ToArray() };
+                entry = new RegExpProgram { Native = native, Groups = native.CaptureCount - 1, Names = names.ToArray(), NameGroups = nameGroups.ToArray() };
             }
             // compiling is an allocation of this execution (charged once, at compile time; cache hits share the program)
             var nativeProgram = entry.Native ?? entry.SliceFallback ?? entry.NativeIgnoreCase;
@@ -463,6 +485,7 @@ internal static class RegExpBuiltins
             realm.ChargeBytes((nativeProgram?.CodeBytes ?? 0) + dotnetBytes);   // sets were charged as they were built
             entry.Bytes = programBytes;
             // the cache is process-wide and outlives engines: bounded by entries and by bytes, huge programs not kept
+            entry.SetSourceAndFlags(pattern, flags);
             entry.Cacheable = pattern.Length <= MaxCachedPatternLength && programBytes <= MaxCachedProgramBytes;
             if (entry.Cacheable)
             lock (s_cache)
@@ -476,22 +499,9 @@ internal static class RegExpBuiltins
         return entry;
     }
 
-    private static JsRegExp FromEntry(Realm realm, CacheEntry entry, string pattern, string flags, JsObject? proto)
+    private static JsRegExp FromEntry(Realm realm, RegExpProgram entry, string pattern, string flags, JsObject? proto)
     {
-        var re = new JsRegExp(realm, proto ?? realm.RegExpPrototype)
-        {
-            Regex = entry.Regex,
-            Native = entry.Native,
-            NativeIgnoreCase = entry.NativeIgnoreCase,
-            NameGroups = entry.NameGroups,
-            DotnetMaxGroup = entry.DotnetMaxGroup,
-            SliceFallback = entry.SliceFallback,
-            SliceFallbackGroups = entry.SliceFallbackGroups,
-            Source = pattern,
-            Flags = flags,
-            GroupCount = entry.Groups,
-            GroupNames = entry.Names,
-        };
+        var re = new JsRegExp(realm, proto ?? realm.RegExpPrototype, entry);
         re.AddOwnProperty("lastIndex", JsValue.Zero, PropFlags.Writable);
         re.LastIndexInSlot0 = true;
         return re;

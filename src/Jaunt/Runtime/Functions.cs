@@ -103,6 +103,8 @@ internal static class IcKind
     /// index) → own data slot. Filled by the GetElem/SetElem slow paths; SetElem fills only writable properties.
     /// </summary>
     public const byte KeyedOwnData = 11;
+    /// <summary>The name is absent from the receiver and its (shape-mode) prototype chain; valid while ProtoEpoch is unchanged.</summary>
+    public const byte NotFound = 12;
     public const byte Megamorphic = 255;
 }
 
