@@ -110,7 +110,7 @@ internal sealed partial class Vm
                         {
                             var e = f.Env!;
                             for (int d = Unsafe.Add(ref ip, 1); d > 0; d--) e = e.Parent!;
-                            e.Slots[Unsafe.Add(ref ip, 2)] = Unsafe.Add(ref r0, Unsafe.Add(ref ip, 3));
+                            JsValue.Store(ref e.Slots[Unsafe.Add(ref ip, 2)], Unsafe.Add(ref r0, Unsafe.Add(ref ip, 3)));
                             ip = ref Unsafe.Add(ref ip, 4);
                             continue;
                         }
@@ -119,7 +119,7 @@ internal sealed partial class Vm
                             var e = f.Env!;
                             for (int d = Unsafe.Add(ref ip, 1); d > 0; d--) e = e.Parent!;
                             if (e.Slots[Unsafe.Add(ref ip, 2)].IsEmpty) { f.Pc = PcAt(ref code0, ref ip) + 1; thrown = TdzError(f.K[Unsafe.Add(ref ip, 4)]); goto Unwind; }
-                            e.Slots[Unsafe.Add(ref ip, 2)] = Unsafe.Add(ref r0, Unsafe.Add(ref ip, 3));
+                            JsValue.Store(ref e.Slots[Unsafe.Add(ref ip, 2)], Unsafe.Add(ref r0, Unsafe.Add(ref ip, 3)));
                             ip = ref Unsafe.Add(ref ip, 5);
                             continue;
                         }
@@ -253,12 +253,12 @@ internal sealed partial class Vm
                                 var obj = Unsafe.As<JsObject>(ov.Ref!);
                                 if (ReferenceEquals(obj.Shape, ic.Shape))
                                 {
-                                    if (ic.Kind == IcKind.OwnData) { obj.Slots[ic.Slot] = Unsafe.Add(ref r0, Unsafe.Add(ref ip, 3)); ip = ref Unsafe.Add(ref ip, 5); continue; }
+                                    if (ic.Kind == IcKind.OwnData) { JsValue.Store(ref obj.Slots[ic.Slot], Unsafe.Add(ref r0, Unsafe.Add(ref ip, 3))); ip = ref Unsafe.Add(ref ip, 5); continue; }
                                     if (ic.Kind == IcKind.AddTransition && ic.Epoch == ProtoEpoch && obj.Extensible)
                                     {
                                         int slot = ic.Slot;
                                         if (slot >= obj.Slots.Length) GrowSlots(obj, slot);
-                                        obj.Slots[slot] = Unsafe.Add(ref r0, Unsafe.Add(ref ip, 3));
+                                        JsValue.Store(ref obj.Slots[slot], Unsafe.Add(ref r0, Unsafe.Add(ref ip, 3)));
                                         obj.Shape = ic.NewShape!;
                                         Realm.ChargeProperty();
                                         ip = ref Unsafe.Add(ref ip, 5);
@@ -322,7 +322,7 @@ internal sealed partial class Vm
                                     uint idx = (uint)dk;
                                     if (idx == dk && idx < arr.Length && idx < (uint)arr.Items.Length && arr.Items[idx].IsNotEmpty)
                                     {
-                                        arr.Items[idx] = Unsafe.Add(ref r0, Unsafe.Add(ref ip, 3));
+                                        JsValue.Store(ref arr.Items[idx], Unsafe.Add(ref r0, Unsafe.Add(ref ip, 3)));
                                         ip = ref Unsafe.Add(ref ip, 5);
                                         continue;
                                     }
@@ -343,7 +343,7 @@ internal sealed partial class Vm
                                     var obj = Unsafe.As<JsObject>(ov.Ref!);
                                     if (ReferenceEquals(obj.Shape, ic.Shape) && (kv.IsNumber ? ic.Cell == null && kv.Num == ic.Epoch : ReferenceEquals(ic.Cell, kv.Ref)))
                                     {
-                                        obj.Slots[ic.Slot] = Unsafe.Add(ref r0, Unsafe.Add(ref ip, 3));
+                                        JsValue.Store(ref obj.Slots[ic.Slot], Unsafe.Add(ref r0, Unsafe.Add(ref ip, 3)));
                                         ip = ref Unsafe.Add(ref ip, 5);
                                         continue;
                                     }
