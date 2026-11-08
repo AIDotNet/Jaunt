@@ -716,22 +716,22 @@ internal sealed partial class Vm
     private void PrivateDefine(in JsValue target, JsPrivateName name, JsValue value)
     {
         var obj = target.AsObjectUnchecked;
-        var pe = obj.PrivateElements;
-        if (pe != null && pe.ContainsKey(name))
+        if (obj.FindPrivate(name) >= 0)
             throw JsErrors.TypeError(Realm, $"Cannot initialize {name.Description} twice on the same object");
         // proposal-nonextensible-applies-to-private: private elements cannot be added to non-extensible objects
         if (!obj.IsExtensibleCheck())
             throw JsErrors.TypeError(Realm, $"Cannot define private member {name.Description} on a non-extensible object");
-        (obj.PrivateElements ??= new Dictionary<object, JsValue>(ReferenceEqualityComparer.Instance)).Add(name, value);
+        obj.AddPrivate(name, value);
     }
 
     private JsValue PrivateGet(in JsValue target, JsPrivateName name)
     {
-        if (target.IsNotObject || target.AsObjectUnchecked.PrivateElements is not { } pe || !pe.TryGetValue(name, out var v))
+        int i = target.IsNotObject ? -1 : target.AsObjectUnchecked.FindPrivate(name);
+        if (i < 0)
             throw JsErrors.TypeError(Realm, $"Cannot read private member {name.Description} from an object whose class did not declare it");
         switch (name.Kind)
         {
-            case 0: return v;
+            case 0: return target.AsObjectUnchecked.PrivateElements![i].Value;
             case 1: return JsValue.FromObject(name.Method!);
             default:
                 if (name.Getter == null) throw JsErrors.TypeError(Realm, $"'{name.Description}' was defined without a getter");
@@ -741,11 +741,12 @@ internal sealed partial class Vm
 
     private void PrivateSet(in JsValue target, JsPrivateName name, JsValue value)
     {
-        if (target.IsNotObject || target.AsObjectUnchecked.PrivateElements is not { } pe || !pe.ContainsKey(name))
+        int i = target.IsNotObject ? -1 : target.AsObjectUnchecked.FindPrivate(name);
+        if (i < 0)
             throw JsErrors.TypeError(Realm, $"Cannot write private member {name.Description} to an object whose class did not declare it");
         switch (name.Kind)
         {
-            case 0: pe[name] = value; return;
+            case 0: target.AsObjectUnchecked.PrivateElements![i].Value = value; return;
             case 1: throw JsErrors.TypeError(Realm, $"Private method {name.Description} is not writable");
             default:
                 if (name.Setter == null) throw JsErrors.TypeError(Realm, $"'{name.Description}' was defined without a setter");

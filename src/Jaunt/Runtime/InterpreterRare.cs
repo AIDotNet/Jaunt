@@ -249,7 +249,7 @@ internal sealed partial class Vm
                 var ov = regs[bp + code[pc + 2]];
                 if (ov.IsNotObject) throw JsErrors.TypeError(realm, "Cannot use 'in' operator to search for a private field in a non-object");
                 var name = (JsPrivateName)regs[bp + code[pc + 3]].Ref!;
-                regs[bp + code[pc + 1]] = JsValue.FromBool(ov.AsObjectUnchecked.PrivateElements?.ContainsKey(name) == true);
+                regs[bp + code[pc + 1]] = JsValue.FromBool(ov.AsObjectUnchecked.FindPrivate(name) >= 0);
                 return pc + 4;
             }
 

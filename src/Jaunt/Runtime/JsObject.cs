@@ -13,6 +13,12 @@ internal sealed class LazyFunction
     public LazyFunction(string name, int length, NativeFn fn) { Name = name; Length = length; Fn = fn; }
 }
 
+internal struct PrivateElement
+{
+    public JsPrivateName? Name;
+    public JsValue Value;
+}
+
 /// <summary>
 /// Ordinary JS object. Exotic objects override the virtual internal methods (ECMA-262 [[Get]], [[Set]], ...).
 /// Ordinary objects store named properties in shape+slot layout and fall back to a dictionary when they get
@@ -43,10 +49,44 @@ internal class JsObject
     }
     internal Shape? ChildRootShape;
     internal Shape? FunctionChildShape;
-    /// <summary>Private class elements (#x), keyed by private name identity.</summary>
-    internal Dictionary<object, JsValue>? PrivateElements;
+    /// <summary>Private class elements (#x): found by a scan for the name's identity, the end marked by a null name or the array's end.</summary>
+    internal PrivateElement[]? PrivateElements;
 
     private static readonly JsValue[] NoSlots = Array.Empty<JsValue>();
+
+    /// <summary>The index in <see cref="PrivateElements"/> of the element named <paramref name="name"/>, or -1.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal int FindPrivate(JsPrivateName name)
+    {
+        var pe = PrivateElements;
+        if (pe != null)
+        {
+            for (int i = 0; i < pe.Length; i++)
+            {
+                if (ReferenceEquals(pe[i].Name, name)) return i;
+            }
+        }
+        return -1;
+    }
+
+    /// <summary>Appends a private element whose name is known to be absent.</summary>
+    internal void AddPrivate(JsPrivateName name, JsValue value)
+    {
+        var pe = PrivateElements;
+        int i = 0;
+        if (pe == null) PrivateElements = pe = new PrivateElement[2];
+        else
+        {
+            while (i < pe.Length && pe[i].Name != null) i++;
+            if (i == pe.Length)
+            {
+                Array.Resize(ref pe, i * 2);
+                PrivateElements = pe;
+            }
+        }
+        pe[i].Name = name;
+        pe[i].Value = value;
+    }
 
     public JsObject(Realm realm, JsObject? proto)
     {
