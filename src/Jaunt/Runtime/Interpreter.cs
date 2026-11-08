@@ -390,96 +390,145 @@ internal sealed partial class Vm
                         {
                             ref var a = ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 2));
                             ref var b = ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 3));
-                            if (a.IsNumber && b.IsNumber) Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = new JsValue(a.Num - b.Num);
-                            else { f.Pc = PcAt(ref code0, ref ip) + 1; Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = ArithSlow(Op.Sub, a, b); }
-                            ip = ref Unsafe.Add(ref ip, 4);
-                            continue;
+                            if (a.IsNumber && b.IsNumber) { Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = new JsValue(a.Num - b.Num); ip = ref Unsafe.Add(ref ip, 4); continue; }
+                            goto ArithOutOfLine;
                         }
                         case Op.Mul:
                         {
                             ref var a = ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 2));
                             ref var b = ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 3));
-                            if (a.IsNumber && b.IsNumber) Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = new JsValue(a.Num * b.Num);
-                            else { f.Pc = PcAt(ref code0, ref ip) + 1; Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = ArithSlow(Op.Mul, a, b); }
-                            ip = ref Unsafe.Add(ref ip, 4);
-                            continue;
+                            if (a.IsNumber && b.IsNumber) { Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = new JsValue(a.Num * b.Num); ip = ref Unsafe.Add(ref ip, 4); continue; }
+                            goto ArithOutOfLine;
                         }
                         case Op.Div:
                         {
                             ref var a = ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 2));
                             ref var b = ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 3));
-                            if (a.IsNumber && b.IsNumber) Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = new JsValue(a.Num / b.Num);
-                            else { f.Pc = PcAt(ref code0, ref ip) + 1; Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = ArithSlow(Op.Div, a, b); }
-                            ip = ref Unsafe.Add(ref ip, 4);
-                            continue;
+                            if (a.IsNumber && b.IsNumber) { Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = new JsValue(a.Num / b.Num); ip = ref Unsafe.Add(ref ip, 4); continue; }
+                            goto ArithOutOfLine;
                         }
                         case Op.Mod:
                         {
                             ref var a = ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 2));
                             ref var b = ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 3));
-                            if (a.IsNumber && b.IsNumber) Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = new JsValue(JsMod(a.Num, b.Num));
-                            else { f.Pc = PcAt(ref code0, ref ip) + 1; Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = ArithSlow(Op.Mod, a, b); }
-                            ip = ref Unsafe.Add(ref ip, 4);
-                            continue;
+                            if (a.IsNumber && b.IsNumber) { Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = new JsValue(JsMod(a.Num, b.Num)); ip = ref Unsafe.Add(ref ip, 4); continue; }
+                            goto ArithOutOfLine;
                         }
                         case Op.BitAnd:
+                        {
+                            ref var a = ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 2));
+                            ref var b = ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 3));
+                            if (a.IsNumber && b.IsNumber)
+                            {
+                                int x = Operations.DoubleToInt32(a.Num), y = Operations.DoubleToInt32(b.Num);
+                                Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = new JsValue(x & y);
+                                ip = ref Unsafe.Add(ref ip, 4);
+                                continue;
+                            }
+                            goto ArithOutOfLine;
+                        }
                         case Op.BitOr:
+                        {
+                            ref var a = ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 2));
+                            ref var b = ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 3));
+                            if (a.IsNumber && b.IsNumber)
+                            {
+                                int x = Operations.DoubleToInt32(a.Num), y = Operations.DoubleToInt32(b.Num);
+                                Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = new JsValue(x | y);
+                                ip = ref Unsafe.Add(ref ip, 4);
+                                continue;
+                            }
+                            goto ArithOutOfLine;
+                        }
                         case Op.BitXor:
+                        {
+                            ref var a = ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 2));
+                            ref var b = ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 3));
+                            if (a.IsNumber && b.IsNumber)
+                            {
+                                int x = Operations.DoubleToInt32(a.Num), y = Operations.DoubleToInt32(b.Num);
+                                Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = new JsValue(x ^ y);
+                                ip = ref Unsafe.Add(ref ip, 4);
+                                continue;
+                            }
+                            goto ArithOutOfLine;
+                        }
                         case Op.Shl:
+                        {
+                            ref var a = ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 2));
+                            ref var b = ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 3));
+                            if (a.IsNumber && b.IsNumber)
+                            {
+                                int x = Operations.DoubleToInt32(a.Num), y = Operations.DoubleToInt32(b.Num);
+                                Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = new JsValue(x << (y & 31));
+                                ip = ref Unsafe.Add(ref ip, 4);
+                                continue;
+                            }
+                            goto ArithOutOfLine;
+                        }
                         case Op.Shr:
+                        {
+                            ref var a = ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 2));
+                            ref var b = ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 3));
+                            if (a.IsNumber && b.IsNumber)
+                            {
+                                int x = Operations.DoubleToInt32(a.Num), y = Operations.DoubleToInt32(b.Num);
+                                Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = new JsValue(x >> (y & 31));
+                                ip = ref Unsafe.Add(ref ip, 4);
+                                continue;
+                            }
+                            goto ArithOutOfLine;
+                        }
                         case Op.UShr:
                         {
                             ref var a = ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 2));
                             ref var b = ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 3));
-                            int x, y;
-                            if (a.IsNumber && b.IsNumber) { x = Operations.DoubleToInt32(a.Num); y = Operations.DoubleToInt32(b.Num); }
-                            else
+                            if (a.IsNumber && b.IsNumber)
                             {
-                                f.Pc = PcAt(ref code0, ref ip) + 1;
-                                Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = ArithSlow((Op)ip, a, b);
+                                int x = Operations.DoubleToInt32(a.Num), y = Operations.DoubleToInt32(b.Num);
+                                Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = new JsValue((double)((uint)x >> (y & 31)));
                                 ip = ref Unsafe.Add(ref ip, 4);
                                 continue;
                             }
-                            Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = (Op)ip switch
-                            {
-                                Op.BitAnd => new JsValue(x & y),
-                                Op.BitOr => new JsValue(x | y),
-                                Op.BitXor => new JsValue(x ^ y),
-                                Op.Shl => new JsValue(x << (y & 31)),
-                                Op.Shr => new JsValue(x >> (y & 31)),
-                                _ => new JsValue((double)((uint)x >> (y & 31))),
-                            };
-                            ip = ref Unsafe.Add(ref ip, 4);
-                            continue;
+                            goto ArithOutOfLine;
                         }
                         case Op.StrictEq:
                         case Op.StrictNe:
                         {
                             ref var a = ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 2));
                             ref var b = ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 3));
-                            bool eq = a.IsNumber && b.IsNumber ? a.Num == b.Num : StrictEqualsSlow(a, b);
+                            bool eq = StrictEqualsInline(a, b);
                             Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = JsValue.FromBool(eq == ((Op)ip == Op.StrictEq));
                             ip = ref Unsafe.Add(ref ip, 4);
                             continue;
                         }
                         case Op.Lt:
+                        {
+                            ref var a = ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 2));
+                            ref var b = ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 3));
+                            if (a.IsNumber && b.IsNumber) { Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = JsValue.FromBool(a.Num < b.Num); ip = ref Unsafe.Add(ref ip, 4); continue; }
+                            goto CompareOutOfLine;
+                        }
                         case Op.Le:
+                        {
+                            ref var a = ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 2));
+                            ref var b = ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 3));
+                            if (a.IsNumber && b.IsNumber) { Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = JsValue.FromBool(a.Num <= b.Num); ip = ref Unsafe.Add(ref ip, 4); continue; }
+                            goto CompareOutOfLine;
+                        }
                         case Op.Gt:
+                        {
+                            ref var a = ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 2));
+                            ref var b = ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 3));
+                            if (a.IsNumber && b.IsNumber) { Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = JsValue.FromBool(a.Num > b.Num); ip = ref Unsafe.Add(ref ip, 4); continue; }
+                            goto CompareOutOfLine;
+                        }
                         case Op.Ge:
                         {
                             ref var a = ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 2));
                             ref var b = ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 3));
-                            var op = (Op)ip;
-                            bool r;
-                            if (a.IsNumber && b.IsNumber)
-                            {
-                                double x = a.Num, y = b.Num;
-                                r = op == Op.Lt ? x < y : op == Op.Le ? x <= y : op == Op.Gt ? x > y : x >= y;
-                            }
-                            else { f.Pc = PcAt(ref code0, ref ip) + 1; r = CompareSlow(op, a, b); }
-                            Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = JsValue.FromBool(r);
-                            ip = ref Unsafe.Add(ref ip, 4);
-                            continue;
+                            if (a.IsNumber && b.IsNumber) { Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = JsValue.FromBool(a.Num >= b.Num); ip = ref Unsafe.Add(ref ip, 4); continue; }
+                            goto CompareOutOfLine;
                         }
                         case Op.Neg:
                         {
@@ -543,43 +592,56 @@ internal sealed partial class Vm
 
                         // ---------------------------------------------------------- fused compare-and-branch
                         case Op.LtJmpFalse:
+                        {
+                            ref var a = ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1));
+                            ref var b = ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 2));
+                            if (a.IsNumber && b.IsNumber)
+                            {
+                                if (a.Num < b.Num) { ip = ref Unsafe.Add(ref ip, 4); continue; }
+                                goto JumpOperand3;
+                            }
+                            goto CompareJmpOutOfLine;
+                        }
                         case Op.LeJmpFalse:
+                        {
+                            ref var a = ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1));
+                            ref var b = ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 2));
+                            if (a.IsNumber && b.IsNumber)
+                            {
+                                if (a.Num <= b.Num) { ip = ref Unsafe.Add(ref ip, 4); continue; }
+                                goto JumpOperand3;
+                            }
+                            goto CompareJmpOutOfLine;
+                        }
                         case Op.GtJmpFalse:
+                        {
+                            ref var a = ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1));
+                            ref var b = ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 2));
+                            if (a.IsNumber && b.IsNumber)
+                            {
+                                if (a.Num > b.Num) { ip = ref Unsafe.Add(ref ip, 4); continue; }
+                                goto JumpOperand3;
+                            }
+                            goto CompareJmpOutOfLine;
+                        }
                         case Op.GeJmpFalse:
                         {
                             ref var a = ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1));
                             ref var b = ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 2));
-                            var op = (Op)ip;
-                            bool r;
                             if (a.IsNumber && b.IsNumber)
                             {
-                                double x = a.Num, y = b.Num;
-                                r = op == Op.LtJmpFalse ? x < y : op == Op.LeJmpFalse ? x <= y : op == Op.GtJmpFalse ? x > y : x >= y;
+                                if (a.Num >= b.Num) { ip = ref Unsafe.Add(ref ip, 4); continue; }
+                                goto JumpOperand3;
                             }
-                            else
-                            {
-                                f.Pc = PcAt(ref code0, ref ip) + 1;
-                                r = CompareSlow(op == Op.LtJmpFalse ? Op.Lt : op == Op.LeJmpFalse ? Op.Le : op == Op.GtJmpFalse ? Op.Gt : Op.Ge, a, b);
-                            }
-                            if (r) { ip = ref Unsafe.Add(ref ip, 4); continue; }
-                            int target = Unsafe.Add(ref ip, 3);
-                            ref int tip = ref Unsafe.Add(ref code0, target);
-                            if (!Unsafe.IsAddressGreaterThan(ref tip, ref ip) && --_ticks <= 0) { f.Pc = PcAt(ref code0, ref ip) + 1; Checkpoint(); }
-                            ip = ref tip;
-                            continue;
+                            goto CompareJmpOutOfLine;
                         }
                         case Op.StrictEqJmpFalse:
                         case Op.StrictNeJmpFalse:
                         {
                             ref var a = ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1));
                             ref var b = ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 2));
-                            bool eq = a.IsNumber && b.IsNumber ? a.Num == b.Num : StrictEqualsSlow(a, b);
-                            if (eq == ((Op)ip == Op.StrictEqJmpFalse)) { ip = ref Unsafe.Add(ref ip, 4); continue; }
-                            int target = Unsafe.Add(ref ip, 3);
-                            ref int tip = ref Unsafe.Add(ref code0, target);
-                            if (!Unsafe.IsAddressGreaterThan(ref tip, ref ip) && --_ticks <= 0) { f.Pc = PcAt(ref code0, ref ip) + 1; Checkpoint(); }
-                            ip = ref tip;
-                            continue;
+                            if (StrictEqualsInline(a, b) == ((Op)ip == Op.StrictEqJmpFalse)) { ip = ref Unsafe.Add(ref ip, 4); continue; }
+                            goto JumpOperand3;
                         }
 
                         // ---------------------------------------------------------- jumps
@@ -770,6 +832,36 @@ internal sealed partial class Vm
                     }
                 }
 
+    ArithOutOfLine:
+        f.Pc = PcAt(ref code0, ref ip) + 1;
+        Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = ArithSlow((Op)ip, Unsafe.Add(ref r0, Unsafe.Add(ref ip, 2)), Unsafe.Add(ref r0, Unsafe.Add(ref ip, 3)));
+        ip = ref Unsafe.Add(ref ip, 4);
+        goto Dispatch;
+
+    CompareOutOfLine:
+        f.Pc = PcAt(ref code0, ref ip) + 1;
+        Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = JsValue.FromBool(CompareSlow((Op)ip, Unsafe.Add(ref r0, Unsafe.Add(ref ip, 2)), Unsafe.Add(ref r0, Unsafe.Add(ref ip, 3))));
+        ip = ref Unsafe.Add(ref ip, 4);
+        goto Dispatch;
+
+    CompareJmpOutOfLine:
+        f.Pc = PcAt(ref code0, ref ip) + 1;
+        {
+            var op = (Op)ip;
+            if (CompareSlow(op == Op.LtJmpFalse ? Op.Lt : op == Op.LeJmpFalse ? Op.Le : op == Op.GtJmpFalse ? Op.Gt : Op.Ge, Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)), Unsafe.Add(ref r0, Unsafe.Add(ref ip, 2))))
+            {
+                ip = ref Unsafe.Add(ref ip, 4);
+                goto Dispatch;
+            }
+        }
+    JumpOperand3:
+        {
+            ref int tip = ref Unsafe.Add(ref code0, Unsafe.Add(ref ip, 3));
+            if (!Unsafe.IsAddressGreaterThan(ref tip, ref ip) && --_ticks <= 0) { f.Pc = PcAt(ref code0, ref ip) + 1; Checkpoint(); }
+            ip = ref tip;
+            goto Dispatch;
+        }
+
     EnterClosure:
         {
             if (--_ticks <= 0) Checkpoint();
@@ -815,6 +907,19 @@ internal sealed partial class Vm
         ip = ref Unsafe.Add(ref code0, f.Pc);
         r0 = ref Unsafe.Add(ref MemoryMarshal.GetArrayDataReference(f.Regs), f.Base);
         goto Dispatch;
+    }
+
+    /// <summary>
+    /// IsStrictlyEqual without a call unless both are strings or BigInts with different references: values with different
+    /// <see cref="JsValue.Bits"/> that are not two numbers have different types (or are different booleans), and for equal
+    /// Bits (type, or true/false/undefined/null itself) the same reference is the same value.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static bool StrictEqualsInline(in JsValue a, in JsValue b)
+    {
+        if (a.IsNumber && b.IsNumber) return a.Num == b.Num;
+        if (a.Bits != b.Bits) return false;
+        return ReferenceEquals(a.Ref, b.Ref) || StrictEqualsSlow(a, b);
     }
 
     /// <summary>The index of the instruction at <paramref name="ip"/>.</summary>
