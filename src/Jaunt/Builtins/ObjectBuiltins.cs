@@ -396,6 +396,30 @@ internal static class ObjectBuiltins
 
 internal static class FunctionBuiltins
 {
+    /// <summary>
+    /// Function.prototype.call; the interpreter recognizes this delegate (and <see cref="ApplyFn"/>) and, when the target is a
+    /// plain closure, pushes the target's frame itself instead of re-entering the interpreter through here
+    /// (<c>Vm.TryPushRedirectedCall</c>). This body runs for every other target and for calls made from native code.
+    /// </summary>
+    internal static readonly NativeFn CallFn = static (in NativeArgs a) =>
+    {
+        if (!a.This.IsFunction) throw JsErrors.TypeError(a.Realm, "Function.prototype.call called on non-function");
+        var rest = a.Args.Length > 1 ? a.Args.Slice(1) : ReadOnlySpan<JsValue>.Empty;
+        return ((JsFunctionObject)a.This.Ref!).Call(a[0], rest);
+    };
+
+    /// <summary>Function.prototype.apply; see <see cref="CallFn"/>.</summary>
+    internal static readonly NativeFn ApplyFn = static (in NativeArgs a) =>
+    {
+        if (!a.This.IsFunction) throw JsErrors.TypeError(a.Realm, "Function.prototype.apply was called on non-function");
+        var fn = (JsFunctionObject)a.This.Ref!;
+        if (a[1].IsNullOrUndefined) return fn.Call(a[0], ReadOnlySpan<JsValue>.Empty);
+        if (a[1].Ref is JsArray arr && arr.Dense && arr.Length <= arr.Items.Length && Array.IndexOf(arr.Items, JsValue.Empty, 0, (int)arr.Length) < 0)
+            return fn.Call(a[0], new ReadOnlySpan<JsValue>(arr.Items, 0, (int)arr.Length).ToArray());
+        var list = Operations.CreateListFromArrayLike(a.Realm, a[1]);
+        return fn.Call(a[0], list.ToArray());
+    };
+
     public static void Setup(Realm r)
     {
         var proto = r.FunctionPrototype;
@@ -403,22 +427,8 @@ internal static class FunctionBuiltins
         r.FunctionConstructor = ctor;
         r.DefineGlobal("Function", JsValue.FromObject(ctor));
 
-        r.Method(proto, "call", 1, static (in NativeArgs a) =>
-        {
-            if (!a.This.IsFunction) throw JsErrors.TypeError(a.Realm, "Function.prototype.call called on non-function");
-            var rest = a.Args.Length > 1 ? a.Args.Slice(1) : ReadOnlySpan<JsValue>.Empty;
-            return ((JsFunctionObject)a.This.Ref!).Call(a[0], rest);
-        });
-        r.Method(proto, "apply", 2, static (in NativeArgs a) =>
-        {
-            if (!a.This.IsFunction) throw JsErrors.TypeError(a.Realm, "Function.prototype.apply was called on non-function");
-            var fn = (JsFunctionObject)a.This.Ref!;
-            if (a[1].IsNullOrUndefined) return fn.Call(a[0], ReadOnlySpan<JsValue>.Empty);
-            if (a[1].Ref is JsArray arr && arr.Dense && arr.Length <= arr.Items.Length && Array.IndexOf(arr.Items, JsValue.Empty, 0, (int)arr.Length) < 0)
-                return fn.Call(a[0], new ReadOnlySpan<JsValue>(arr.Items, 0, (int)arr.Length).ToArray());
-            var list = Operations.CreateListFromArrayLike(a.Realm, a[1]);
-            return fn.Call(a[0], list.ToArray());
-        });
+        r.Method(proto, "call", 1, CallFn);
+        r.Method(proto, "apply", 2, ApplyFn);
         r.Method(proto, "bind", 1, static (in NativeArgs a) =>
         {
             var realm = a.Realm;

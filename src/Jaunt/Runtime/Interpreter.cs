@@ -721,6 +721,12 @@ internal sealed partial class Vm
                                 continue;
                             }
                             if (fv.IsNotObject || fv.Ref is not JsFunctionObject fo) { thrown = NotCallableError(fv); goto Unwind; }
+                            if (fo is not JsClosure)
+                            {
+                                // f.call / f.apply / a bound closure: push the target's frame here instead of re-entering the loop
+                                var rf = TryPushRedirectedCall(fo, tr < 0 ? default : regs[bp + tr], regs, argStart, argc);
+                                if (rf != null) { rf.RetIndex = dst; f = rf; code = f.Code; regs = f.Regs; bp = f.Base; pc = 0; k = f.K; continue; }
+                            }
                             {
                                 // a builtin is called directly so an error it raises (Vm.Raise) unwinds here without a CLR throw
                                 var r = fo is JsBuiltin b
@@ -785,6 +791,12 @@ internal sealed partial class Vm
                                 regs[dst] = new JsValue((double)pa.Length);
                                 pc += 7;
                                 continue;
+                            }
+                            if (fv.Ref is not JsClosure)
+                            {
+                                // obj.f.call(...) / obj.f.apply(...) / a bound closure: push the target's frame here instead of re-entering the loop
+                                var rf = TryPushRedirectedCall(Unsafe.As<JsFunctionObject>(fv.Ref!), ov, regs, argStart, argc);
+                                if (rf != null) { rf.RetIndex = dst; f = rf; code = f.Code; regs = f.Regs; bp = f.Base; pc = 0; k = f.K; continue; }
                             }
                             {
                                 var r = fv.Ref is JsBuiltin b

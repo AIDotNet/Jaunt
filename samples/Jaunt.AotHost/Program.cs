@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Text;
 using Jaunt;
+using Jaunt.CrossBench;
 
 // Jaunt NativeAOT consumer host.
 //
@@ -10,19 +11,24 @@ using Jaunt;
 // Usage:
 //   Jaunt.AotHost run <script.js>                 evaluate a script, print the completion value
 //   Jaunt.AotHost verify <dir>                     run the full verification suite on scripts found in <dir>
-//   Jaunt.AotHost bench <script.js> <iterations>   time repeated invocation of `main` exported by a script
+//   Jaunt.AotHost bench <workloads-dir> [expected.json] [--filter s] [--samples n] [--target-ms n] [--warm-ms n] [--warm-max-ms n] [--json out.jsonl]
+//                                                  hot-path throughput of every workload under the cross-engine protocol
+//                                                  (bench/cross/dotnet/CrossProtocol.cs); engine = jaunt-aot or jaunt-jit depending on
+//                                                  how this host runs, so the native binary and `dotnet Jaunt.AotHost.dll` can be compared
+//                                                  (bench/cross/aot-vs-jit.sh)
+//   Jaunt.AotHost bench <script.js> <iterations>   time repeated invocation of `main` exported by one script
 
 return args.Length switch
 {
     >= 2 when args[0] == "run" => Run(args[1]),
     >= 2 when args[0] == "verify" => await Verify(args[1]),
-    >= 3 when args[0] == "bench" => Bench(args[1], int.Parse(args[2])),
+    >= 2 when args[0] == "bench" => Bench(args),
     _ => Usage(),
 };
 
 static int Usage()
 {
-    Console.Error.WriteLine("usage: Jaunt.AotHost run <script.js> | verify <dir> | bench <script.js> <iterations>");
+    Console.Error.WriteLine("usage: Jaunt.AotHost run <script.js> | verify <dir> | bench <workloads-dir> [expected.json] [--filter s] [--samples n] [--target-ms n] [--warm-ms n] [--warm-max-ms n] [--json out.jsonl] | bench <script.js> <iterations>");
     return 2;
 }
 
@@ -35,7 +41,36 @@ static int Run(string path)
     return 0;
 }
 
-static int Bench(string path, int iterations)
+static int Bench(string[] args)
+{
+    if (args.Length >= 3 && File.Exists(args[1]) && int.TryParse(args[2], out int iterations)) return BenchOne(args[1], iterations);
+    if (!Directory.Exists(args[1])) { Console.Error.WriteLine($"not a workload directory: {args[1]}"); return Usage(); }
+    string? expectedPath = args.Length >= 3 && !args[2].StartsWith("--", StringComparison.Ordinal) ? args[2] : null;
+    var options = CrossOptions.Parse(args);
+    var expected = expectedPath is null ? new Dictionary<string, string>() : CrossProtocol.ReadExpected(expectedPath);
+    // The same host measures both ways: the published native binary has no JIT, `dotnet Jaunt.AotHost.dll` runs on CoreCLR.
+    // (RuntimeFeature.IsDynamicCodeSupported is false in both, because PublishAot=true writes that feature switch into the
+    // runtimeconfig of the JIT build too; the JIT's compiled-method counter tells them apart.)
+    long jitted = System.Runtime.JitInfo.GetCompiledMethodCount();
+    string engine = jitted > 0 ? "jaunt-jit" : "jaunt-aot";
+    string runtime = System.Runtime.InteropServices.RuntimeInformation.FrameworkDescription + (jitted > 0 ? " CoreCLR (JIT)" : " NativeAOT");
+    Console.WriteLine($"# {engine}: {runtime}, {System.Runtime.InteropServices.RuntimeInformation.ProcessArchitecture}, methods JIT-compiled so far: {jitted}");
+    using var writer = options.JsonPath is null ? null : new StreamWriter(options.JsonPath, false);
+    int bad = 0;
+    foreach (var (name, file) in CrossProtocol.Workloads(args[1], options.Filter))
+    {
+        string src = File.ReadAllText(file);
+        var rec = new Dictionary<string, object> { ["engine"] = engine, ["name"] = name, ["runtime"] = runtime };
+        var compileOptions = new JsCompileOptions { SourceName = Path.GetFileName(file) };
+        CrossProtocol.Measure(rec, () => { var s = JsCompiler.CompileScript(src, compileOptions); return () => new JauntCrossRunner(s); }, expected.GetValueOrDefault(name), options);
+        writer?.WriteLine(CrossProtocol.ToJsonLine(rec)); writer?.Flush();
+        Console.WriteLine(CrossProtocol.ConsoleLine(rec));
+        if ((string)rec["status"] != "ok") bad++;
+    }
+    return bad == 0 ? 0 : 1;
+}
+
+static int BenchOne(string path, int iterations)
 {
     var script = JsCompiler.CompileScript(File.ReadAllText(path), new JsCompileOptions { SourceName = Path.GetFileName(path) });
     using var engine = new JsEngine();
