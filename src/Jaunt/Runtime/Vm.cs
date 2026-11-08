@@ -230,11 +230,30 @@ internal sealed partial class Vm
 
     internal JsValue Run(Frame entry)
     {
+        return _onThread ? RunGuarded(entry) : RunOnThread(entry);   // nested native→JS call: already current
+    }
+
+    /// <summary>
+    /// Whether this Vm is <see cref="t_current"/>: a thread-static read per native→JS call costs several nanoseconds, this
+    /// field a load. It is only ever true on the thread running the Vm's outermost <see cref="Run"/>.
+    /// </summary>
+    private bool _onThread;
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private JsValue RunOnThread(Frame entry)
+    {
         var saved = t_current;
-        if (ReferenceEquals(saved, this)) return RunGuarded(entry);   // nested native→JS call: already current
+        if (saved != null) saved._onThread = false;   // a host function of that Vm entered this one
         t_current = this;
+        _onThread = true;
         try { return RunGuarded(entry); }
-        finally { t_current = saved; }
+        finally
+        {
+            _onThread = false;
+            t_current = saved;
+            if (saved != null) saved._onThread = true;
+            else _stackCheckedTo = nuint.MaxValue;   // the next execution may run on another thread
+        }
     }
 
     /// <summary>Whether the active execution has a wall-clock deadline.</summary>
@@ -273,7 +292,7 @@ internal sealed partial class Vm
     public void EnterNative()
     {
         if (Sp + ++_nativeDepth > MaxDepth) StackOverflow();
-        if (!RuntimeHelpers.TryEnsureSufficientExecutionStack()) StackOverflow();
+        if (!StackIsSufficient()) StackOverflow();
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -283,7 +302,36 @@ internal sealed partial class Vm
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public void EnsureNativeStack()
     {
-        if (!RuntimeHelpers.TryEnsureSufficientExecutionStack()) NativeStackOverflow();
+        if (!StackIsSufficient()) NativeStackOverflow();
+    }
+
+    /// <summary>
+    /// Lowest stack address known to be sufficient (see <see cref="StackIsSufficient"/>); <c>nuint.MaxValue</c> for "none", which
+    /// is its value whenever no execution is running, since the next one may be on another thread.
+    /// </summary>
+    private nuint _stackCheckedTo = nuint.MaxValue;
+
+    /// <summary>How far below a successful probe the stack may grow without another one; the runtime's probe asks for 64 KB (128 KB on 64-bit) of room.</summary>
+    private const int StackProbeReach = 16 * 1024;
+
+    /// <summary>
+    /// <see cref="RuntimeHelpers.TryEnsureSufficientExecutionStack"/> for the native→JS call path: the runtime's probe reads thread-local
+    /// state (several nanoseconds under NativeAOT), so one successful probe also covers the <see cref="StackProbeReach"/> below it,
+    /// which leaves at least 48 KB of the room it asks for. A loop of callbacks at one depth probes once.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private unsafe bool StackIsSufficient()
+    {
+        byte marker;
+        return (nuint)(&marker) >= _stackCheckedTo || ProbeStack((nuint)(&marker));
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private bool ProbeStack(nuint at)
+    {
+        if (!RuntimeHelpers.TryEnsureSufficientExecutionStack()) return false;
+        if (_onThread) _stackCheckedTo = at - StackProbeReach;
+        return true;
     }
 
     [MethodImpl(MethodImplOptions.NoInlining)]
@@ -834,11 +882,8 @@ internal sealed partial class Vm
         if (s.Length <= 1 << 16) _sortScratch = s;
     }
 
-    private void EnsureStack()
-    {
-        if (!RuntimeHelpers.TryEnsureSufficientExecutionStack())
-            throw new JsTerminationException(TerminationKind.StackDepth, "Native recursion is too deep to continue safely.", Depth, MaxDepth);
-    }
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private void EnsureStack() => EnsureNativeStack();
 
     /// <summary>Applies [[Construct]] return semantics.</summary>
     internal JsValue ConstructResult(Frame f, JsValue value)
