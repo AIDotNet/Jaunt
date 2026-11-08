@@ -30,7 +30,7 @@
 | Acornima 必须验证：中断、深度/节点预算、畸形源码与栈安全 | 解析期间每个 token 检查原生栈余量与取消/截止时间；节点预算；源码长度预算；分析与生成阶段深度检查 | `ParserNestingAttackIsRejectedSafely`（20 万层括号、50 万个一元运算符被安全拒绝而非崩溃）、`CompileBudgets` |
 | Acornima 语法集合 ≠ Jaunt 已实现语义 | 语法与语义一一落地：`with`、直接 `eval`（含 Annex B 声明实例化）、async generator、`for await`、BigInt、`using`/`await using` 均已实现；test262 在固定 revision 下覆盖的 stage-3 提案语法（decorators、`import defer`、source phase imports 等）也已实现；Acornima 不接受的语法在解析期报诊断 | `RejectsAtCompileTime`、`FeatureTests`、`ShadowRealmDecoratorTests` |
 | JS RegExp → .NET Regex 不是自动兼容 | 双后端：Acornima 能精确适配的模式走 .NET `Regex`；属性转义、`v` 集合运算、modifiers、重复/非 ASCII 组名、量词内捕获组、`u`+`i` 大小写折叠走 Jaunt 原生回溯引擎（`Runtime/Regex`，显式回溯栈，步数计入执行预算；.NET 后端每次匹配 100 ms 时间片，超时则在原生引擎上重做同一匹配并映射到同一分组，从而受 Timeout/取消/Interrupt 约束），Unicode 数据由 `tools/unicode/generate.py` 从 UCD 17.0 生成 | test262 RegExp 3,854 个变体余 4 个失败；441 个属性转义生成用例全部通过；`FeatureTests.RegexBudgetStopsCatastrophicBacktracking`、`HostBoundaryTests.DotnetRegexBackendObeysTheExecutionBudget`、`RegexTimeSliceTests` |
-| 许可证：Acornima 为 BSD-3-Clause 并有 NOTICE；Jaunt 自身许可未定，不擅自创建 LICENSE，不复制竞品实现 | `THIRD_PARTY_NOTICES.md` 记录义务；仓库无 `LICENSE` | 仓库根目录 |
+| 许可证：Acornima 为 BSD-3-Clause 并有 NOTICE；Jaunt 自身采用 MIT，不复制竞品实现 | `THIRD_PARTY_NOTICES.md` 记录义务；`LICENSE` 为 MIT，包声明 `PackageLicenseExpression` | 仓库根目录 |
 | 不能把设计目标写成成绩 | 所有性能结论来自本仓库可复现脚本，并注明环境与噪声 | §3、`docs/benchmarks.md` |
 
 ## 2. 与设计文档的对应（摘要）

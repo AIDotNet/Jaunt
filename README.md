@@ -50,7 +50,7 @@ JsEngine ── Realm (globals, lazily built intrinsics, module instances) ─�
 | call JS from C# | `engine.Invoke(fn, a0, a1)`, `InvokeWithThis`, `InvokeAsync` |
 | host functions | typed `SetFunction<T1,…,TR>` (static adapters), raw `JsNativeFunction(ref JsCallContext)`, `SetAsyncFunction` |
 | one budget for a whole request | `engine.BeginExecution(options, token)` → `ParseJson` / `Invoke` / `ToJsonUtf8` / `FromObject` / `ToObject` → `Complete()` |
-| DTO mapping | `JsTypeInfo.Object<T>()…Build()` by hand, or `[JsSerializable(typeof(T))] partial class X : JsBindingContext` with `Jaunt.Generators` |
+| DTO mapping | `JsTypeInfo.Object<T>()…Build()` by hand, or `[JsSerializable(typeof(T))] partial class X : JsBindingContext` (the source generator ships in the `Jaunt` package) |
 | production plugins | `JsPlugin.Create(module, "export", inInfo, outInfo, options)` → FreshRealm per call, bounded concurrency |
 | limits / isolation | `JsLimits` (Timeout, MaxInstructions, MaxStackDepth, MaxTrackedBytes, MaxOutputBytes, …), `JsProfile.Hardened` |
 
@@ -70,6 +70,7 @@ Errors: `JsCompileException` (with code/line/column), `JsException` (JS throw; e
 | `bench/cross` | shared workload corpus, cross-engine protocol (`dotnet/CrossProtocol.cs`), `run.sh` (Jaunt/Jint/MoeJS) and `aot-vs-jit.sh` (NativeAOT vs JIT) |
 | `tools/Jaunt.Test262` | test262 runner (pinned revision, feature-manifest skips, per-variant results) |
 | `eng/verify-aot.sh` | publishes the AOT host for net8.0/net10.0/net11.0, writes **new** JS after publishing, runs the native binaries |
+| `eng/verify-package.sh` | checks a `.nupkg` and installs it into a fresh consumer project that runs JS and the bundled generator |
 | `docs/` | feature manifest, benchmark and conformance reports |
 
 ## Build, test, verify
@@ -87,7 +88,14 @@ dotnet run -c Release --project tools/Jaunt.Test262 -- artifacts/test262
 The SDK used for the stable channel is pinned in `global.json`; NativeAOT/runtime packs are pinned to patched
 servicing releases in `Directory.Build.targets`.
 
+## Releasing
+
+Pushing a tag such as `v0.1.0-alpha.1` runs [`.github/workflows/release.yml`](.github/workflows/release.yml): the full
+verification matrix, then pack and a consumer test, then a push to nuget.org. The tag is the package version.
+Publishing uses [NuGet Trusted Publishing](https://learn.microsoft.com/nuget/nuget-org/trusted-publishing), so no API
+key is stored; the required nuget.org policy and `NUGET_USER` secret are listed at the top of the workflow.
+
 ## Licensing
 
-Jaunt's own license is not decided yet (no `LICENSE` file). Third-party obligations (Acornima, BSD-3-Clause)
+Jaunt is licensed under the [MIT License](LICENSE). Third-party obligations (Acornima, BSD-3-Clause)
 are listed in [`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md).

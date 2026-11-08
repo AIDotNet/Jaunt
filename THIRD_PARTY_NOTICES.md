@@ -1,7 +1,6 @@
 # Third-party notices
 
-Jaunt's own license has not been decided yet (see `design/06-roadmap.md` §1); no `LICENSE` file is created
-until that decision is made. This file records the obligations of the third-party components Jaunt uses.
+Jaunt itself is licensed under the MIT License (see `LICENSE`). This file records the obligations of the third-party components Jaunt uses.
 No source code from other JavaScript engines (MoeJS, Jint, Okojo, ClearScript, QuickJS, V8, Jurassic,
 YantraJS, goja, Sobek) is copied into this repository; they were studied only as references
 (`design/01-research.md`).

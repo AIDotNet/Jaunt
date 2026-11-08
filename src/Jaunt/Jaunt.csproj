@@ -13,7 +13,19 @@
     <NoWarn>$(NoWarn);CS1591;CS0618</NoWarn>
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <Description>Jaunt: a fully managed, NativeAOT-compatible JavaScript engine for .NET.</Description>
+    <!-- local default; release builds take the version from the git tag (.github/workflows/release.yml) -->
     <Version>0.1.0-alpha.1</Version>
+    <Authors>AIDotNet</Authors>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageTags>javascript;ecmascript;engine;interpreter;nativeaot;aot;scripting</PackageTags>
+    <PackageProjectUrl>https://github.com/AIDotNet/Jaunt</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/AIDotNet/Jaunt.git</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+    <EmbedUntrackedSources>true</EmbedUntrackedSources>
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
   </PropertyGroup>
   <ItemGroup>
     <PackageReference Include="Acornima" Version="1.9.1" />
@@ -23,6 +35,15 @@
     <None Include="../../THIRD_PARTY_NOTICES.md" Link="Jaunt.THIRD_PARTY_NOTICES.md" Visible="false"
           Pack="true" PackagePath="/;contentFiles/any/any/Jaunt.THIRD_PARTY_NOTICES.md" PackageCopyToOutput="true"
           CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="../../README.md" Visible="false" Pack="true" PackagePath="/" />
+    <!-- the source generator ships inside this package, so [JsSerializable] works from a single PackageReference.
+         Build ordering only: the engine neither references nor runs it, and it never becomes a package dependency. -->
+    <ProjectReference Include="../Jaunt.Generators/Jaunt.Generators.csproj" ReferenceOutputAssembly="false" PrivateAssets="all"
+                      GlobalPropertiesToRemove="PublishAot;RuntimeIdentifier;SelfContained;TargetFramework" SetTargetFramework="TargetFramework=netstandard2.0" />
+    <None Include="../Jaunt.Generators/bin/$(Configuration)/netstandard2.0/Jaunt.Generators.dll" Visible="false"
+          Pack="true" PackagePath="analyzers/dotnet/cs" />
   </ItemGroup>
   <ItemGroup>
     <InternalsVisibleTo Include="Jaunt.Tests" />
