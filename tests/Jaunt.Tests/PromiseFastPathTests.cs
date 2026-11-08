@@ -334,9 +334,22 @@ fin,notCallable:rej:TypeError,method:rej:TypeError,builtinThrows:rej:SyntaxError
     [MemberData(nameof(CaseNames))]
     public void MatchesReferenceBehavior(string name)
     {
-        var (script, expected) = Cases[name];
-        using var e = new JsEngine();
-        e.Evaluate("var log = [];\n" + script);
-        Assert.Equal(expected, e.Evaluate("log.join(',')").ToString());
+        // Some cases recurse through async calls, which take native stack. Before the JIT has optimized the interpreter loop a
+        // default .NET 8 thread on macOS fits only about 50 to 75 levels, so a fixed stack keeps the result independent of JIT timing.
+        System.Runtime.ExceptionServices.ExceptionDispatchInfo? failure = null;
+        var thread = new Thread(() =>
+        {
+            try
+            {
+                var (script, expected) = Cases[name];
+                using var e = new JsEngine();
+                e.Evaluate("var log = [];\n" + script);
+                Assert.Equal(expected, e.Evaluate("log.join(',')").ToString());
+            }
+            catch (Exception ex) { failure = System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(ex); }
+        }, maxStackSize: 16 * 1024 * 1024);
+        thread.Start();
+        thread.Join();
+        failure?.Throw();
     }
 }
