@@ -146,6 +146,131 @@ JSON.stringify(out)
         Assert.Equal(exp.EnumerateObject().Count(), got.EnumerateObject().Count());
     }
 
+    // Object model fast paths: shape-mode arguments objects (mapping, attribute changes, ICs), attribute changes that keep
+    // an object in shape mode, big-shape lookup, array-backed private elements, `with`. Expected value from Node (V8), except
+    // for the has:a before get:a under a proxy `with` object: GetBindingValue calls HasProperty (9.1.1.2.6), which V8 omits.
+    private const string ObjectModelScript = """
+const out = {};
+const sloppy = new Function(`
+  const r = {};
+  r.alias = (function (a, b) { arguments[0] = 10; b = 20; return [a, arguments[0], arguments[1], arguments.length]; })(1, 2);
+  r.extra = (function (a) { arguments[1] = 'x'; arguments[3] = 'y'; return [arguments[1], arguments[3], arguments.length, Object.keys(arguments)]; })(1, 2);
+  r.missing = (function (a, b) { b = 5; return [arguments[1], arguments.length, 1 in arguments]; })(1);
+  r.deleteRemap = (function (a) { delete arguments[0]; a = 2; const u = arguments[0]; arguments[0] = 3; return [u, a, arguments[0], Object.keys(arguments)]; })(1);
+  r.definedRO = (function (a) { Object.defineProperty(arguments, '0', { writable: false }); a = 2; arguments[0] = 3; return [a, arguments[0]]; })(1);
+  r.definedValue = (function (a) { Object.defineProperty(arguments, '0', { value: 7 }); const x = a; a = 8; return [x, arguments[0]]; })(1);
+  r.getter = (function (a) { let n = 0; Object.defineProperty(arguments, '0', { get() { return ++n; }, set(v) { n = v; } }); arguments[0]; arguments[0] = 40; return [arguments[0], a, n]; })(1);
+  r.frozen = (function (a) { Object.freeze(arguments); a = 9; arguments[0] = 1; return [a, arguments[0], Object.isFrozen(arguments)]; })(5);
+  r.sealed = (function (a) { Object.seal(arguments); a = 9; const v = arguments[0]; arguments[0] = 1; return [a, v, Object.isSealed(arguments)]; })(5);
+  r.desc = (function (a) { a = 3; const d = Object.getOwnPropertyDescriptor(arguments, '0'); const l = Object.getOwnPropertyDescriptor(arguments, 'length'); return [d, l, typeof Object.getOwnPropertyDescriptor(arguments, 'callee').value]; })(1);
+  r.named = (function (a) { const o = []; for (let i = 0; i < 3; i++) { o.push(arguments.length); arguments.length = i; } arguments.extra = 1; return [o, Reflect.ownKeys(arguments).map(String), arguments['0']]; })(1, 2);
+  r.stringKey = (function (a) { a = 'new'; const k = '0'; return [arguments[k], arguments['0'], k in arguments]; })('old');
+  r.inherited = (function (a) { const c = Object.create(arguments); a = 2; return [c[0], c.length, (c[0] = 5, c[0]), arguments[0], Object.keys(c)]; })(1);
+  r.iter = (function (a, b) { a = 'p'; return [...arguments, Array.prototype.slice.call(arguments, 1), Array.from(arguments)]; })(1, 2);
+  r.tostr = (function () { return [Object.prototype.toString.call(arguments), arguments[Symbol.iterator] === Array.prototype.values]; })();
+  r.icShare = (function () { const get = (o) => o.length, read = (o) => o[0]; const res = []; const plain = {}; plain[0] = 'plain'; Object.defineProperty(plain, 'length', { value: 'L', writable: true, configurable: true }); res.push(get(plain), read(plain)); (function (a) { a = 'live'; res.push(get(arguments), read(arguments)); })('stale'); return res; })();
+  r.manyArgs = (function (a, b) { a = 'z'; const n = []; for (let i = 0; i < arguments.length; i += 15) n.push(arguments[i]); arguments[69] = 'q'; return [n, arguments.length, arguments[69]]; }).apply(null, Array.from({ length: 70 }, (_, i) => i));
+  return r;
+`)();
+out.sloppy = sloppy;
+out.strict = (function (a) { 'use strict'; a = 2; arguments[1] = 'b'; const e = []; try { arguments.callee; } catch (x) { e.push(x.constructor.name); } Object.freeze(arguments); try { arguments[0] = 9; } catch (x) { e.push(x.constructor.name); } return [arguments[0], arguments[1], arguments.length, e, Object.isFrozen(arguments)]; })(1, 'x');
+// attribute changes that keep the object's shape
+out.freeze = (() => {
+  const read = (o) => o.a, write = (o, v) => { o.a = v; return o.a; }, add = (o) => { o.z = 1; return o.z; };
+  const plain = { a: 1, b: 2 }, frozen = Object.freeze({ a: 1, b: 2 }), r = [];
+  r.push(read(plain), read(frozen), write(plain, 5), write(frozen, 5), add({ a: 1, b: 2 }), add(frozen), add({ a: 1, b: 2 }));
+  r.push(Object.isFrozen(frozen), Object.isSealed(frozen), Object.isFrozen(plain), delete frozen.a, frozen.a, Object.getOwnPropertyDescriptor(frozen, 'a'));
+  const sealed = Object.seal({ a: 1, get b() { return 2; } });
+  r.push(write(sealed, 9), delete sealed.a, Object.isSealed(sealed), Object.isFrozen(sealed), Object.getOwnPropertyDescriptor(sealed, 'a'));
+  r.push({ ...frozen }, Object.getOwnPropertyDescriptor({ ...frozen }, 'a').writable, Object.keys(frozen), JSON.stringify(frozen));
+  const acc = Object.freeze({ get g() { return 1; }, set g(v) { this.hit = v; } });
+  r.push(typeof Object.getOwnPropertyDescriptor(acc, 'g').set, Object.isFrozen(acc));
+  r.push(Object.isFrozen(Object.preventExtensions({})), Object.isFrozen(Object.preventExtensions({ x: 1 })), Object.isFrozen(Object.freeze({})), Object.isExtensible(Object.freeze({})));
+  return r;
+})();
+out.protoFreeze = (() => {
+  const proto = { x: 1 }, child = Object.create(proto), set = (o) => { o.x = 2; return [o.x, Object.keys(o)]; };
+  const r = [set(Object.create(proto))];
+  Object.freeze(proto);
+  r.push(set(child));
+  const p2 = { y: 1 }, read = (o) => o.y, c2 = Object.create(p2);
+  r.push(read(c2));
+  Object.defineProperty(p2, 'y', { get() { return 'getter'; } });
+  r.push(read(c2));
+  return r;
+})();
+out.redefine = (() => {
+  const o = { a: 1, b: 2, c: 3 }, read = (x) => x.b, r = [read(o)];
+  Object.defineProperty(o, 'b', { enumerable: false });
+  r.push(read(o), Object.keys(o), JSON.stringify(o), { ...o }, Object.getOwnPropertyDescriptor(o, 'b'));
+  Object.defineProperty(o, 'b', { get() { return 'g'; }, configurable: true });
+  r.push(read(o), Object.getOwnPropertyDescriptor(o, 'b').set === undefined, Object.keys(o));
+  Object.defineProperty(o, 'b', { value: 'd', writable: true, enumerable: true });
+  r.push(read(o), Object.keys(o), Object.entries(o));
+  o.d = 4; delete o.a; r.push(Object.keys(o));
+  const same1 = {}, same2 = {};
+  for (const s of [same1, same2]) { s.k = 1; Object.defineProperty(s, 'k', { writable: false }); s.m = 2; }
+  same1.k = 5; same2.m = 6;
+  r.push(same1, same2, Object.getOwnPropertyDescriptor(same2, 'k').writable);
+  const fn = function () {}; Object.defineProperty(fn, 'name', { value: 'n', configurable: false }); Object.defineProperty(fn, 'length', { writable: true });
+  fn.length = 9; r.push(fn.name, fn.length, Object.getOwnPropertyNames(fn).slice(0, 2));
+  const sym = Symbol('s'), so = { [sym]: 1, z: 2 }; Object.defineProperty(so, sym, { enumerable: false }); r.push(Reflect.ownKeys(so).length, Object.assign({}, so)[sym]);
+  return r;
+})();
+// property lookup in shapes with many keys
+out.bigShape = (() => {
+  const s1 = Symbol('a'), s2 = Symbol('b');
+  const mk = () => { const o = {}; for (let i = 0; i < 40; i++) o['key' + i] = i; o[s1] = 's1'; o['k' + 'ey7' + 'x'] = 'dyn'; return o; };
+  const o = mk();
+  return [o['key' + 39], o['key' + 40], o.key7, o.key7x, o[s1], o[s2], s2 in o, 'key0' in o, '' in o, ({ ...o }).key39, Object.keys(o).length];
+})();
+// private elements
+out.privates = (() => {
+  class A { #x = 1; #m() { return 'm' + this.#x; } get #g() { return this.#x * 2; } set #g(v) { this.#x = v; } static has(o) { return #x in o; }
+    bump() { this.#g = this.#g + 1; return [this.#x, this.#m(), this.#g]; }
+    static read(o) { return o.#x; } static write(o, v) { o.#x = v; } static callm(o) { return o.#m(); } setm() { this.#m = 1; } }
+  class Ret { constructor(o) { return o; } }
+  class B extends Ret { #y = 'y'; #z = 'z'; #w = 'w'; #v = 'v'; #u = 'u'; static get(o) { return [o.#y, o.#z, o.#w, o.#v, o.#u]; } }
+  const msg = (f) => { try { return f(); } catch (e) { return e.constructor.name; } };
+  const a = new A(), plain = {}, r = [a.bump(), A.has(a), A.has(plain), msg(() => A.read(plain)), msg(() => A.write(plain, 1)), msg(() => A.callm(plain)), msg(() => a.setm()), msg(() => A.has(1))];
+  new B(plain); r.push(B.get(plain), msg(() => new B(plain)), msg(() => B.get({})));
+  r.push(Object.keys(plain), JSON.stringify(a));
+  const fr = Object.freeze(new A()); r.push(msg(() => { A.write(fr, 7); return A.read(fr); }));
+  return r;
+})();
+// with
+out.withScope = new Function(`
+  const log = [];
+  const o = { p: 1, q: 2, [Symbol.unscopables]: { q: true } };
+  var q = 'outer', r = 'outer';
+  with (o) { p = 5; log.push(p, q, r); var r2 = p; }
+  const px = new Proxy({ a: 1 }, { has(t, k) { log.push('has:' + String(k)); return k in t; }, get(t, k) { log.push('get:' + String(k)); return t[k]; } });
+  with (px) { log.push(a); }
+  const g = { get v() { log.push('getter'); return 'V'; }, m() { return this === g; } };
+  with (g) { log.push(v, m()); }
+  const c = Object.create({ inh: 'I' }); with (c) { log.push(inh); inh = 'J'; log.push(inh, Object.keys(c)); }
+  return [log, o.p, r2];
+`)();
+JSON.stringify(out);
+""";
+
+    private const string ObjectModelExpected = """
+{"sloppy":{"alias":[10,10,20,2],"extra":["x","y",2,["0","1","3"]],"missing":[null,1,false],"deleteRemap":[null,2,3,["0"]],"definedRO":[2,1],"definedValue":[7,8],"getter":[41,1,41],"frozen":[9,5,true],"sealed":[1,9,true],"desc":[{"value":3,"writable":true,"enumerable":true,"configurable":true},{"value":1,"writable":true,"enumerable":false,"configurable":true},"function"],"named":[[2,0,1],["0","1","length","callee","extra","Symbol(Symbol.iterator)"],1],"stringKey":["new","new",true],"inherited":[2,1,5,2,["0"]],"iter":["p",2,[2],["p",2]],"tostr":["[object Arguments]",true],"icShare":["L","plain",1,"live"],"manyArgs":[["z",15,30,45,60],70,"q"]},"strict":[1,"b",2,["TypeError","TypeError"],true],"freeze":[1,1,5,1,1,null,1,true,true,false,false,1,{"value":1,"writable":false,"enumerable":true,"configurable":false},9,false,true,false,{"value":9,"writable":true,"enumerable":true,"configurable":false},{"a":1,"b":2},true,["a","b"],"{\"a\":1,\"b\":2}","function",true,true,false,true,false],"protoFreeze":[[2,["x"]],[1,[]],1,"getter"],"redefine":[2,2,["a","c"],"{\"a\":1,\"c\":3}",{"a":1,"c":3},{"value":2,"writable":true,"enumerable":false,"configurable":true},"g",true,["a","c"],"d",["a","b","c"],[["a",1],["b","d"],["c",3]],["b","c","d"],{"k":1,"m":2},{"k":1,"m":6},false,"n",9,["length","name"],2,null],"bigShape":[39,null,7,"dyn","s1",null,false,true,false,39,41],"privates":[[3,"m3",6],true,false,"TypeError","TypeError","TypeError","TypeError","TypeError",["y","z","w","v","u"],"TypeError","TypeError",[],"{}",7],"withScope":[[5,"outer","outer","has:log","has:a","get:Symbol(Symbol.unscopables)","has:a","get:a",1,"getter","V",true,"I","J",["inh"]],5,5]}
+""";
+
+    [Fact]
+    public void ObjectModelFastPathsMatchReferenceBehavior()
+    {
+        using var engine = new JsEngine();
+        var exp = System.Text.Json.JsonDocument.Parse(ObjectModelExpected).RootElement;
+        var got = System.Text.Json.JsonDocument.Parse(engine.Evaluate(ObjectModelScript).AsString()).RootElement;
+        foreach (var p in exp.EnumerateObject())
+        {
+            Assert.True(got.TryGetProperty(p.Name, out var g), $"missing case {p.Name}");
+            Assert.Equal(p.Value.GetRawText(), g.GetRawText());
+        }
+    }
+
     [Fact]
     public void StringDoublingStillTripsTheTrackedBytesBudget()
     {
