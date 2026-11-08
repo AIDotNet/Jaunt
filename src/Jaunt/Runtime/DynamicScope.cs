@@ -402,7 +402,7 @@ internal sealed partial class Vm
         int[] code = f.Code;
         JsValue[] regs = f.Regs;
         int bp = f.Base;
-        JsValue[] k = f.T.Constants;
+        JsValue[] k = f.K;
         switch ((Op)code[pc])
         {
             case Op.PushEnvNamed:

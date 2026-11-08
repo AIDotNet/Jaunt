@@ -214,10 +214,11 @@ internal sealed class JsClosure : JsFunctionObject
     private JsValue LegacyValue(in PropertyKey key)
     {
         if ((string)key.Value == "arguments") return JsValue.Null;
-        for (var f = Realm.Vm.Current; f != null; f = f.Caller)
+        var vm = Realm.Vm;
+        for (int d = vm.Sp - 1; d >= 0; d--)
         {
-            if (!ReferenceEquals(f.Callee, this)) continue;
-            var c = f.Caller?.Callee;
+            if (!ReferenceEquals(vm.FrameAt(d).Callee, this)) continue;
+            var c = d > 0 ? vm.FrameAt(d - 1).Callee : null;
             if (c == null || (c.Template.Flags & (FunctionFlags.Strict | FunctionFlags.ScriptBody | FunctionFlags.ModuleBody)) != 0) return JsValue.Null;
             return JsValue.FromObject(c);
         }
