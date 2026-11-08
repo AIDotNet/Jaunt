@@ -218,7 +218,32 @@ internal sealed partial class Vm
     [MethodImpl(MethodImplOptions.NoInlining)]
     internal JsValue NotCallableError(in JsValue fv) => ErrorValue(ErrorKind.TypeError, $"{JsErrors.Describe(fv)} is not a function");
 
+    /// <summary>A miss of the site IC. A plain object at a megamorphic site is served here, ahead of the many cases of <see cref="GetPropGeneric"/>.</summary>
     internal JsValue GetPropSlow(in JsValue ov, in JsValue keyValue, ref IcEntry ic)
+    {
+        if (ic.Kind == IcKind.Megamorphic && ov.IsObject && ov.Ref!.GetType() == typeof(JsObject) && keyValue.Ref is string ks)
+        {
+            var obj = Unsafe.As<JsObject>(ov.Ref);
+            var shape = obj.Shape;
+            ref var e = ref _np[NamedHash(shape, ks)];
+            if (ReferenceEquals(e.Shape, shape) && ReferenceEquals(e.Key, ks))
+            {
+                if (e.Kind == IcKind.OwnData)
+                {
+                    var v = obj.Slots[e.Slot];
+                    if (v.IsNotEmpty) return v;
+                }
+                else if (e.Kind == IcKind.ProtoData && e.Epoch == ProtoEpoch)
+                {
+                    var v = e.Holder!.Slots[e.Slot];
+                    if (v.IsNotEmpty) return v;
+                }
+            }
+        }
+        return GetPropGeneric(ov, keyValue, ref ic);
+    }
+
+    private JsValue GetPropGeneric(in JsValue ov, in JsValue keyValue, ref IcEntry ic)
     {
         var key = new PropertyKey(keyValue.AsStringUnchecked);
         if (ov.IsNotObject)
@@ -267,17 +292,17 @@ internal sealed partial class Vm
             if (keyValue.Ref is string ks && !obj.Shape.IsUnique)
             {
                 var shape = obj.Shape;
-                int h = NamedHash(shape, ks);
-                if (ReferenceEquals(_npShape[h], shape) && ReferenceEquals(_npKey[h], ks))
+                ref var e = ref _np[NamedHash(shape, ks)];
+                if (ReferenceEquals(e.Shape, shape) && ReferenceEquals(e.Key, ks))
                 {
-                    byte ck = _npKind[h];
-                    if (ck is IcKind.OwnData or IcKind.OwnGetter || _npEpoch[h] == Realm.ProtoEpoch)
-                        return NamedResult(ck, obj, _npHolder[h], _npSlot[h], ov);
+                    byte ck = e.Kind;
+                    if (ck is IcKind.OwnData or IcKind.OwnGetter || e.Epoch == Realm.ProtoEpoch)
+                        return NamedResult(ck, obj, e.Holder, e.Slot, ov);
                 }
                 if (!LookupNamed(obj, key, out var mk, out var mh, out var ms, out bool mc)) return obj.Get(key, ov);
                 if (mc || mk is IcKind.OwnData or IcKind.OwnGetter)
                 {
-                    _npShape[h] = shape; _npKey[h] = ks; _npKind[h] = mk; _npHolder[h] = mh; _npSlot[h] = ms; _npEpoch[h] = Realm.ProtoEpoch;
+                    e.Shape = shape; e.Key = ks; e.Kind = mk; e.Holder = mh; e.Slot = ms; e.Epoch = Realm.ProtoEpoch;
                 }
                 return NamedResult(mk, obj, mh, ms, ov);
             }
@@ -339,12 +364,17 @@ internal sealed partial class Vm
     // prototype results and absences). A shape is an immutable layout and names are the sites' constant strings
     // (matched by reference), so an entry is either exact or a miss.
     private const int NamedCacheSize = 1024;
-    private readonly Shape?[] _npShape = new Shape?[NamedCacheSize];
-    private readonly object?[] _npKey = new object?[NamedCacheSize];
-    private readonly byte[] _npKind = new byte[NamedCacheSize];
-    private readonly JsObject?[] _npHolder = new JsObject?[NamedCacheSize];
-    private readonly int[] _npSlot = new int[NamedCacheSize];
-    private readonly int[] _npEpoch = new int[NamedCacheSize];
+    private readonly NamedEntry[] _np = new NamedEntry[NamedCacheSize];
+
+    private struct NamedEntry
+    {
+        public Shape? Shape;
+        public object? Key;
+        public JsObject? Holder;
+        public int Slot;
+        public int Epoch;
+        public byte Kind;
+    }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private static int NamedHash(Shape shape, string key) => (shape.Hash ^ PropertyKey.CheapHash(key)) & (NamedCacheSize - 1);
@@ -892,7 +922,7 @@ internal sealed partial class Vm
         return obj;
     }
 
-    /// <summary>The slots of a fresh arguments object in the order of <see cref="Shape.ArgumentsLayout"/>.</summary>
+    /// <summary>The slots of a fresh arguments object in the order of <see cref="ShapeFamily.ArgumentsLayout"/>.</summary>
     private static JsValue[] ArgumentsSlots(Realm realm, JsValue[] args, Shape layout, JsValue callee)
     {
         var slots = new JsValue[layout.Count];
