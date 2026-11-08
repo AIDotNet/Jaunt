@@ -877,9 +877,7 @@ internal sealed partial class Vm
         }
         else if (t.IsConstructor && !t.IsClassConstructor && (t.Flags & FunctionFlags.NoPrototype) == 0)
         {
-            var p = new JsObject(realm, realm.ObjectPrototype);
-            p.AddOwnProperty("constructor", JsValue.FromObject(c), PropFlags.Hidden);
-            c.AddOwnProperty("prototype", JsValue.FromObject(p), PropFlags.Writable);
+            c.AddOwnProperty("prototype", LazyFunction.ClosurePrototypeSlot, PropFlags.Writable);
         }
         return c;
     }

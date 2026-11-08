@@ -244,6 +244,27 @@ out.megaStore = (() => {
   const many = {}; for (let i = 0; i < 70; i++) many['k' + i] = i; set(many, 'dict'); r.push(many.x, Object.keys(many).length);
   return r;
 })();
+// the "prototype" of a function is created when first read
+out.lazyProto = (() => {
+  const r = [], mk = () => function F() {};
+  const a = mk(), d = Object.getOwnPropertyDescriptor(a, 'prototype');
+  r.push(d.writable, d.enumerable, d.configurable, typeof d.value, d.value.constructor === a, Object.keys(d.value), Object.getOwnPropertyDescriptor(d.value, 'constructor').enumerable, a.prototype === d.value);
+  const b = mk(), read = (f) => f.prototype; r.push(read(mk()) !== read(mk()), read(b) === b.prototype, 'prototype' in b, b.hasOwnProperty('prototype'), Object.getOwnPropertyNames(b));
+  const c = mk(); c.prototype = { x: 1 }; r.push(new c().x, Object.getPrototypeOf(new c()) === c.prototype);
+  const e = mk(); const i1 = new e(); r.push(Object.getPrototypeOf(i1) === e.prototype, i1 instanceof e, i1.constructor === e);
+  const f = mk(); Object.defineProperty(f, 'prototype', { writable: false }); const fp = f.prototype; f.prototype = 1; r.push(f.prototype === fp, typeof fp);
+  const g = mk(); Object.freeze(g); r.push(typeof g.prototype, Object.isFrozen(g), g.prototype.constructor === g);
+  const h = mk(); Object.defineProperty(h, 'prototype', { value: 5 }); r.push(h.prototype, new h() instanceof Object);
+  const k = Object.create(mk()); const kp = k.prototype; r.push(typeof kp, kp === Object.getPrototypeOf(k).prototype);
+  const m = mk(); const o = Object.create(m); o.prototype = 3; r.push(o.prototype, typeof m.prototype, Object.keys(o));
+  const n = mk(); const bound = n.bind(); r.push(new bound() instanceof n, 'prototype' in bound);
+  class C extends mk() {} r.push(typeof C.prototype, Object.getPrototypeOf(C.prototype) === Object.getPrototypeOf(C).prototype);
+  r.push(Reflect.ownKeys(mk()), JSON.stringify(mk()), Object.entries(mk()).length, typeof (() => {}).prototype, typeof ({ m() {} }).m.prototype, typeof (async function () {}).prototype, typeof (function* () {}).prototype);
+  const p = mk(); delete p.prototype; r.push(delete p.prototype, typeof p.prototype);
+  const q = mk(); q.extra = 1; q.more = 2; q.prop3 = 3; r.push(Object.keys(q), typeof q.prototype);
+  const s = mk(); for (let i = 0; i < 40; i++) s['x' + i] = i; delete s.x0; r.push(typeof s.prototype, s.prototype.constructor === s);
+  return r;
+})();
 // private elements
 out.privates = (() => {
   class A { #x = 1; #m() { return 'm' + this.#x; } get #g() { return this.#x * 2; } set #g(v) { this.#x = v; } static has(o) { return #x in o; }
@@ -275,7 +296,7 @@ JSON.stringify(out);
 """;
 
     private const string ObjectModelExpected = """
-{"sloppy":{"alias":[10,10,20,2],"extra":["x","y",2,["0","1","3"]],"missing":[null,1,false],"deleteRemap":[null,2,3,["0"]],"definedRO":[2,1],"definedValue":[7,8],"getter":[41,1,41],"frozen":[9,5,true],"sealed":[1,9,true],"desc":[{"value":3,"writable":true,"enumerable":true,"configurable":true},{"value":1,"writable":true,"enumerable":false,"configurable":true},"function"],"named":[[2,0,1],["0","1","length","callee","extra","Symbol(Symbol.iterator)"],1],"stringKey":["new","new",true],"inherited":[2,1,5,2,["0"]],"iter":["p",2,[2],["p",2]],"tostr":["[object Arguments]",true],"icShare":["L","plain",1,"live"],"manyArgs":[["z",15,30,45,60],70,"q"]},"strict":[1,"b",2,["TypeError","TypeError"],true],"freeze":[1,1,5,1,1,null,1,true,true,false,false,1,{"value":1,"writable":false,"enumerable":true,"configurable":false},9,false,true,false,{"value":9,"writable":true,"enumerable":true,"configurable":false},{"a":1,"b":2},true,["a","b"],"{\"a\":1,\"b\":2}","function",true,true,false,true,false],"protoFreeze":[[2,["x"]],[1,[]],1,"getter"],"redefine":[2,2,["a","c"],"{\"a\":1,\"c\":3}",{"a":1,"c":3},{"value":2,"writable":true,"enumerable":false,"configurable":true},"g",true,["a","c"],"d",["a","b","c"],[["a",1],["b","d"],["c",3]],["b","c","d"],{"k":1,"m":2},{"k":1,"m":6},false,"n",9,["length","name"],2,null],"bigShape":[39,null,7,"dyn","s1",null,false,true,false,39,41],"megaStore":[true,null,1,null,"via proto",3,["hit"],["x"],["viaSetter"],1,"ro",[],2,2,1,0,2,"dict",71],"privates":[[3,"m3",6],true,false,"TypeError","TypeError","TypeError","TypeError","TypeError",["y","z","w","v","u"],"TypeError","TypeError",[],"{}",7],"withScope":[[5,"outer","outer","has:log","has:a","get:Symbol(Symbol.unscopables)","has:a","get:a",1,"getter","V",true,"I","J",["inh"]],5,5]}
+{"sloppy":{"alias":[10,10,20,2],"extra":["x","y",2,["0","1","3"]],"missing":[null,1,false],"deleteRemap":[null,2,3,["0"]],"definedRO":[2,1],"definedValue":[7,8],"getter":[41,1,41],"frozen":[9,5,true],"sealed":[1,9,true],"desc":[{"value":3,"writable":true,"enumerable":true,"configurable":true},{"value":1,"writable":true,"enumerable":false,"configurable":true},"function"],"named":[[2,0,1],["0","1","length","callee","extra","Symbol(Symbol.iterator)"],1],"stringKey":["new","new",true],"inherited":[2,1,5,2,["0"]],"iter":["p",2,[2],["p",2]],"tostr":["[object Arguments]",true],"icShare":["L","plain",1,"live"],"manyArgs":[["z",15,30,45,60],70,"q"]},"strict":[1,"b",2,["TypeError","TypeError"],true],"freeze":[1,1,5,1,1,null,1,true,true,false,false,1,{"value":1,"writable":false,"enumerable":true,"configurable":false},9,false,true,false,{"value":9,"writable":true,"enumerable":true,"configurable":false},{"a":1,"b":2},true,["a","b"],"{\"a\":1,\"b\":2}","function",true,true,false,true,false],"protoFreeze":[[2,["x"]],[1,[]],1,"getter"],"redefine":[2,2,["a","c"],"{\"a\":1,\"c\":3}",{"a":1,"c":3},{"value":2,"writable":true,"enumerable":false,"configurable":true},"g",true,["a","c"],"d",["a","b","c"],[["a",1],["b","d"],["c",3]],["b","c","d"],{"k":1,"m":2},{"k":1,"m":6},false,"n",9,["length","name"],2,null],"bigShape":[39,null,7,"dyn","s1",null,false,true,false,39,41],"megaStore":[true,null,1,null,"via proto",3,["hit"],["x"],["viaSetter"],1,"ro",[],2,2,1,0,2,"dict",71],"lazyProto":[true,false,false,"object",true,[],false,true,true,true,true,true,["length","name","arguments","caller","prototype"],1,true,true,true,true,true,"object","object",true,true,5,true,"object",true,3,"object",["prototype"],true,false,"object",true,["length","name","arguments","caller","prototype"],null,0,"undefined","undefined","undefined","object",false,"object",["extra","more","prop3"],"object","object",true],"privates":[[3,"m3",6],true,false,"TypeError","TypeError","TypeError","TypeError","TypeError",["y","z","w","v","u"],"TypeError","TypeError",[],"{}",7],"withScope":[[5,"outer","outer","has:log","has:a","get:Symbol(Symbol.unscopables)","has:a","get:a",1,"getter","V",true,"I","J",["inh"]],5,5]}
 """;
 
     [Fact]
@@ -351,5 +372,12 @@ JSON.stringify(out);
         var sw = System.Diagnostics.Stopwatch.StartNew();
         engine.Evaluate("const m = new Map([[1, 1]]); let n = 0; for (let i = 0; i < 200000; i++) n += m.keys().next().value; n");
         Assert.True(sw.ElapsedMilliseconds < 3000, $"took {sw.ElapsedMilliseconds} ms");
+    }
+
+    [Fact]
+    public void LazyClosurePrototypeCountsAgainstTheBudgetWhenCreated()
+    {
+        using var engine = new JsEngine(new JsEngineOptions { Limits = new JsLimits { MaxTrackedBytes = 4 * 1024 * 1024 } });
+        Assert.Throws<JsLimitExceededException>(() => engine.Evaluate("const a = []; while (true) { const f = function () {}; f.prototype; a.push(f); }"));
     }
 }

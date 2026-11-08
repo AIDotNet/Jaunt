@@ -176,7 +176,7 @@ internal sealed class JsClosure : JsFunctionObject
     public ModuleInstance? Module;
 
     public JsClosure(Realm realm, FunctionTemplate t, Env? env, Feedback fb, JsObject proto)
-        : base(realm, realm.FunctionShapeFor(proto), 3)
+        : base(realm, realm.FunctionShapeFor(proto), t.IsConstructor || t.IsGenerator ? 3 : 2)   // the third slot is for "prototype"
     {
         Template = t;
         Env = env;
@@ -186,6 +186,14 @@ internal sealed class JsClosure : JsFunctionObject
         Slots[1] = new JsValue(t.Name);
         IsClassConstructor = t.IsClassConstructor;
         IsDerived = t.IsDerived;
+    }
+
+    /// <summary>The object an ordinary function's "prototype" property starts with.</summary>
+    internal JsObject CreatePrototypeObject()
+    {
+        var p = new JsObject(Realm, Realm.ObjectPrototype);
+        p.AddOwnProperty("constructor", JsValue.FromObject(this), PropFlags.Hidden);
+        return p;
     }
 
     public override bool IsConstructor => Template.IsConstructor;

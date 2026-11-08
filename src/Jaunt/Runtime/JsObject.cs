@@ -4,13 +4,17 @@ using System.Runtime.CompilerServices;
 
 namespace Jaunt.Runtime;
 
-/// <summary>Placeholder stored in a slot until a builtin method is first read.</summary>
+/// <summary>Placeholder stored in a slot until a builtin method is first read. Data slots holding one read as Empty, so every read that takes the slot as is must check for that and go through <see cref="JsObject.ReadSlot"/>.</summary>
 internal sealed class LazyFunction
 {
     public readonly string Name;
     public readonly int Length;
     public readonly NativeFn Fn;
     public LazyFunction(string name, int length, NativeFn fn) { Name = name; Length = length; Fn = fn; }
+
+    /// <summary>In the "prototype" slot of a closure: the object is created when first read, most functions never get there.</summary>
+    public static readonly LazyFunction ClosurePrototype = new("prototype", 0, null!);
+    public static readonly JsValue ClosurePrototypeSlot = new(JsTag.Empty, 0, ClosurePrototype);
 }
 
 /// <summary>The less common state of a <see cref="JsObject"/>.</summary>
@@ -180,7 +184,7 @@ internal class JsObject
     {
         var v = Dict == null ? Slots[i] : Dict.Values[i];
         if (v.Ref is not LazyFunction lf) return v;
-        var fn = JsValue.FromObject(Realm.CreateBuiltinUncharged(lf));
+        var fn = JsValue.FromObject(ReferenceEquals(lf, LazyFunction.ClosurePrototype) ? ((JsClosure)this).CreatePrototypeObject() : Realm.CreateBuiltinUncharged(lf));
         if (Dict == null) Slots[i] = fn;
         else Dict.Values[i] = fn;
         return fn;
