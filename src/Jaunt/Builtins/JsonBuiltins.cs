@@ -28,7 +28,7 @@ internal static class JsonBuiltins
                 if (p.Error != null) return realm.Vm.Raise(p.ErrorValue());
                 var root = realm.NewObject();
                 root.CreateDataProperty("", pv);
-                return Internalize(realm, root, "", a[1], rec, text);
+                return Internalize(realm, root, "", a[1], rec, text, new JsValue[3]);
             }
             // a syntax error is raised without a CLR throw: JSON.parse of untrusted input inside try/catch is common
             return TryParse(realm, text, 512, out var v, out var error) ? v : realm.Vm.Raise(error);
@@ -54,19 +54,26 @@ internal static class JsonBuiltins
         });
     }
 
-    private static JsValue Internalize(Realm realm, JsObject holder, string name, JsValue reviver, JsonParseRecord? record, string source)
+    private static JsValue Internalize(Realm realm, JsObject holder, string name, JsValue reviver, JsonParseRecord? record, string source, JsValue[] args)
     {
         var val = holder.Get(name);
-        // InternalizeJSONProperty (JSON.parse source text access): records apply only while the value is unchanged
-        var context = realm.NewObject();
+        // InternalizeJSONProperty (JSON.parse source text access): records apply only while the value is unchanged.
+        // The context object is fresh per call (a reviver may keep it); a primitive's context has its source text.
+        JsObject context;
         List<JsonParseRecord?>? elements = null;
-        Dictionary<string, JsonParseRecord>? entries = null;
+        JsonParseRecord? entries = null;
         if (record != null && Operations.SameValue(record.Value, val))
         {
-            if (!val.IsObject) context.CreateDataProperty("source", new JsValue(source.Substring(record.Start, record.End - record.Start)));
+            if (!val.IsObject)
+            {
+                context = new JsObject(realm, realm.JsonContextShape, 1);
+                context.Slots[0] = new JsValue(source.Substring(record.Start, record.End - record.Start));
+            }
+            else context = realm.NewObject();
             elements = record.Elements;
-            entries = record.Entries;
+            if (record.Entries != null) entries = record;
         }
+        else context = realm.NewObject();
         if (val.IsObject)
         {
             var o = val.AsObjectUnchecked;
@@ -74,31 +81,62 @@ internal static class JsonBuiltins
             {
                 long len = Operations.LengthOfArrayLike(realm, o);
                 for (long i = 0; i < len; i++)
-                    Revive(realm, o, PropertyKey.IndexToString((uint)i), reviver, elements != null && i < elements.Count ? elements[(int)i] : null, source);
+                    Revive(realm, o, PropertyKey.IndexToString((uint)i), reviver, elements != null && i < elements.Count ? elements[(int)i] : null, source, args);
             }
             else
             {
                 // EnumerableOwnProperties is computed once, before any reviver call
-                var keys = new List<PropertyKey>();
-                o.OwnPropertyKeys(keys);
-                var names = new List<string>(keys.Count);
-                foreach (var k in keys)
-                    if (k.Value is string ks && o.GetOwnProperty(k, out var d) && d.Enumerable) names.Add(ks);
+                List<string> names;
+                if (!o.IsExotic && o.Dict == null && !o.Shape.HasIndexKeys)
+                {
+                    var shape = o.Shape;
+                    names = new List<string>(shape.Count);
+                    for (int i = 0; i < shape.Count; i++)
+                        if (shape.Keys[i].Value is string ks && (shape.Flags[i] & PropFlags.Enumerable) != 0) names.Add(ks);
+                }
+                else
+                {
+                    var keys = new List<PropertyKey>();
+                    o.OwnPropertyKeys(keys);
+                    names = new List<string>(keys.Count);
+                    foreach (var k in keys)
+                        if (k.Value is string ks && o.GetOwnProperty(k, out var d) && d.Enumerable) names.Add(ks);
+                }
+                // the parsed entries are in key order too: the cursor usually hits without a scan
+                int cursor = 0;
                 foreach (var ks in names)
-                    Revive(realm, o, ks, reviver, entries != null && entries.TryGetValue(ks, out var er) ? er : null, source);
+                    Revive(realm, o, ks, reviver, entries != null ? FindEntry(entries, ks, ref cursor) : null, source, args);
             }
         }
-        return realm.Vm.Call(reviver, JsValue.FromObject(holder), new[] { new JsValue(name), val, JsValue.FromObject(context) });
+        args[0] = new JsValue(name);
+        args[1] = val;
+        args[2] = JsValue.FromObject(context);
+        var result = realm.Vm.Call(reviver, JsValue.FromObject(holder), args);
+        args[1] = default;
+        args[2] = default;
+        return result;
+    }
+
+    /// <summary>
+    /// The record of <paramref name="key"/>. Without duplicate keys the entries are in property order and the cursor hits;
+    /// otherwise the last entry with the key is the one whose value the object kept.
+    /// </summary>
+    private static JsonParseRecord? FindEntry(JsonParseRecord record, string key, ref int cursor)
+    {
+        var entries = record.Entries!;
+        if (!record.DuplicateKeys && cursor < entries.Count && entries[cursor].Key == key) return entries[cursor++].Value;
+        for (int j = entries.Count - 1; j >= 0; j--) if (entries[j].Key == key) return entries[j].Value;
+        return null;
     }
 
     private static bool IsJsonWs(char c) => c is ' ' or '\t' or '\n' or '\r';
 
-    private static void Revive(Realm realm, JsObject o, string key, JsValue reviver, JsonParseRecord? record, string source)
+    private static void Revive(Realm realm, JsObject o, string key, JsValue reviver, JsonParseRecord? record, string source, JsValue[] args)
     {
         realm.Vm.EnterNative();
         try
         {
-            var nv = Internalize(realm, o, key, reviver, record, source);
+            var nv = Internalize(realm, o, key, reviver, record, source, args);
             if (nv.IsUndefined) o.Delete(key);
             else o.CreateDataProperty(key, nv);
         }
@@ -184,7 +222,8 @@ internal static class JsonBuiltins
         public bool BuildRecords;
         public JsonParseRecord? LastRecord;
         private List<JsonParseRecord?>? _pendingElements;
-        private Dictionary<string, JsonParseRecord>? _pendingEntries;
+        private List<KeyValuePair<string, JsonParseRecord>>? _pendingEntries;
+        private bool _pendingDuplicateKeys;
 
         public JsValue ParseValue(int depth)
         {
@@ -192,10 +231,12 @@ internal static class JsonBuiltins
             int start = Pos;
             _pendingElements = null;
             _pendingEntries = null;
+            _pendingDuplicateKeys = false;
             var v = ParseValueCore(depth);
-            LastRecord = new JsonParseRecord { Value = v, Start = start, End = Pos, Elements = _pendingElements, Entries = _pendingEntries };
+            LastRecord = new JsonParseRecord { Value = v, Start = start, End = Pos, Elements = _pendingElements, Entries = _pendingEntries, DuplicateKeys = _pendingDuplicateKeys };
             _pendingElements = null;
             _pendingEntries = null;
+            _pendingDuplicateKeys = false;
             return v;
         }
 
@@ -228,7 +269,7 @@ internal static class JsonBuiltins
             if (depth > _maxDepth || !System.Runtime.CompilerServices.RuntimeHelpers.TryEnsureSufficientExecutionStack()) throw JsErrors.RangeError(_realm, "JSON nesting exceeds the depth limit");
             Pos++;
             var o = _realm.NewObject();
-            var entries = BuildRecords ? new Dictionary<string, JsonParseRecord>(StringComparer.Ordinal) : null;
+            var entries = BuildRecords ? new List<KeyValuePair<string, JsonParseRecord>>() : null;
             SkipWs();
             if (Pos < _s.Length && _s[Pos] == '}') { Pos++; _pendingEntries = entries; return JsValue.FromObject(o); }
             while (true)
@@ -241,7 +282,7 @@ internal static class JsonBuiltins
                 Pos++;
                 SkipWs();
                 var v = ParseValue(depth);
-                if (entries != null) entries[key] = LastRecord!;   // duplicate keys: the last one wins
+                entries?.Add(new KeyValuePair<string, JsonParseRecord>(key, LastRecord!));   // duplicate keys: the last one wins (see FindEntry)
                 o.CreateDataProperty(new PropertyKey(key), v);
                 _realm.Vm.Tick();
                 SkipWs();
@@ -251,6 +292,8 @@ internal static class JsonBuiltins
                 if (c != ',') { Pos--; return Fail("Expected ',' or '}' after property value"); }
             }
             _pendingEntries = entries;
+            // fewer own properties than entries: a key was repeated (FindEntry then searches instead of walking in order)
+            if (entries != null) _pendingDuplicateKeys = entries.Count != (o.Dict != null ? o.Dict.Count : o.Shape.Count);
             return JsValue.FromObject(o);
         }
 
@@ -788,7 +831,8 @@ internal sealed class JsonParseRecord
     public JsValue Value;
     public int Start, End;
     public List<JsonParseRecord?>? Elements;
-    public Dictionary<string, JsonParseRecord>? Entries;
+    public List<KeyValuePair<string, JsonParseRecord>>? Entries;
+    public bool DuplicateKeys;
 }
 
 /// <summary>Object created by JSON.rawJSON ([[IsRawJSON]]): null prototype, frozen, single "rawJSON" property.</summary>

@@ -430,3 +430,69 @@ and missing arguments with `arguments`/rest, parameter mutation, nested calls in
 live across calls, catch/finally in the caller, sloppy/strict `this` with primitive receivers, legacy `caller`,
 stack traces, calls from generators and async functions, `new` with extra arguments and derived classes, proper
 tail calls), test262 100,167/100,169 in both modes.
+
+## Fourth cross-engine pass: Map/Set tables, JSON reviver, result arrays, GC guidance (2026-11-08)
+
+Same harness, two rounds, best of both; MoeJS measured the same as in the previous pass (×1.001). **MoeJS/Jaunt
+geometric mean 1.028 → 1.049**, Jint/Jaunt 2.72 → 2.77; Jaunt alone ×0.982. Fastest per workload: Jaunt 31, MoeJS 26,
+Jint 2. Per category (MoeJS/Jaunt): collections 0.97 → 1.02, advanced 0.99 → 1.04, apps 1.00 → 1.03, the rest within ±0.02.
+
+| Workload | Jaunt before | Jaunt after | Δ | MoeJS/Jaunt before → after |
+| --- | ---: | ---: | ---: | ---: |
+| apps/state-reducer | 61.1 ms | 49.3 ms | −19% | 0.91 → 1.12 |
+| collections/map-set | 4.04 ms | 3.28 ms | −19% | 0.72 → 0.89 |
+| advanced/json-roundtrip | 9.68 ms | 7.94 ms | −18% | 0.73 → 0.90 |
+| strings/concat-build | 1.07 ms | 0.99 ms | −7% | 0.97 → 1.05 |
+| objects/dynamic-props | 1.68 ms | 1.56 ms | −7% | 1.05 → 1.13 |
+| compute/crc-base64 / apps/huffman-lz | 10.9 / 14.6 ms | 10.3 / 13.9 ms | −5% | 0.93 → 0.98 / 1.15 → 1.22 |
+| functional/higher-order | 9.94 ms | 10.8 ms | +8% (see below) | 0.68 → 0.63 |
+
+Sampling (`dotnet-trace`) of map-set, json-roundtrip and higher-order showed that none of them is bound where the
+design expected: **GC pauses are 20–26% of wall time** (`--run-loop` pause counters: 2.06 s, 2.10 s and 1.57 s of 8 s),
+with a gen2 collection on nearly every run, because an 8000-entry Map or Set and the doubling chain of a 10000-element
+result array are large-object-heap allocations and the LOH budget triggers gen2. What changed (`design/08`, §11):
+
+* **Map/Set tables** (`OrderedTable`): the `Dictionary<JsValue, int>` index is replaced by an inline chained hash index
+  over the insertion-ordered slots (three `int` arrays), the hash is computed once per operation with number, string
+  and object fast paths, and a Set stores no value array: ~70 → ~40 bytes per entry, fewer and smaller LOH arrays.
+  Numbers and object identities go through a MurmurHash3 finalizer before bucketing (an integer-valued double differs
+  from its neighbours only in its high bits; the first version without it was 6.6× slower on integer keys); strings
+  keep the runtime's randomized ordinal hash, so attacker-chosen keys cannot be made to collide. String-key micro:
+  4.38 → 2.78 ms (−37%, together with the concatenation change below); integer-key micro unchanged at ~20 ns per
+  `has`/`get`, which is the method call, not the lookup.
+* **JSON.parse with a reviver** (A4, the measured bottleneck of json-roundtrip; stringify was 14% of it): the per-property
+  context object uses a shared one-slot shape instead of a fresh object plus a shape transition, keys of shape-mode
+  objects come straight from the layout, the argument array is reused, and the source-text records keep an ordered
+  list matched by a cursor instead of a `Dictionary` per object (a repeated key, detected from the property count,
+  falls back to a search). json-roundtrip −16% in `--run-loop`. The design's chunked output buffer was not built:
+  the serializer already reuses a thread-cached `StringBuilder`, and `Quote`/`Append` were under 5% of the samples.
+* **filter / flat / flatMap results** (A5): elements are collected in the Vm's scratch buffer (shared with sort) and
+  the result gets an exactly sized element store at the end, instead of growing from empty by doubling (about twice
+  the final size allocated, every piece of a large result on the LOH). Only for a fresh intrinsic Array result; a
+  species-created result may be observed by user code and is appended to as before. A/B in `--run-loop`, alternating
+  builds three times each: 9.8–10.0 ms with the buffer vs 10.6–11.0 ms without (−7%). The cross-engine table above
+  shows higher-order +8%: that workload is GC-bound and two consecutive `--run-loop` runs of the same build differed by
+  30%, so its cross-engine figure is inside the noise; the controlled A/B is the number to trust.
+* **String + integer** (`'k' + i`, `i + 'px'`): the digits are written straight into the result string in one
+  allocation instead of formatting a digit string first (same text, `-0` prints "0").
+
+**GC configuration (host-level, design §4.7).** These knobs belong to the host process (`runtimeconfig.json` or
+`DOTNET_*` environment variables), not to the engine, and `bench/cross` keeps the defaults. Measured here with
+`--run-loop` on the same build:
+
+| Configuration | map-set | json-roundtrip | higher-order |
+| --- | ---: | ---: | ---: |
+| default (workstation, concurrent) | 3.26 ms, pause 1.94 s | 8.28 ms, pause 2.00 s | 9.45 ms, pause 1.53 s |
+| `GCgen0size=0x4000000` (64 MB) | 2.44 ms (−25%) | 7.15 ms (−14%) | 11.0 ms (+17%) |
+| `gcConcurrent=0` | 2.53 ms (−22%) | 7.28 ms (−12%) | 8.90 ms (−6%) |
+| `GCLOHThreshold=0x100000` (1 MB) | 2.50 ms (−23%), gen2 491 → 1 | 7.88 ms (−5%) | 9.17 ms (−3%), gen2 507 → 0 |
+
+Raising the LOH threshold to 1 MB removes almost every gen2 collection in allocation-heavy scripts without a
+downside in these workloads; a larger gen0 helps short-lived object churn but hurts higher-order, so it is not a
+general recommendation.
+
+Verified: unit tests 578/578 plain and poisoned, 17 new `FastPathSemanticsTests` cases (Map/Set deletion and insertion
+during iteration, compaction under a live iterator, −0/NaN keys, rope and mixed-type keys, clear during iteration, a
+20000-entry table; reviver with duplicate keys, `context.source`, holder mutation, index-like key order, nested arrays;
+string + integer edge cases; result collection with a user species, re-entrant filter/flatMap, a throwing callback,
+70000-element results), test262 100,167/100,169 in both modes.

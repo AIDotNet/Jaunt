@@ -599,10 +599,9 @@ internal static class ArrayBuiltins
             long len = Operations.LengthOfArrayLike(realm, o);
             double depth = 1;
             if (!a[0].IsUndefined) { depth = Operations.ToIntegerOrInfinity(realm, a[0]); if (depth < 0) depth = 0; }
-            var res = ArraySpeciesCreate(realm, o, 0);
-            long index = 0;
-            Flatten(realm, res, ref index, o, len, depth, JsValue.Undefined, JsValue.Undefined);
-            return JsValue.FromObject(res);
+            var sink = new ResultSink(realm, ArraySpeciesCreate(realm, o, 0, out bool intrinsic), intrinsic, len);
+            Flatten(realm, sink, o, len, depth, JsValue.Undefined, JsValue.Undefined);
+            return JsValue.FromObject(sink.Finish());
         });
         r.Method(proto, "flatMap", 1, static (in NativeArgs a) =>
         {
@@ -610,10 +609,9 @@ internal static class ArrayBuiltins
             var o = Operations.ToObject(realm, a.This);
             long len = Operations.LengthOfArrayLike(realm, o);
             if (!a[0].IsFunction) throw JsErrors.TypeError(realm, "flatMap mapper function is not callable");
-            var res = ArraySpeciesCreate(realm, o, 0);
-            long index = 0;
-            Flatten(realm, res, ref index, o, len, 1, a[0], a[1]);
-            return JsValue.FromObject(res);
+            var sink = new ResultSink(realm, ArraySpeciesCreate(realm, o, 0, out bool intrinsic), intrinsic, len);
+            Flatten(realm, sink, o, len, 1, a[0], a[1]);
+            return JsValue.FromObject(sink.Finish());
         });
         r.Method(proto, "keys", 0, static (in NativeArgs a) => JsValue.FromObject(new JsArrayIterator(a.Realm, Operations.ToObject(a.Realm, a.This), 0)));
         r.Method(proto, "entries", 0, static (in NativeArgs a) => JsValue.FromObject(new JsArrayIterator(a.Realm, Operations.ToObject(a.Realm, a.This), 2)));
@@ -627,8 +625,12 @@ internal static class ArrayBuiltins
     }
 
     /// <summary>ArraySpeciesCreate (23.1.3.1.1): honours Symbol.species so Array subclasses get subclass results.</summary>
-    public static JsObject ArraySpeciesCreate(Realm realm, JsObject original, long length)
+    public static JsObject ArraySpeciesCreate(Realm realm, JsObject original, long length) => ArraySpeciesCreate(realm, original, length, out _);
+
+    /// <summary><paramref name="intrinsic"/>: the result is a fresh intrinsic Array that no user code has seen.</summary>
+    public static JsObject ArraySpeciesCreate(Realm realm, JsObject original, long length, out bool intrinsic)
     {
+        intrinsic = true;
         if (!IsArray(realm, JsValue.FromObject(original))) return CreateArray(realm, length);
         var c = original.Get("constructor");
         if (Operations.IsConstructor(c))
@@ -646,7 +648,69 @@ internal static class ArrayBuiltins
         if (c.IsUndefined) return CreateArray(realm, length);
         if (!Operations.IsConstructor(c)) throw JsErrors.TypeError(realm, "Array species is not a constructor");
         var lenV = new JsValue((double)length);
+        intrinsic = false;
         return realm.Vm.Construct(c, new ReadOnlySpan<JsValue>(in lenV)).AsObjectUnchecked;
+    }
+
+    /// <summary>
+    /// Collects the elements of a result array whose final length is not known up front (filter, flat, flatMap). For a
+    /// fresh intrinsic Array the elements are gathered in the Vm's scratch buffer and the array gets an exactly sized
+    /// element store at the end: a result that grows by doubling allocates about twice its final size, and every piece
+    /// of a large result's doubling chain lands on the large object heap, whose collections are the gen2 pauses that
+    /// dominate these workloads. A species-created result (user code may hold it) is appended to as elements are produced.
+    /// </summary>
+    private sealed class ResultSink
+    {
+        private readonly Realm _realm;
+        private readonly JsObject _target;
+        private JsValue[]? _buf;
+        private int _n;
+        private long _index;
+
+        public ResultSink(Realm realm, JsObject target, bool buffered, long expected)
+        {
+            _realm = realm;
+            _target = target;
+            if (buffered) _buf = realm.Vm.TakeScratch((int)Math.Min(Math.Max(expected, 8), 1 << 16));
+        }
+
+        public long Index => _buf != null ? _n : _index;
+
+        public void Append(JsValue v)
+        {
+            var buf = _buf;
+            if (buf != null)
+            {
+                if (_n == buf.Length)
+                {
+                    if (_n >= _realm.MaxArrayLength) throw JsErrors.RangeError(_realm, "Invalid array length");
+                    Array.Resize(ref _buf, (int)Math.Min((long)_n * 2, _realm.MaxArrayLength));
+                    buf = _buf;
+                }
+                buf[_n++] = v;
+            }
+            else AppendResult(_target, ref _index, v);
+        }
+
+        public JsObject Finish()
+        {
+            var buf = _buf;
+            if (buf != null)
+            {
+                var arr = (JsArray)_target;
+                if (_n > 0)
+                {
+                    _realm.ChargeBytes(_n * 24L);
+                    var items = new JsValue[_n];
+                    Array.Copy(buf, items, _n);
+                    arr.Items = items;
+                    arr.Length = (uint)_n;
+                }
+                _realm.Vm.ReturnScratch(buf, _n);
+                _buf = null;
+            }
+            return _target;
+        }
     }
 
     /// <summary>ArrayCreate(length) for results that are then filled front to back with Push: capacity reserved, length 0.</summary>
@@ -783,8 +847,9 @@ internal static class ArrayBuiltins
         if (!cb.IsFunction) throw JsErrors.TypeError(realm, $"{JsErrors.Describe(cb)} is not a function");
         var fn = (JsFunctionObject)cb.Ref!;
         var thisArg = a[1];
-        JsObject? result = kind == 1 ? ArraySpeciesCreate(realm, o, len) : kind == 2 ? ArraySpeciesCreate(realm, o, 0) : null;
-        long outIndex = 0;
+        JsObject? result = kind == 1 ? ArraySpeciesCreate(realm, o, len) : null;
+        ResultSink? sink = null;
+        if (kind == 2) { result = ArraySpeciesCreate(realm, o, 0, out bool intrinsic); sink = new ResultSink(realm, result, intrinsic, len); }
         var args = new JsValue[3];
         args[2] = JsValue.FromObject(o);
         var vm = realm.Vm;
@@ -809,14 +874,15 @@ internal static class ArrayBuiltins
                     if (result is JsArray ra && ra.Dense && i < ra.Items.Length && i < ra.Length) ra.Items[i] = r;
                     else result!.CreateDataPropertyOrThrow(Key(i), r);
                     break;
-                case 2: if (Operations.ToBoolean(r)) AppendResult(result!, ref outIndex, v); break;
+                case 2: if (Operations.ToBoolean(r)) sink!.Append(v); break;
                 case 3: if (Operations.ToBoolean(r)) return JsValue.True; break;
                 case 4: if (!Operations.ToBoolean(r)) return JsValue.False; break;
             }
         }
         return kind switch
         {
-            1 or 2 => JsValue.FromObject(result!),
+            1 => JsValue.FromObject(result!),
+            2 => JsValue.FromObject(sink!.Finish()),
             3 => JsValue.False,
             4 => JsValue.True,
             _ => JsValue.Undefined,
@@ -917,14 +983,14 @@ internal static class ArrayBuiltins
         }
         if (count > 1)
         {
-            var tmp = vm.TakeSortScratch(count);
+            var tmp = vm.TakeScratch(count);
             try
             {
                 if (cmp.IsUndefined) { var c = new DefaultSortCmp(realm); MergeSort(items, tmp, count, ref c); }
                 else if (vm.TryPrepareFastCalls(cmp, out var closure)) { var c = new ClosureSortCmp(vm, closure, new JsValue[2]); MergeSort(items, tmp, count, ref c); }
                 else { var c = new GenericSortCmp(realm, cmp, new JsValue[2]); MergeSort(items, tmp, count, ref c); }
             }
-            finally { vm.ReturnSortScratch(tmp, count); }
+            finally { vm.ReturnScratch(tmp, count); }
         }
         for (int i = 0; i < count; i++) { SetAt(o, i, items[i], JsValue.FromObject(o)); vm.Tick(); }
         for (long i = count; i < len; i++) { o.Delete(Key(i)); vm.Tick(); }
@@ -1002,7 +1068,7 @@ internal static class ArrayBuiltins
     }
 
     /// <summary>FlattenIntoArray (23.1.3.13.1).</summary>
-    private static void Flatten(Realm realm, JsObject target, ref long targetIndex, JsObject source, long len, double depth, JsValue mapper, JsValue thisArg)
+    private static void Flatten(Realm realm, ResultSink sink, JsObject source, long len, double depth, JsValue mapper, JsValue thisArg)
     {
         var vm = realm.Vm;
         JsValue[]? args = null;
@@ -1035,13 +1101,13 @@ internal static class ArrayBuiltins
                 var inner = v.AsObjectUnchecked;
                 long innerLen = Operations.LengthOfArrayLike(realm, inner);
                 realm.Vm.EnterNative();
-                try { Flatten(realm, target, ref targetIndex, inner, innerLen, depth - 1, JsValue.Undefined, JsValue.Undefined); }
+                try { Flatten(realm, sink, inner, innerLen, depth - 1, JsValue.Undefined, JsValue.Undefined); }
                 finally { realm.Vm.ExitNative(); }
             }
             else
             {
-                if (targetIndex >= 9007199254740991) throw JsErrors.TypeError(realm, "Array too long");
-                AppendResult(target, ref targetIndex, v);
+                if (sink.Index >= 9007199254740991) throw JsErrors.TypeError(realm, "Array too long");
+                sink.Append(v);
             }
             vm.Tick();
         }

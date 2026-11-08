@@ -1,4 +1,5 @@
 using System;
+using System.Globalization;
 using System.Runtime.CompilerServices;
 
 namespace Jaunt.Runtime;
@@ -291,6 +292,9 @@ internal static class Operations
         var pb = ToPrimitive(realm, b);
         if (pa.IsString || pb.IsString)
         {
+            // string + integer ("k" + i, i + "px"): the digits are written straight into the result, no digit string
+            if (pb.IsNumber && pa.Ref is string sa && TryConcatInt(realm, sa, pb.Num, numberFirst: false, out var r)) return r;
+            if (pa.IsNumber && pb.Ref is string sb && TryConcatInt(realm, sb, pa.Num, numberFirst: true, out r)) return r;
             // A string operand stays as it is (it may be a rope); only the other side is converted.
             object left = pa.IsString ? pa.Ref! : ToString(realm, pa);
             object right = pb.IsString ? pb.Ref! : ToString(realm, pb);
@@ -301,6 +305,38 @@ internal static class Operations
     }
 
     public static JsValue Concat(Realm realm, string a, string b) => ConcatParts(realm, a, b);
+
+    /// <summary>
+    /// Concatenation of a flat string and a number that is a 32-bit integer, built in one allocation when the result is
+    /// below the rope threshold. Same text as ToString(number) (-0 prints as "0").
+    /// </summary>
+    private static bool TryConcatInt(Realm realm, string s, double d, bool numberFirst, out JsValue result)
+    {
+        result = default;
+        if (d != (int)d) return false;   // also false for NaN and out-of-range values
+        int n = (int)d;
+        uint mag = n < 0 ? (uint)(-(long)n) : (uint)n;
+        int digits = n < 0 ? 2 : 1;
+        while (mag >= 10) { mag /= 10; digits++; }
+        long len = (long)s.Length + digits;
+        if (len >= JsRope.MinLength || len > realm.MaxStringLength) return false;
+        realm.ChargeBytes(len * 2 + 24);
+        result = new JsValue(string.Create((int)len, (s, n, digits, numberFirst), static (span, st) =>
+        {
+            var (str, num, nd, first) = st;
+            if (first)
+            {
+                num.TryFormat(span.Slice(0, nd), out _, default, CultureInfo.InvariantCulture);
+                str.AsSpan().CopyTo(span.Slice(nd));
+            }
+            else
+            {
+                str.AsSpan().CopyTo(span);
+                num.TryFormat(span.Slice(str.Length), out _, default, CultureInfo.InvariantCulture);
+            }
+        }));
+        return true;
+    }
 
     private static JsValue FromPart(object part) => part is string s ? new JsValue(s) : new JsValue((JsRope)part);
 
