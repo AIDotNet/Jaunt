@@ -36,6 +36,8 @@ internal sealed class Frame
 {
     public FunctionTemplate T = null!;
     public int[] Code = null!;
+    /// <summary><c>T.Constants</c>, at hand so a call or return reloads the interpreter's constant pool with one load.</summary>
+    public JsValue[] K = null!;
     public JsValue[] Regs = null!;
     public int Base;
     public int Pc;
@@ -48,10 +50,17 @@ internal sealed class Frame
     public JsClosure Callee = null!;
     public Feedback Feedback = null!;
     public JsValue[]? Args;
-    public Frame? Caller;
+    /// <summary>
+    /// Coroutine frames only: the pooled frame this heap frame displaced from <c>Vm._frames</c> at its depth while it is
+    /// attached (restored when it detaches). The active frames are addressed by depth, see <see cref="Vm.Current"/>.
+    /// </summary>
+    public Frame? Displaced;
     public int RetIndex;
     public FrameFlags Flags;
     public int ChunkIndex;
+    /// <summary>The register stack position (<c>Vm._chunkIndex</c>, <c>Vm._top</c>) before this frame was pushed; restored when it is popped.</summary>
+    public int SavedChunkIndex;
+    public int SavedTop;
     /// <summary>
     /// Realm that was current when this frame was entered; only valid with <see cref="FrameFlags.RealmSwitch"/> (otherwise it
     /// is the callee's own realm, see <see cref="Vm.CallerRealmOf"/>). Not written on same-realm calls: every reference store
@@ -82,9 +91,25 @@ internal sealed partial class Vm
     private int _top;
     private const int InitialChunkSize = 128;
     private const int MaxChunkSize = 64 * 1024;
-    private Frame?[] _framePool = new Frame?[16];
-    public Frame? Current;
-    public int Depth;
+    /// <summary>
+    /// The frame stack, addressed by depth: <c>_frames[d]</c> is the frame running at depth <c>d</c> for
+    /// <c>d &lt; Depth</c>, and a pooled frame reused by the next call at that depth above it. A coroutine (heap) frame
+    /// takes the slot while it is attached and gives it back to the pooled frame it displaced. Addressing frames by depth
+    /// instead of linking them (Caller) and tracking the innermost one in a field saves three GC write barriers per
+    /// call and return, which is the hottest path of the VM.
+    /// </summary>
+    private Frame?[] _frames = new Frame?[16];
+    /// <summary>Number of active bytecode frames: <c>_frames[0..Sp)</c>.</summary>
+    public int Sp;
+    /// <summary>Native (CLR) nesting levels entered through <see cref="EnterNative"/>; they count toward <see cref="MaxDepth"/>.</summary>
+    private int _nativeDepth;
+    /// <summary>Call depth charged against <see cref="MaxDepth"/>: bytecode frames plus native nesting levels.</summary>
+    public int Depth => Sp + _nativeDepth;
+    /// <summary>The innermost active frame, or null when no bytecode is running.</summary>
+    public Frame? Current => Sp == 0 ? null : _frames[Sp - 1];
+    /// <summary>The frame at the given depth (0 is the outermost); valid for <c>depth &lt; Depth</c>.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal Frame FrameAt(int depth) => _frames[depth]!;
 
     // ---- budget
     public int MaxDepth = 10_000;
@@ -247,12 +272,12 @@ internal sealed partial class Vm
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public void EnterNative()
     {
-        if (++Depth > MaxDepth) StackOverflow();
+        if (Sp + ++_nativeDepth > MaxDepth) StackOverflow();
         if (!RuntimeHelpers.TryEnsureSufficientExecutionStack()) StackOverflow();
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public void ExitNative() => Depth--;
+    public void ExitNative() => _nativeDepth--;
 
     /// <summary>Guards native (CLR-stack) recursion: nested interpreter runs, bound/proxy chains, recursive builtins.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -268,7 +293,7 @@ internal sealed partial class Vm
     [MethodImpl(MethodImplOptions.NoInlining)]
     private void StackOverflow()
     {
-        Depth--;
+        _nativeDepth--;
         throw new JsTerminationException(TerminationKind.StackDepth, $"Maximum call stack depth ({MaxDepth}) exceeded.", Depth + 1, MaxDepth);
     }
 
@@ -342,11 +367,40 @@ internal sealed partial class Vm
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private Frame RentFrame()
     {
-        int d = Depth;
-        if (d >= _framePool.Length) Array.Resize(ref _framePool, _framePool.Length * 2);
-        var f = _framePool[d];
-        if (f == null) _framePool[d] = f = new Frame();
-        return f;
+        int d = Sp;
+        var frames = _frames;
+        if ((uint)d < (uint)frames.Length)
+        {
+            var f = frames[d];
+            if (f != null) return f;
+        }
+        return RentFrameSlow();
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private Frame RentFrameSlow()
+    {
+        int d = Sp;
+        if (d >= _frames.Length) Array.Resize(ref _frames, Math.Max(_frames.Length * 2, d + 1));
+        return _frames[d] ??= new Frame();
+    }
+
+    /// <summary>Puts a coroutine (heap) frame into the stack slot at the current depth, displacing the pooled frame there.</summary>
+    private void PlaceHeapFrame(Frame f)
+    {
+        int d = Sp;
+        if (d >= _frames.Length) Array.Resize(ref _frames, Math.Max(_frames.Length * 2, d + 1));
+        f.Displaced = _frames[d];
+        _frames[d] = f;
+    }
+
+    /// <summary>Removes the coroutine frame at depth <see cref="Depth"/> - 1 from the stack, restoring the pooled frame.</summary>
+    private void RemoveHeapFrame(Frame f)
+    {
+        int d = Sp - 1;
+        Debug.Assert(ReferenceEquals(_frames[d], f));
+        _frames[d] = f.Displaced;
+        f.Displaced = null;
     }
 
     /// <summary>Pushes a frame for a closure call; arguments are copied into the new register window.</summary>
@@ -355,12 +409,14 @@ internal sealed partial class Vm
         if (Depth + 1 > MaxDepth) StackOverflowFrame();
         var t = c.Template;
         Frame f;
+        int savedTop = _top, savedChunk = _chunkIndex;
         if ((flags & FrameFlags.OwnsRegs) != 0)
         {
             f = new Frame();
             f.Regs = new JsValue[t.RegisterCount];
             f.Base = 0;
             f.ChunkIndex = -1;
+            PlaceHeapFrame(f);
         }
         else
         {
@@ -368,6 +424,8 @@ internal sealed partial class Vm
             var regs = AllocRegs(t.RegisterCount, out f.Base, out f.ChunkIndex);
             if (!ReferenceEquals(f.Regs, regs)) f.Regs = regs;   // a pooled frame usually sits in the same chunk as last time
         }
+        f.SavedTop = savedTop;
+        f.SavedChunkIndex = savedChunk;
         int n = Math.Min(args.Length, t.ParamCount);
         {
             var regs = f.Regs; int b = f.Base;
@@ -390,27 +448,69 @@ internal sealed partial class Vm
     }
 
     /// <summary>
-    /// <see cref="PushFrame"/> for the interpreter's Call/CallMethod: <c>this</c> and the arguments are read straight from
-    /// the caller's register window (no span and no 16-byte value copies cross the call), new.target is undefined and
-    /// the frame has no flags.
+    /// <see cref="PushFrame"/> for the interpreter's Call/CallMethod. The callee's register window starts at the caller's
+    /// first argument register, so the arguments are already in place and nothing is copied: the compiler evaluates a
+    /// call's arguments into the topmost registers that are live at the call (<c>CodeGen.Arguments</c>), so the callee
+    /// may clobber every caller register from <paramref name="argStart"/> up (<see cref="PoisonRegisters"/> checks that the
+    /// caller never reads them again). The window does not overlap when the caller's registers are not the shared stack
+    /// (a coroutine frame owns its registers) or the callee does not fit in the chunk: those calls copy as PushFrame does.
     /// </summary>
     internal Frame PushCallFrame(JsClosure c, JsValue[] callerRegs, int thisIndex, int argStart, int argc)
     {
         if (Depth + 1 > MaxDepth) StackOverflowFrame();
-        var t = c.Template;
         var f = RentFrame();
-        var regs = AllocRegs(t.RegisterCount, out f.Base, out f.ChunkIndex);
-        if (!ReferenceEquals(f.Regs, regs)) f.Regs = regs;
-        int b = f.Base;
-        int n = argc < t.ParamCount ? argc : t.ParamCount;
-        if (n <= 4) { for (int i = 0; i < n; i++) regs[b + i] = callerRegs[argStart + i]; }
-        else Array.Copy(callerRegs, argStart, regs, b, n);
-        int initEnd = t.InitUndefEnd < 0 ? t.RegisterCount : t.InitUndefEnd;
-        for (int i = n; i < initEnd; i++) regs[b + i] = default;
-        if (PoisonRegisters) for (int i = initEnd; i < t.RegisterCount; i++) regs[b + i] = s_poison;
-        if ((t.Flags & FunctionFlags.NeedsArgsArray) != 0) f.Args = new ReadOnlySpan<JsValue>(callerRegs, argStart, argc).ToArray();
-        SetupFrame(f, c, thisIndex < 0 ? default : callerRegs[thisIndex], default, FrameFlags.None);
+        BindCallWindow(f, c.Template, callerRegs, argStart, argc);
+        // the this register is below argStart (the compiler evaluates the receiver before the arguments): still intact
+        SetupCallFrame(f, c, callerRegs, thisIndex);
         return f;
+    }
+
+    /// <summary><see cref="PushCallFrame"/> for the interpreter's New: the frame constructs <paramref name="obj"/>.</summary>
+    internal Frame PushNewFrame(JsClosure c, JsValue[] callerRegs, int argStart, int argc, JsObject obj, JsValue newTarget)
+    {
+        if (Depth + 1 > MaxDepth) StackOverflowFrame();
+        var f = RentFrame();
+        BindCallWindow(f, c.Template, callerRegs, argStart, argc);
+        SetupFrame(f, c, JsValue.FromObject(obj), newTarget, FrameFlags.Construct);
+        return f;
+    }
+
+    /// <summary>
+    /// Gives <paramref name="f"/> its register window for a call made by the interpreter (see <see cref="PushCallFrame"/>):
+    /// overlapping the caller's argument registers when possible, otherwise a fresh window the arguments are copied to.
+    /// Initializes the registers above the arguments and the arguments array.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private void BindCallWindow(Frame f, FunctionTemplate t, JsValue[] callerRegs, int argStart, int argc)
+    {
+        int count = t.RegisterCount;
+        f.SavedTop = _top;
+        f.SavedChunkIndex = _chunkIndex;
+        int n = argc < t.ParamCount ? argc : t.ParamCount;
+        JsValue[] regs;
+        int b;
+        int end = argStart + count;
+        if (ReferenceEquals(callerRegs, _chunk) && end <= callerRegs.Length)
+        {
+            regs = callerRegs;
+            b = argStart;
+            f.ChunkIndex = _chunkIndex;
+            _top = end;
+            if (end > _hwm) _hwm = end;
+        }
+        else
+        {
+            regs = AllocRegs(count, out b, out f.ChunkIndex);
+            if (n <= 4) { for (int i = 0; i < n; i++) regs[b + i] = callerRegs[argStart + i]; }
+            else Array.Copy(callerRegs, argStart, regs, b, n);
+        }
+        f.Base = b;
+        if (!ReferenceEquals(f.Regs, regs)) f.Regs = regs;
+        // before the registers above the parameters are initialized: with an overlapping window the extra arguments live there
+        if ((t.Flags & FunctionFlags.NeedsArgsArray) != 0) f.Args = new ReadOnlySpan<JsValue>(callerRegs, argStart, argc).ToArray();
+        int initEnd = t.InitUndefEnd < 0 ? count : t.InitUndefEnd;
+        for (int i = n; i < initEnd; i++) regs[b + i] = default;
+        if (PoisonRegisters) for (int i = initEnd; i < count; i++) regs[b + i] = s_poison;
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -419,20 +519,23 @@ internal sealed partial class Vm
         // Reference stores into the (heap-allocated, pooled) frame each cost a GC write barrier, so a field is stored
         // only when its value changes. A pooled frame keeps its callee, environment and this between calls (recursion
         // and callbacks in loops re-enter the same closure at the same depth); ReleasePooledFrames drops them when the
-        // root execution ends. PopFrame clears Args, Caller and NewTarget, and a freshly allocated frame is clear.
+        // root execution ends. PopFrame clears Args and NewTarget, and a freshly allocated frame is clear. The frame's
+        // place in the stack is its depth (see _frames): no caller link and no "current frame" field are written.
         var t = c.Template;
         if (!ReferenceEquals(f.Callee, c))
         {
             f.Callee = c;
             f.T = t;
             f.Code = t.Code;
+            f.K = t.Constants;
             f.Feedback = c.Feedback;
         }
         f.Pc = 0;
+        // compared even for the same callee: a frame that left through a throw or a return from inside a block keeps
+        // the block environment it had pushed
         var env = c.Env;
         if (!ReferenceEquals(f.Env, env)) f.Env = env;
         f.EnvDepth = 0;
-        f.Caller = Current;
         f.Suspend = SuspendKind.None;
         var box = c.ThisBox;
         if (box != null || f.ThisBox != null) f.ThisBox = box;
@@ -461,29 +564,115 @@ internal sealed partial class Vm
             }
             if (!ReferenceEquals(f.This.Ref, thisValue.Ref) || f.This.Bits != thisValue.Bits) f.This = thisValue;
         }
-        Depth++;
-        Current = f;
+        Sp++;
+    }
+
+    /// <summary>
+    /// <see cref="SetupFrame"/> for <see cref="PushCallFrame"/>: new.target is undefined, there are no flags, and
+    /// <c>this</c> is either absent (<paramref name="thisIndex"/> &lt; 0: undefined, which a sloppy function sees as its
+    /// realm's global object) or read in place from the caller's registers, so no 16-byte value passes through a local.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private void SetupCallFrame(Frame f, JsClosure c, JsValue[] callerRegs, int thisIndex)
+    {
+        var t = c.Template;
+        if (!ReferenceEquals(f.Callee, c))
+        {
+            f.Callee = c;
+            f.T = t;
+            f.Code = t.Code;
+            f.K = t.Constants;
+            f.Feedback = c.Feedback;
+        }
+        f.Pc = 0;
+        var env = c.Env;
+        if (!ReferenceEquals(f.Env, env)) f.Env = env;
+        f.EnvDepth = 0;
+        f.Suspend = SuspendKind.None;
+        var box = c.ThisBox;
+        if (box != null || f.ThisBox != null) f.ThisBox = box;
+        var realm = Realm;
+        var calleeRealm = c.Realm;
+        var flags = FrameFlags.None;
+        if (!ReferenceEquals(realm, calleeRealm))
+        {
+            f.CallerRealm = realm;
+            Realm = calleeRealm;
+            flags = FrameFlags.RealmSwitch;
+        }
+        f.Flags = flags;
+        if ((t.Flags & FunctionFlags.Arrow) != 0)
+        {
+            f.This = c.BoundThis;
+            var nt = c.BoundNewTarget;
+            if (nt.Ref != null) f.NewTarget = nt;
+        }
+        else if (thisIndex < 0)
+        {
+            if ((t.Flags & FunctionFlags.Strict) != 0)
+            {
+                if (f.This.Ref != null || f.This.Bits != JsValue.UndefinedBits) f.This = default;
+            }
+            else
+            {
+                var g = calleeRealm.GlobalObject;
+                if (!ReferenceEquals(f.This.Ref, g)) f.This = JsValue.FromObject(g);
+            }
+        }
+        else
+        {
+            ref readonly var tv = ref callerRegs[thisIndex];
+            if ((t.Flags & FunctionFlags.Strict) != 0 || tv.IsObject)
+            {
+                if (!ReferenceEquals(f.This.Ref, tv.Ref) || f.This.Bits != tv.Bits) f.This = tv;
+            }
+            else f.This = CoerceSloppyThis(calleeRealm, tv);
+        }
+        Sp++;
+    }
+
+    /// <summary>OrdinaryCallBindThis for a sloppy function and a primitive, null or undefined receiver.</summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static JsValue CoerceSloppyThis(Realm calleeRealm, in JsValue thisValue)
+    {
+        if (thisValue.IsNullOrUndefined) return JsValue.FromObject(calleeRealm.GlobalObject);
+        if (thisValue.IsEmpty) return thisValue;
+        return JsValue.FromObject(Operations.ToObject(calleeRealm, thisValue));
     }
 
     [MethodImpl(MethodImplOptions.NoInlining)]
     private void StackOverflowFrame() =>
         throw new JsTerminationException(TerminationKind.StackDepth, $"Maximum call stack depth ({MaxDepth}) exceeded.", Depth + 1, MaxDepth);
 
-    /// <summary>Pops a frame, clearing its registers so the pooled stack does not retain object graphs.</summary>
+    /// <summary>Pops a frame: releases its register window and drops the per-call references the pooled frame holds.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     internal void PopFrame(Frame f)
     {
-        Depth--;
-        Current = f.Caller;
         var flags = f.Flags;
         if ((flags & FrameFlags.RealmSwitch) != 0) Realm = f.CallerRealm;
         if ((flags & FrameFlags.OwnsRegs) == 0)
         {
-            if (_chunkIndex != f.ChunkIndex) { _chunkIndex = f.ChunkIndex; _chunk = _chunks[_chunkIndex]; }
-            _top = f.Base;
+            int ci = f.SavedChunkIndex;
+            if (_chunkIndex != ci) { _chunkIndex = ci; _chunk = _chunks[ci]; }
+            _top = f.SavedTop;
+            if (PoisonRegisters) PoisonReleasedWindow(f);
             f.Args = null;
-            f.Caller = null;
             f.NewTarget = default;
         }
+        else RemoveHeapFrame(f);
+        Sp--;
+    }
+
+    /// <summary>
+    /// Debug aid (see <see cref="PoisonRegisters"/>): after a call whose window overlapped the caller's registers, the
+    /// caller's registers from the first argument up are poisoned. The compiler guarantees they are dead at the call;
+    /// a read of one afterwards is a codegen bug that this makes visible in test results.
+    /// </summary>
+    private static void PoisonReleasedWindow(Frame f)
+    {
+        if (f.ChunkIndex != f.SavedChunkIndex) return;
+        var regs = f.Regs;
+        for (int i = f.Base; i < f.SavedTop; i++) regs[i] = s_poison;
     }
 
     /// <summary>
@@ -494,7 +683,7 @@ internal sealed partial class Vm
     {
         ClearRegisterStack();
         if (_sortScratch != null && _sortScratch.Length > 1 << 12) _sortScratch = null;   // an idle engine keeps at most 64 KB of sort scratch
-        var pool = _framePool;
+        var pool = _frames;   // Sp is 0 here: every slot holds a pooled frame (or nothing)
         for (int i = 0; i < pool.Length; i++)
         {
             var f = pool[i];
@@ -502,6 +691,7 @@ internal sealed partial class Vm
             f.Callee = null!;
             f.T = null!;
             f.Code = null!;
+            f.K = null!;
             f.Feedback = null!;
             f.Env = null;
             f.ThisBox = null;
@@ -517,16 +707,15 @@ internal sealed partial class Vm
     /// <summary>Detaches a suspended coroutine frame from the active stack (registers are private).</summary>
     internal void DetachFrame(Frame f)
     {
-        Depth--;
-        Current = f.Caller;
+        RemoveHeapFrame(f);
+        Sp--;
         if ((f.Flags & FrameFlags.RealmSwitch) != 0) Realm = f.CallerRealm;
-        f.Caller = null;
     }
 
     internal void AttachFrame(Frame f)
     {
         if (Depth + 1 > MaxDepth) StackOverflowFrame();
-        f.Caller = Current;
+        PlaceHeapFrame(f);
         var realm = Realm;
         var calleeRealm = f.Callee.Realm;
         if (!ReferenceEquals(realm, calleeRealm))
@@ -536,8 +725,7 @@ internal sealed partial class Vm
             f.Flags |= FrameFlags.RealmSwitch;
         }
         else f.Flags &= ~FrameFlags.RealmSwitch;
-        Depth++;
-        Current = f;
+        Sp++;
     }
 
     // ------------------------------------------------------------------ calls
@@ -727,12 +915,14 @@ internal sealed partial class Vm
     /// </summary>
     public StackFrameRecord[] CaptureStackFrames(int maxFrames = 32)
     {
-        int n = 0;
-        for (var f = Current; f != null && n < maxFrames; f = f.Caller) n++;
+        int n = Math.Min(Sp, maxFrames);
         if (n == 0) return Array.Empty<StackFrameRecord>();
         var frames = new StackFrameRecord[n];
-        n = 0;
-        for (var f = Current; f != null && n < frames.Length; f = f.Caller) frames[n++] = new StackFrameRecord(f.T, Math.Max(0, f.Pc - 1));
+        for (int i = 0; i < n; i++)
+        {
+            var f = _frames[Sp - 1 - i]!;
+            frames[i] = new StackFrameRecord(f.T, Math.Max(0, f.Pc - 1));
+        }
         return frames;
     }
 
@@ -770,13 +960,20 @@ internal sealed partial class Vm
         for (int i = 0; i < _chunks.Count; i++) Array.Clear(_chunks[i]);
         _hwm = 0;
         _chunkHwm = 0;
-        for (int i = 0; i < _framePool.Length; i++) _framePool[i] = null;
+        for (int i = 0; i < _frames.Length; i++)
+        {
+            // an abandoned coroutine frame may still be held by its generator: do not let it retain the pooled frame
+            var f = _frames[i];
+            if (f == null) break;
+            f.Displaced = null;
+            _frames[i] = null;
+        }
         _chunkIndex = 0;
         _chunk = _chunks[0];
         _top = 0;
-        Current = null;
         Realm = _homeRealm;
-        Depth = 0;
+        Sp = 0;
+        _nativeDepth = 0;
     }
 
     /// <summary>Drops oversized register chunks so a single deep request does not keep memory alive.</summary>

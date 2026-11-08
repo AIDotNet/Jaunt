@@ -40,7 +40,7 @@ internal sealed partial class Vm
         JsValue[] regs = f.Regs;
         int bp = f.Base;
         int pc = f.Pc;
-        JsValue[] k = f.T.Constants;
+        JsValue[] k = f.K;
         JsValue thrown;
         JsValue result;
 
@@ -677,7 +677,7 @@ internal sealed partial class Vm
                                     continue;
                                 }
                             }
-                            if (fv.IsObject && fv.Ref is JsClosure tc && (tc.Template.Flags & InlineCallMask) == 0 && !tc.IsClassConstructor
+                            if (fv.IsObject && fv.Ref is JsClosure tc && (tc.Template.Flags & InlineCallMask) == 0
                                 && (f.Flags & (FrameFlags.Construct | FrameFlags.Coroutine | FrameFlags.OwnsRegs)) == 0)
                             {
                                 if (--_ticks <= 0) Checkpoint();
@@ -694,7 +694,7 @@ internal sealed partial class Vm
                                 nf.RetIndex = retIndex;
                                 if (wasEntry) nf.Flags |= FrameFlags.Entry;
                                 f = nf;
-                                code = f.Code; regs = f.Regs; bp = f.Base; pc = 0; k = f.T.Constants;
+                                code = f.Code; regs = f.Regs; bp = f.Base; pc = 0; k = f.K;
                                 continue;
                             }
                             var tres = CallValue(fv, thisV, targs);
@@ -711,13 +711,13 @@ internal sealed partial class Vm
                             int argc = code[pc + 5];
                             int dst = bp + code[pc + 1];
                             f.Pc = pc + 6;
-                            if (fv.IsObject && fv.Ref is JsClosure c && (c.Template.Flags & InlineCallMask) == 0 && !c.IsClassConstructor)
+                            if (fv.IsObject && fv.Ref is JsClosure c && (c.Template.Flags & InlineCallMask) == 0)
                             {
                                 if (--_ticks <= 0) Checkpoint();
                                 var nf = PushCallFrame(c, regs, tr < 0 ? -1 : bp + tr, argStart, argc);
                                 nf.RetIndex = dst;
                                 f = nf;
-                                code = f.Code; regs = f.Regs; bp = f.Base; pc = 0; k = f.T.Constants;
+                                code = f.Code; regs = f.Regs; bp = f.Base; pc = 0; k = f.K;
                                 continue;
                             }
                             if (fv.IsNotObject || fv.Ref is not JsFunctionObject fo) { thrown = NotCallableError(fv); goto Unwind; }
@@ -762,13 +762,13 @@ internal sealed partial class Vm
                             int argStart = bp + code[pc + 5];
                             int argc = code[pc + 6];
                             int dst = bp + code[pc + 1];
-                            if (fv.IsObject && fv.Ref is JsClosure c && (c.Template.Flags & InlineCallMask) == 0 && !c.IsClassConstructor)
+                            if (fv.IsObject && fv.Ref is JsClosure c && (c.Template.Flags & InlineCallMask) == 0)
                             {
                                 if (--_ticks <= 0) Checkpoint();
                                 var nf = PushCallFrame(c, regs, bp + code[pc + 2], argStart, argc);
                                 nf.RetIndex = dst;
                                 f = nf;
-                                code = f.Code; regs = f.Regs; bp = f.Base; pc = 0; k = f.T.Constants;
+                                code = f.Code; regs = f.Regs; bp = f.Base; pc = 0; k = f.K;
                                 continue;
                             }
                             if (fv.IsNotObject || fv.Ref is not JsFunctionObject)
@@ -803,14 +803,14 @@ internal sealed partial class Vm
                             int argc = code[pc + 4];
                             int dst = bp + code[pc + 1];
                             f.Pc = pc + 5;
-                            if (fv.IsObject && fv.Ref is JsClosure c && (c.Template.Flags & InlineCallMask) == 0 && !c.IsDerived && c.FieldInit == null && c.Template.IsConstructor)
+                            if (fv.IsObject && fv.Ref is JsClosure c && (c.Template.Flags & InlineNewMask) == 0 && !c.IsDerived && c.FieldInit == null && c.Template.IsConstructor)
                             {
                                 if (--_ticks <= 0) Checkpoint();
                                 var obj = new JsObject(Realm, ConstructPrototype(c));
-                                var nf = PushFrame(c, JsValue.FromObject(obj), new ReadOnlySpan<JsValue>(regs, argStart, argc), fv, FrameFlags.Construct);
+                                var nf = PushNewFrame(c, regs, argStart, argc, obj, fv);
                                 nf.RetIndex = dst;
                                 f = nf;
-                                code = f.Code; regs = f.Regs; bp = f.Base; pc = 0; k = f.T.Constants;
+                                code = f.Code; regs = f.Regs; bp = f.Base; pc = 0; k = f.K;
                                 continue;
                             }
                             regs[dst] = Construct(fv, new ReadOnlySpan<JsValue>(regs, argStart, argc));
@@ -891,9 +891,9 @@ internal sealed partial class Vm
                 {
                     // raised in the caller's context, after the callee frame is removed
                     if ((done.Flags & FrameFlags.Entry) != 0) { PopFrame(done); throw new JsThrowException(ctorError); }
-                    f = done.Caller!;
                     PopFrame(done);
-                    code = f.Code; regs = f.Regs; bp = f.Base; k = f.T.Constants;
+                    f = FrameAt(Sp - 1);
+                    code = f.Code; regs = f.Regs; bp = f.Base; k = f.K;
                     thrown = ctorError;
                     goto Unwind;
                 }
@@ -903,19 +903,20 @@ internal sealed partial class Vm
                     else PopFrame(done);
                     return result;
                 }
-                f = done.Caller!;
                 int ret = done.RetIndex;
                 PopFrame(done);
-                f.Regs[ret] = result;
-                code = f.Code; regs = f.Regs; bp = f.Base; pc = f.Pc; k = f.T.Constants;
+                f = FrameAt(Sp - 1);
+                regs = f.Regs;
+                regs[ret] = result;
+                code = f.Code; bp = f.Base; pc = f.Pc; k = f.K;
                 continue;
             }
 
         Recover:
             // a CLR exception left the loop: every frame above the faulting one has already been popped by the
-            // nested loops that owned them, so Current is the frame executing the instruction at f.Pc - 1
-            f = Current!;
-            code = f.Code; regs = f.Regs; bp = f.Base; k = f.T.Constants;
+            // nested loops that owned them, so the innermost frame is the one executing the instruction at f.Pc - 1
+            f = FrameAt(Sp - 1);
+            code = f.Code; regs = f.Regs; bp = f.Base; k = f.K;
             thrown = TakePending();
 
         Unwind:
@@ -932,7 +933,7 @@ internal sealed partial class Vm
                 {
                     var h = handlers[found];
                     while (f.EnvDepth > h.EnvDepth) { f.Env = f.Env!.Parent; f.EnvDepth--; }
-                    code = f.Code; regs = f.Regs; bp = f.Base; k = f.T.Constants;
+                    code = f.Code; regs = f.Regs; bp = f.Base; k = f.K;
                     regs[bp + h.ExceptionReg] = thrown;
                     pc = h.Target;
                     break;
@@ -944,15 +945,22 @@ internal sealed partial class Vm
                     else PopFrame(done);
                     throw new JsThrowException(thrown);
                 }
-                f = done.Caller!;
                 PopFrame(done);
+                f = FrameAt(Sp - 1);
             }
         }
     }
 
     private JsValue[] _tailArgs = new JsValue[8];
 
-    private const FunctionFlags InlineCallMask = FunctionFlags.Generator | FunctionFlags.Async;
+    /// <summary>
+    /// Template flags that keep a call out of the in-loop frame push: coroutines run on heap frames, and a class
+    /// constructor throws when called (JsClosure.IsClassConstructor mirrors the template flag; the template is
+    /// read anyway, so the check costs no extra load).
+    /// </summary>
+    private const FunctionFlags InlineCallMask = FunctionFlags.Generator | FunctionFlags.Async | FunctionFlags.ClassConstructor;
+    /// <summary>Template flags that keep <c>new</c> out of the in-loop frame push (class constructors are constructed inline).</summary>
+    private const FunctionFlags InlineNewMask = FunctionFlags.Generator | FunctionFlags.Async;
 
     // ------------------------------------------------------------------ out-of-line helpers for the hot loop
 

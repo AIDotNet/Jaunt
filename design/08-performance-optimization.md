@@ -1,6 +1,6 @@
 # 性能优化设计：基于 2026-11-07 Jaunt / MoeJS / Jint 对比
 
-> 状态：阶段 A 与阶段 B 中的 K1/K3/T1/O1/C2 已于 2026-11-07 实施并验证（见 §8）；其余项待做。下文的方案与估计保留为设计记录。所有数字来自本机实测（Apple M4，10 核，macOS 26；.NET SDK 10.0.401，Workstation 并发 GC；Go 1.27.3；MoeJS v0.1.0-alpha.11；Jint 4.17.0），只用于排序优先级与设定验收口径，不是对外承诺。标注“估计”的数字未经测量。
+> 状态：阶段 A 与阶段 B 中的 K1/K3/T1/O1/C2 已于 2026-11-07 实施并验证（见 §8）；第二轮的访问器/不存在/megamorphic IC、字符串 for-of、JsRegExp 精简见 §9；第三轮的调用路径（C3 评估为无独立价值、C5 评估为不做、新增重叠寄存器窗口）见 §10。未做：K2、A4、A5、D2/D3、4.7 文档。下文的方案与估计保留为设计记录。所有数字来自本机实测（Apple M4，10 核，macOS 26；.NET SDK 10.0.401，Workstation 并发 GC；Go 1.27.3；MoeJS v0.1.0-alpha.11；Jint 4.17.0），只用于排序优先级与设定验收口径，不是对外承诺。标注“估计”的数字未经测量。
 > 方法与规则沿用 [04-performance.md](04-performance.md)（公平比较、回归门槛）与 [02-architecture.md](02-architecture.md)（所有快路径必须有 guard 与等价慢路径；不运行时发 IL；不把引用藏进数值；无界缓存禁止）。
 
 ## 1. 现状与目标
@@ -284,3 +284,28 @@ METRIC=cpu python3 bench/cross/report.py ...            # 以 CPU 时间交叉�
 实测（两轮取优，MoeJS 本轮测量与上轮一致 ×0.999）：huffman-lz −40%、crc-base64 −27%、spectral-norm −27%、unicode-text −26%、levenshtein −22%、classes −6%、json-roundtrip −4%；**MoeJS/Jaunt 几何均值 0.976 → 1.013**，§1 目标 1 达成；目标 2（每次调用 ≤ 16 ns）未达成（仍约 21 ns），fib/sort-compare/higher-order/async 仍落后 1.3–1.6 倍。
 
 验证：单测 578/578（两种模式）、13 个新对照用例、test262 100,167/100,169、AOT 门禁未变。
+
+## 10. 第三轮实施记录：调用路径（2026-11-07，581ad31 之后）
+
+目标是 §4.1 的 C3 与 C5。方法：先用 `--run-loop` 建立四个调用密集微基准的基线（fib(24)、纯函数调用 call-js、方法调用 method、双参数多态调用 poly），再用 `DOTNET_JitDisasm` 看 `PushCallFrame` 的 Tier1 汇编逐项削减，每项改动单独测量。
+
+**C3（调用点 IC）**：`JsClosure.IsClassConstructor` 只是模板标志的副本，把它并入 `InlineCallMask`（`Generator | Async | ClassConstructor`）后，调用点检查只剩类型判断和一次模板标志读取；再加一个缓存模板的 IC 不会少任何一次加载。实测折叠本身在噪声内（±1%），与 §4.1 的估计（1–2 ns）一致：C3 在当前 dispatch 结构下没有独立价值，不再单列。
+
+**C5（帧结构化）评估**：先做了改动面最小、能单独量化其主要收益的变体，而不是把 `Frame` 改成 struct。`Frame.Caller` 链和 `Vm.Current` 字段去掉，帧栈改为按深度索引的数组 `_frames[Sp]`（池化帧就放在它的深度槽里；协程堆帧挂入时顶替该槽、挂出时归还，见 `Frame.Displaced`），`Current` 变成 `_frames[Sp-1]`。这样每次调用/返回少三次引用写入（即三次 GC 写屏障）。实测 fib −3%、call-js −3%：写屏障只解释了每次调用约 1 ns，不是主因；全量 struct 化只能再省一次池数组间接寻址，不值得其改动面，**C5 结论为不做**。期间发现并修正：`EnterNative` 也递增 `Depth`，所以 `Depth` 不能当帧栈下标——现在 `Sp` 是帧数，`_nativeDepth` 是原生嵌套层数，`Depth = Sp + _nativeDepth` 仍是预算口径。
+
+**真正的大头是参数拷贝**（汇编里每个参数约 20 条指令加一次写屏障调用）。新增**重叠寄存器窗口**：`Call`/`CallMethod`/`New` 的被调用帧的寄存器窗口直接从调用者的 argStart 开始（`Vm.BindCallWindow`），参数原地就是被调用者的参数寄存器，不拷贝。前提是调用者 argStart 以上的寄存器在调用点都是死的：CodeGen 的寄存器分配是严格栈式的（`Temp`/`ResetTo`），`Arguments()` 把参数放在当前分配顶端，所以普通函数的每个发射点都满足；`yield*`/`for await` 的手写发射点在 received 之上有存活寄存器，但它们只出现在协程函数里，而协程帧拥有私有寄存器数组（`callerRegs != _chunk`），和"被调用者放不进当前 chunk"的情形一样走原来的拷贝路径。帧记录 `SavedTop`/`SavedChunkIndex`，弹出时精确恢复调用者的栈顶（之前是 `_top = f.Base`，重叠后不再成立）。**验证**：毒值模式扩展为在重叠帧弹出时把调用者 argStart 到原栈顶之间全部填毒值，之后调用者任何读取都会暴露；单测与 test262（100,167/100,169）在毒值模式下全部通过。
+
+其余削减：`PushCallFrame` 专用的 `SetupCallFrame`，`this` 不再经过 16 字节栈上临时量（无接收者的 sloppy 调用直接比较全局对象引用，原始值接收者的转换放到不内联的冷路径）；`Frame.K` 缓存常量池引用，调用/返回少一次依赖加载；`PopFrame` 允许内联进 `RunLoop`。
+
+微基准（µs/run，8 s 热循环，每步相对前一步；括号为相对基线累计）：
+
+| 步骤 | fib(24) | call-js | method | poly | newobj |
+|---|---:|---:|---:|---:|---:|
+| 基线 581ad31 | 3498 | 2160 | 2976 | 14247 | — |
+| C3 折叠 | 3525 | 2133 | 3025 | 14278 | — |
+| 深度索引帧栈（C5 评估） | 3387 (−3%) | 2099 (−3%) | 2936 (−1%) | 14025 (−2%) | — |
+| 重叠窗口 | 3300 (−6%) | 1937 (−10%) | 2858 (−4%) | 10510 (−26%) | 5335 |
+| this/K/PopFrame 内联 | 3014 (−14%) | 1779 (−18%) | 2828 (−5%) | 10273 (−28%) | — |
+| `new` 也用重叠窗口 | 2862 (−18%) | 1704 (−21%) | ~2850 (−4%) | 9977 (−30%) | 4990 (−6.5%) |
+
+`PushCallFrame` 的 Tier1 快路径从约 140 条指令降到 116 条且不再含参数拷贝；每次 JS→JS 调用约 21.7 → 17 ns（fib 口径），进入 §1 目标 2 的区间（MoeJS 16–19 ns）。剩余成本：方法 prologue/epilogue（10 个被调用者保存寄存器，约 24 条）、返回值写入的写屏障、`_ticks` 预算计数。

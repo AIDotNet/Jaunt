@@ -62,8 +62,8 @@ Fixed-arity call of a cached JS function with two numbers, returning a number.
 
 These are single `ShortRun` measurements of CoreCLR .NET 10 on one busy developer workstation; they describe these
 workloads on this machine, not Jaunt's performance in general (research doc §3.5/§7: no fixed multiples, no
-"necessarily faster"). NativeAOT throughput is not measured here (the AOT gate checks behaviour, not speed); NativeAOT start-up is, in
-"Cold start and shared costs" below.
+"necessarily faster"). NativeAOT start-up is measured in "Cold start and shared costs" below, NativeAOT hot-path throughput in
+"NativeAOT vs CoreCLR JIT" (the AOT gate itself checks behaviour, not speed).
 
 * In these runs the interpreter-bound workloads (calls, numeric loops, classes, objects) took 0.35–0.44× of Jint's
   time; the register VM keeps numbers unboxed in 16-byte values and JS→JS calls don't recurse on the CLR stack.
@@ -331,3 +331,102 @@ Verified: unit tests (plain and `JAUNT_POISON_REGISTERS=1`), 13 new `FastPathSem
 redefinition and prototype mutation, absence then addition on the prototype and on `Object.prototype`, a Proxy
 on the chain, megamorphic sites with later redefinition, patched `String.prototype.charCodeAt`, string iteration
 with surrogate pairs and patched `Symbol.iterator`/`next`), test262 100,167/100,169, NativeAOT gate unchanged.
+
+## NativeAOT vs CoreCLR JIT: hot-path throughput (2026-11-07)
+
+Every other table in this document runs Jaunt on CoreCLR with the JIT. This one runs the same host twice: `samples/Jaunt.AotHost
+bench` as the published NativeAOT binary (`PublishAot=true`, 7.1 MB, osx-arm64) and as the framework-dependent
+`dotnet Jaunt.AotHost.dll`, over the `bench/cross/workloads` corpus under the cross-engine protocol
+(`bench/cross/dotnet/CrossProtocol.cs`: compile, cold call checked against Node, warm-up until the tiers settle, 7 samples of
+~60 ms, wall and CPU time per call). Script: `bench/cross/aot-vs-jit.sh`; raw results `artifacts/cross/jaunt-{aot,jit}.jsonl`.
+
+Environment: Apple M4 developer workstation (load average ~3 during the run), .NET SDK 10.0.300; CoreCLR runtime
+**10.0.8**, ILCompiler/runtime pack **10.0.14** for the native binary — the two sides therefore run slightly different BCL
+builds. The host sets `InvariantGlobalization=true`, so `String.prototype.normalize` is a no-op for non-ASCII text on both
+sides (`strings/unicode-text` is flagged `mismatch` against Node on both for that reason; its timings are still comparable
+between AOT and JIT). Engine source as of this commit plus the uncommitted working tree of that day. 59 workloads, one pass.
+
+| Geometric mean, AOT time / JIT time | |
+| --- | ---: |
+| warm per-call wall time | **1.10** |
+| warm per-call CPU time | 1.10 |
+| cold (new engine + load + first call) | **0.70** |
+| bytes allocated per call | 1.00 |
+
+Per category (warm): strings 1.04, collections 1.07, async 1.08, apps 1.08, compute 1.09, objects 1.12, advanced 1.13,
+functional 1.26. 20 of 59 workloads were within ±3% either way; AOT was faster on 14 (best: compute/float-loop 0.94,
+compute/matmul 0.96, strings/string-hash-codec 0.97, apps/huffman-lz 0.98).
+
+Largest gaps:
+
+| Workload | JIT | NativeAOT | AOT/JIT |
+| --- | ---: | ---: | ---: |
+| compute/fib | 3.05 ms | 6.16 ms | 2.02 |
+| functional/control-flow | 4.37 ms | 7.54 ms | 1.73 |
+| apps/state-reducer | 47.3 ms | 75.8 ms | 1.60 |
+| advanced/iterator-helpers | 3.42 ms | 4.71 ms | 1.37 |
+| objects/prototype-chain | 6.87 ms | 8.95 ms | 1.30 |
+| advanced/dynamic-code | 1.81 ms | 2.28 ms | 1.26 |
+| compute/sieve | 16.1 ms | 20.0 ms | 1.24 |
+| async/event-loop-scheduler | 2.39 ms | 2.91 ms | 1.22 |
+| compute/sort-compare | 13.9 ms | 16.7 ms | 1.21 |
+
+Reading: on these workloads NativeAOT costs about 10% of warm throughput overall and gains 30% on the cold call (no JIT, no
+type loading). Allocation is identical, so the gap is code quality, not behaviour: NativeAOT compiles once, without the
+tiered PGO the JIT applies on CoreCLR (guarded devirtualization of interface and virtual calls, hot/cold block layout,
+profile-driven inlining). The workloads that lose most are the ones dominated by interpreter dispatch and call/return
+(`fib`, `control-flow`, `state-reducer`, `prototype-chain`); the numeric kernels whose time is in straight-line arithmetic
+(`float-loop`, `matmul`, `mandelbrot`, `nqueens`) are even. A follow-up that wants to close the gap should look at the
+Vm call path and the interpreter's dispatch for virtual/interface calls that PGO devirtualizes on CoreCLR but AOT cannot
+(static PGO via `dotnet publish` with MIBC data, or making those call sites monomorphic in the source).
+
+## Third cross-engine pass: the call path (2026-11-07)
+
+Same harness, two rounds, best of both; MoeJS measured the same as in the previous pass (×0.999). **MoeJS/Jaunt
+geometric mean 1.013 → 1.028**, Jint/Jaunt 2.68 → 2.72; Jaunt alone ×0.985. Fastest per workload: Jaunt 28, MoeJS 29,
+Jint 2. Per category (MoeJS/Jaunt): apps 0.97 → 1.00, compute 0.97 → 1.00, functional 1.16 → 1.21, the rest within ±0.01.
+
+| Workload | Jaunt before | Jaunt after | Δ | MoeJS/Jaunt before → after |
+| --- | ---: | ---: | ---: | ---: |
+| compute/fib | 3.57 ms | 3.00 ms | −16% | 0.64 → 0.78 |
+| compute/sha256 | 2.51 ms | 2.28 ms | −9% | 1.08 → 1.18 |
+| apps/raytracer | 6.58 ms | 5.98 ms | −9% | 1.10 → 1.23 |
+| functional/higher-order | 10.9 ms | 9.9 ms | −9% | 0.62 → 0.68 |
+| compute/nqueens | 1.06 ms | 0.99 ms | −6% | 1.18 → 1.27 |
+| objects/prototype-chain | 7.25 ms | 6.83 ms | −6% | 1.44 → 1.53 |
+| apps/mini-interpreter | 1.57 ms | 1.50 ms | −5% | 0.87 → 0.90 |
+| compute/spectral-norm / sort-compare | 5.84 / 13.8 ms | 5.61 / 13.3 ms | −4% | 0.98 → 1.02 / 0.69 → 0.72 |
+
+Workloads with few JS→JS calls moved within the usual ±4% (sieve +4%, map-set +3%, classes-inheritance +2%,
+destructure-spread +2%: noise, the code they run is unchanged).
+
+What changed (`design/08`, §10; every step measured on four call micro-benchmarks and the JIT's disassembly of
+`PushCallFrame`):
+
+* **Overlapping register windows.** The callee's register window now starts at the caller's first argument
+  register for `Call`, `CallMethod` and `New`, so arguments are never copied (each copy was ~20 instructions plus a
+  GC write barrier). This relies on the compiler's stack-shaped register allocation: a call's arguments are the
+  topmost live registers at the call, so the callee may clobber everything above them. Coroutine frames own their
+  registers and keep the copying path, as do callees that do not fit in the current chunk. Frames record the stack
+  position they were pushed at and restore it exactly on return. The `JAUNT_POISON_REGISTERS=1` mode now also
+  poisons the caller's registers from the first argument up when such a frame returns, so a later read would fail
+  a test; unit tests and test262 pass in that mode.
+* **Frames addressed by depth.** The frame stack is an array indexed by depth instead of a linked list with a
+  "current frame" field: three fewer reference stores (write barriers) per call and return. Measured −3% on fib:
+  the barriers were a small part of the cost, which is why the design's C5 (frames as structs) is not pursued.
+  The depth budget now counts bytecode frames and native nesting separately (`Sp + _nativeDepth`).
+* Smaller items: `this` for a plain call of a sloppy function is compared against the realm's global object
+  directly instead of being materialized and compared as a 16-byte value; the constant pool is cached on the frame;
+  `PopFrame` is inlined into the interpreter loop; the class-constructor check folded into the template flag mask
+  (the design's C3: no measurable gain on its own).
+
+Micro-benchmarks (`--run-loop`, µs per run): fib(24) 3498 → 2862 (−18%), 100k plain calls 2160 → 1704 (−21%),
+100k method calls 2976 → ~2850 (−4%), 600k two-argument calls 14247 → 9977 (−30%), 100k `new P(x, y)` 5335 → 4990
+(−6.5%). JS→JS call ≈ 21.7 → 17 ns (fib), inside the 16–19 ns MoeJS range; the remaining gap on fib is the
+dispatch of the arithmetic and comparison around the call.
+
+Verified: unit tests 578/578 plain and poisoned, 11 new `FastPathSemanticsTests` cases for the call path (extra
+and missing arguments with `arguments`/rest, parameter mutation, nested calls inside argument lists, temporaries
+live across calls, catch/finally in the caller, sloppy/strict `this` with primitive receivers, legacy `caller`,
+stack traces, calls from generators and async functions, `new` with extra arguments and derived classes, proper
+tail calls), test262 100,167/100,169 in both modes.
