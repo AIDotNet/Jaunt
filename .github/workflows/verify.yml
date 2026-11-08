@@ -1,12 +1,15 @@
 # Release verification matrix (design/05-dotnet-support.md §4–5): the first-round committed RIDs
-# Linux x64, Windows x64 and macOS ARM64, each on .NET 8 and .NET 10 CoreCLR plus NativeAOT net8/net10/net11.
+# Linux x64, Windows x64 and macOS ARM64, each on .NET 8, 10 and 11 CoreCLR plus NativeAOT net8/net10/net11.
 # A RID only enters the verified list in docs/ after this workflow has produced green evidence for it.
 name: verify
 
 on:
   push:
+    # branches only: a release tag runs this matrix through release.yml, as its gate
+    branches: ["**"]
   pull_request:
   workflow_dispatch:
+  workflow_call:
 
 env:
   DOTNET_NOLOGO: "1"
@@ -49,6 +52,10 @@ jobs:
         run: |
           dotnet test tests/Jaunt.Tests -c Release -p:JauntTestAllFrameworks=true -f net8.0
           dotnet test tests/Jaunt.Tests -c Release -p:JauntTestAllFrameworks=true -f net10.0
+
+      - name: Unit tests (CoreCLR net11.0)
+        working-directory: eng/sdk11
+        run: dotnet test ../../tests/Jaunt.Tests -c Release -p:JauntTestAllFrameworks=true -f net11.0
 
       - name: Fetch test262 at the pinned revision
         run: |
