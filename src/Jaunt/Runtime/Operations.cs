@@ -10,10 +10,10 @@ internal static class Operations
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static bool ToBoolean(in JsValue v)
     {
+        if (v.IsNumber) return Math.Abs(v.Num) > 0;   // false for 0, -0 and NaN
         switch (v.Tag)
         {
             case JsTag.Boolean: return v.IsTrue;
-            case JsTag.Number: return !(v.Num == 0 || double.IsNaN(v.Num));
             case JsTag.String: return v.StringLength != 0;
             case JsTag.Object: return v.Ref is not JsHtmlDda;
             case JsTag.Symbol: return true;
@@ -173,13 +173,15 @@ internal static class Operations
         return DoubleToInt32Slow(d);
     }
 
+    /// <summary>ToInt32 of a double that is no int: the low 32 bits of the truncated magnitude, from the IEEE fields (a floating-point remainder is far slower).</summary>
     private static int DoubleToInt32Slow(double d)
     {
-        if (double.IsNaN(d) || double.IsInfinity(d)) return 0;
-        double t = Math.Truncate(d);
-        double m = t % 4294967296.0;
-        if (m < 0) m += 4294967296.0;
-        return (int)(uint)m;
+        long bits = BitConverter.DoubleToInt64Bits(d);
+        int exp = (int)((bits >> 52) & 0x7FF) - 1023;
+        if (exp < 0 || exp >= 84) return 0;   // |d| < 1, or a multiple of 2^32 (this includes NaN and the infinities)
+        ulong m = ((ulong)bits & 0xF_FFFF_FFFF_FFFFUL) | (1UL << 52);
+        uint low = exp <= 52 ? (uint)(m >> (52 - exp)) : (uint)(m << (exp - 52));
+        return unchecked(bits < 0 ? -(int)low : (int)low);
     }
 
     public static uint ToUint32(Realm realm, in JsValue v) => (uint)ToInt32(realm, v);
