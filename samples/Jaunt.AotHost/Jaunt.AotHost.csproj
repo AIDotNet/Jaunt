@@ -19,4 +19,8 @@
     <!-- app-local ICU 72: the system icu.dll of Windows Server 2022 lacks APIs Intl needs (see docs/FEATURES.md) -->
     <PackageReference Include="Microsoft.ICU.ICU4C.Runtime" Version="72.1.0.3" />
   </ItemGroup>
+  <ItemGroup>
+    <!-- cross-engine measurement protocol shared with the cross-engine harness in bench/Jaunt.Benchmarks -->
+    <Compile Include="../../bench/cross/dotnet/CrossProtocol.cs" Link="CrossProtocol.cs" />
+  </ItemGroup>
 </Project>

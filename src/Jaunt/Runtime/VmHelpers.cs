@@ -16,6 +16,58 @@ internal sealed partial class Vm
         throw new JsThrowException(NotCallableError(fv));
     }
 
+    /// <summary>
+    /// Runs <c>f.call(thisArg, ...)</c>, <c>f.apply(thisArg, array)</c> and a call of a bound function as an in-loop frame push when
+    /// the target is a plain closure, instead of entering the builtin, <see cref="JsFunctionObject.Call"/> and a nested
+    /// <c>RunLoop</c>. Returns the pushed frame (the caller sets its RetIndex and switches to it) or null when the call has to
+    /// take the general path: targets that are generators, async functions or class constructors (which throw), bound
+    /// functions whose target is not a closure, <c>apply</c> with anything but a dense hole-free array. <paramref name="callee"/>
+    /// is the function object being invoked (the call/apply builtin or the bound function), <paramref name="receiver"/> its
+    /// this value (for call/apply: the target). The interpreter has already stored the continuation pc in the caller frame.
+    /// </summary>
+    private Frame? TryPushRedirectedCall(JsFunctionObject callee, in JsValue receiver, JsValue[] regs, int argStart, int argc)
+    {
+        if (callee is JsBuiltin b)
+        {
+            if (receiver.IsNotObject || receiver.Ref is not JsClosure target || (target.Template.Flags & InlineCallMask) != 0) return null;
+            if (ReferenceEquals(b.Fn, FunctionBuiltins.CallFn))
+            {
+                if (--_ticks <= 0) Checkpoint();
+                // the target's arguments are the caller's arguments after the first; the this register (argStart) stays below
+                // the new window, which is what PushCallFrame requires
+                return argc == 0 ? PushCallFrame(target, regs, -1, argStart, 0) : PushCallFrame(target, regs, argStart, argStart + 1, argc - 1);
+            }
+            if (ReferenceEquals(b.Fn, FunctionBuiltins.ApplyFn))
+            {
+                var thisArg = argc > 0 ? regs[argStart] : JsValue.Undefined;
+                var list = argc > 1 ? regs[argStart + 1] : JsValue.Undefined;
+                ReadOnlySpan<JsValue> args;
+                if (list.IsNullOrUndefined) args = ReadOnlySpan<JsValue>.Empty;
+                else if (list.Ref is JsArray arr && arr.Dense && arr.Length <= arr.Items.Length && Array.IndexOf(arr.Items, JsValue.Empty, 0, (int)arr.Length) < 0)
+                    args = new ReadOnlySpan<JsValue>(arr.Items, 0, (int)arr.Length);
+                else return null;
+                if (--_ticks <= 0) Checkpoint();
+                return PushFrame(target, thisArg, args, default, FrameFlags.None);
+            }
+            return null;
+        }
+        if (callee is JsBoundFunction bf && bf.Target is JsClosure bt && (bt.Template.Flags & InlineCallMask) == 0)
+        {
+            if (--_ticks <= 0) Checkpoint();
+            var bound = bf.BoundArgs;
+            if (bound.Length == 0) return PushFrame(bt, bf.BoundThis, new ReadOnlySpan<JsValue>(regs, argStart, argc), default, FrameFlags.None);
+            // stage bound + call arguments in the tail-call buffer: PushFrame copies them before any user code runs
+            int n = bound.Length + argc;
+            if (_tailArgs.Length < n) _tailArgs = new JsValue[Math.Max(n, _tailArgs.Length * 2)];
+            bound.CopyTo(_tailArgs, 0);
+            Array.Copy(regs, argStart, _tailArgs, bound.Length, argc);
+            var nf = PushFrame(bt, bf.BoundThis, new ReadOnlySpan<JsValue>(_tailArgs, 0, n), default, FrameFlags.None);
+            Array.Clear(_tailArgs, 0, n);
+            return nf;
+        }
+        return null;
+    }
+
     private static string DescribeReceiver(in JsValue v) => v.Tag switch
     {
         JsTag.Object => v.Ref is JsFunctionObject f ? f.DebugName : "object",
