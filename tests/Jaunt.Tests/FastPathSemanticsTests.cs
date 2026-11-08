@@ -634,4 +634,189 @@ JSON.stringify(out);
         using var engine = new JsEngine(new JsEngineOptions { Limits = new JsLimits { MaxTrackedBytes = 4 * 1024 * 1024 } });
         Assert.Throws<JsLimitExceededException>(() => engine.Evaluate("const a = []; while (true) { const f = function () {}; f.prototype; a.push(f); }"));
     }
+
+    // Literal int32 right operands in the instruction (AddI, SubI, the compare-and-jumps), and return of a conditional without a
+    // common Ret: every kind of left operand, and every way out of a function. Expected values were produced by Node from the same script.
+    private const string LiteralOperandScript = """
+const out = {};
+const err = f => { try { return f(); } catch (e) { return e.constructor.name; } };
+const show = x => typeof x === 'bigint' ? x + 'n' : Object.is(x, -0) ? '-0' : x === undefined ? 'undef' : x !== x ? 'nan' : x === Infinity ? 'inf' : x === -Infinity ? '-inf' : x;
+// literal int32 right operands on every kind of left operand
+const lefts = [0, -0, 1, 1.5, -2, NaN, Infinity, -Infinity, 2147483647, -2147483648, 1e300, '', '5', 'abc', ' 7 ', true, false, null, undefined, [], [3], {}];
+out.add = lefts.map(x => show(x + 1));
+out.addZero = lefts.map(x => show(x + 0));
+out.sub = lefts.map(x => show(x - 1));
+out.subZero = lefts.map(x => show(x - 0));
+out.addBig = lefts.map(x => show(x + 2147483647));
+out.subNeg = lefts.map(x => show(x - 2147483647));
+out.notInt32 = lefts.map(x => [show(x + 2147483648), show(x - 4294967296), show(x + 0.5)]);
+out.lt = lefts.map(x => { if (x < 2) return 1; return 0; });
+out.le = lefts.map(x => { if (x <= 1) return 1; return 0; });
+out.gt = lefts.map(x => { if (x > 0) return 1; return 0; });
+out.ge = lefts.map(x => { if (x >= 0) return 1; return 0; });
+out.whileCond = lefts.map(x => { let n = 0; while (x < 2 && n < 3) n++; return n; });
+out.ternary = lefts.map(x => x >= 2 ? 'y' : 'n');
+out.andOr = lefts.map(x => (x > 0 && x < 10) || x <= -1 ? 1 : 0);
+out.notCond = lefts.map(x => !(x < 2) ? 1 : 0);
+// BigInt and Symbol on the left
+out.bigint = [err(() => 1n + 1), err(() => 1n - 1), (() => { if (5n > 2) return 'gt'; return 'le'; })(), (() => { if (5n < 2) return 'lt'; return 'ge'; })(), (() => { if (2n <= 2) return 'le'; return 'gt'; })(), (() => { if (2n >= 3) return 'ge'; return 'lt'; })()];
+out.symbol = [err(() => Symbol() + 1), err(() => Symbol() - 1), err(() => { if (Symbol() < 1) return 1; return 0; }), err(() => { if (Symbol() >= 1) return 1; return 0; })];
+// conversions: hints, how many times, in which order
+out.hints = (() => { const log = []; const o = { [Symbol.toPrimitive](h) { log.push(h); return 3; } }; const r = [o + 1, o - 1]; if (o < 4) r.push('lt'); if (o <= 2) r.push('le'); if (o > 4) r.push('gt'); if (o >= 3) r.push('ge'); return [r, log]; })();
+out.valueOfOrder = (() => { const log = []; const o = n => ({ valueOf() { log.push('v' + n); return n; }, toString() { log.push('s' + n); return 'x'; } }); const r = [o(1) + 1, o(2) - 1, `${o(3)}`]; return [r, log]; })();
+out.throwingValueOf = [err(() => ({ valueOf() { throw new RangeError('r'); } }) + 1), err(() => ({ valueOf() { throw new EvalError('e'); } }) - 1), err(() => { if ({ valueOf() { throw new URIError('u'); } } < 1) return 1; return 0; })];
+out.leftEffects = (() => { let i = 1; const a = (i = i * 5) + 1; const b = i++ - 1; let c = 0; if (i++ < 7) c = i; return [a, b, c, i]; })();
+out.dateAdd = (() => { const d = new Date(0); return [typeof (d + 1), typeof (d - 1), d - 1]; })();
+out.stringConcat = (() => { let s = 'a'; for (let i = 0; i < 3; i++) s = s + 1; let t = 'b'; t += 2; return [s, t]; })();
+// in loops: literal operands no longer take a register, others still do
+out.loops = (() => { let a = 0, b = 100, c = 0; for (let i = 0; i < 5; i = i + 1) { a = a + 2; b = b - 3; c += i * 2 + 0.5; if (a > 6) c = c - 1; } let n = 0; for (let i = 10; i >= 0; i = i - 2) for (let j = 0; j <= 2; j = j + 1) n = n + 1; return [a, b, c, n]; })();
+out.sameRegister = (() => { let x = 1; x = x + 1; let y = x - 1; x = y + x; const f = () => x; x = x + 1; return [x, y, f()]; })();
+out.captured = (() => { let k = 5; const inc = () => { k = k + 1; return k - 1; }; const r = [inc(), inc()]; if (k > 6) r.push('big'); return [r, k]; })();
+out.tdz = err(() => { const r = q + 1; let q = 1; return r; });
+out.undeclared = [err(() => nope + 1), err(() => { if (nope < 1) return 1; return 0; })];
+out.global = (() => { globalThis.gv = '4'; const r = [gv - 1, gv + 1]; if (gv > 3) r.push('gt'); delete globalThis.gv; return r; })();
+// return with a conditional: on every way out of a function
+const pick = c => { return c ? 'a' : 'b'; };
+function nested(x) { return x < 0 ? 'neg' : x === 0 ? 'zero' : x < 10 ? (x % 2 ? 'odd' : 'even') : 'big'; }
+out.condReturn = [pick(1), pick(0), [-1, 0, 3, 4, 11].map(nested), (function () { return this ? typeof this : 'none'; }).call(5), (function () { 'use strict'; return this ? typeof this : 'none'; }).call(0)];
+out.condReturnFinally = (() => { const log = []; const f = c => { try { return c ? (log.push('a'), 1) : (log.push('b'), 2); } finally { log.push('f'); } }; const g = c => { try { return c ? 1 : 2; } finally { if (c) return 9; } }; const h = c => { for (;;) { try { return c ? 1 : 2; } finally { break; } } return 3; }; return [f(1), f(0), g(1), g(0), h(1), log]; })();
+out.condReturnThrowInArm = (() => { const f = c => { try { return c ? null.x : 1; } catch (e) { return e.constructor.name; } finally { } }; return [f(1), f(0)]; })();
+out.condReturnIterClose = (() => { const log = []; const it = { [Symbol.iterator]() { return { next() { return { value: 1, done: false }; }, return() { log.push('close'); return {}; } }; } }; const f = c => { for (const x of it) return c ? x + 1 : x - 1; }; return [f(1), f(0), log]; })();
+out.condReturnBlockEnv = (() => { const f = c => { { let y = c ? 1 : 2; const g = () => y; return y > 1 ? g() : g() + 10; } }; const h = c => { for (let i = 0; i < 3; i++) { const g = () => i; if (i === 1) return c ? g : g(); } }; return [f(1), f(0), h(1)(), h(0)]; })();
+out.condReturnCtor = (() => { function A(c) { this.v = 1; return c ? { v: 2 } : 3; } class B { constructor(c) { this.v = 4; return c ? { v: 5 } : undefined; } } class C extends B { constructor(c, r) { super(0); return c ? r : undefined; } } return [new A(1).v, new A(0).v, new B(1).v, new B(0).v, new C(0).v, new C(1, { v: 6 }).v, err(() => new C(1, 7)), new C(1, undefined).v]; })();
+out.condReturnGenerator = (() => { function* g(c) { return c ? yield 1 : yield 2; } const a = g(1), b = g(0); const r = [a.next(), a.next('x'), a.next(), b.next(), b.next('y')]; function* h(c) { try { return c ? 1 : 2; } finally { yield 'f'; } } const i = h(1); return [r, i.next(), i.next(), i.next()]; })();
+out.condReturnArguments = (() => { function f(a) { return arguments.length > 1 ? arguments[1] : a; } function g(a) { a = a + 1; return arguments.length ? arguments[0] : a; } function h(a) { 'use strict'; a = a + 1; return arguments.length > 0 ? arguments[0] : a; } return [f(1), f(1, 2), g(1), g(), h(1)]; })();
+// frames: recursion through the literal forms, tail position in strict and sloppy code, throws across frames
+function fib(n) { return n < 2 ? n : fib(n - 1) + fib(n - 2); }
+function depth(n) { return n <= 0 ? 0 : 1 + depth(n - 1); }
+function tail(n, acc) { 'use strict'; return n <= 0 ? acc : tail(n - 1, acc + 1); }
+function thrower(n) { if (n < 1) throw new TypeError('at ' + n); return thrower(n - 1) + 1; }
+function catcher(n) { try { return n > 0 ? catcher(n - 1) + 1 : thrower(3); } catch (e) { return n > 2 ? e.message + ':' + n : (() => { throw e; })(); } }
+function missing(a, b, c) { return c === undefined ? (b === undefined ? a - 1 : b + 1) : c - 1; }
+out.frames = [fib(15), depth(2000), tail(2000, 0), err(() => thrower(50)), catcher(5), missing(1), missing(1, 2), missing(1, 2, 3), missing(1, 2, 3, 4)];
+out.gen = (() => { function* count(n) { while (n > 0) { yield n; n = n - 1; } return n - 1; } const r = []; const g = count(2); for (let x = g.next(); ; x = g.next()) { r.push(x.value); if (x.done) break; } return r; })();
+out.methodThis = (() => { const o = { n: 3, down() { return this.n <= 0 ? 'done' : (this.n = this.n - 1, this.down()); } }; return [o.down(), o.n]; })();
+out.valueOfThrowInFrame = (() => { const o = { valueOf() { return thrower(1); } }; const f = () => { try { return o + 1; } catch (e) { return e.message; } }; const g = () => { try { if (o < 1) return 'lt'; return 'ge'; } catch (e) { return e.message; } }; return [f(), g()]; })();
+out.generatorInValueOf = (() => { function* g() { const a = yield 1; return a + 1; } const it = g(); const o = { valueOf() { return it.next().value; } }; return [o + 1, o - 1]; })();
+JSON.stringify(out);
+""";
+
+    private const string LiteralOperandExpected = """
+{"add":[1,1,2,2.5,-1,"nan","inf","-inf",2147483648,-2147483647,1e+300,"1","51","abc1"," 7 1",2,1,1,"nan","1","31","[object Object]1"],"addZero":[0,0,1,1.5,-2,"nan","inf","-inf",2147483647,-2147483648,1e+300,"0","50","abc0"," 7 0",1,0,0,"nan","0","30","[object Object]0"],"sub":[-1,-1,0,0.5,-3,"nan","inf","-inf",2147483646,-2147483649,1e+300,-1,4,"nan",6,0,-1,-1,"nan",-1,2,"nan"],"subZero":[0,"-0",1,1.5,-2,"nan","inf","-inf",2147483647,-2147483648,1e+300,0,5,"nan",7,1,0,0,"nan",0,3,"nan"],"addBig":[2147483647,2147483647,2147483648,2147483648.5,2147483645,"nan","inf","-inf",4294967294,-1,1e+300,"2147483647","52147483647","abc2147483647"," 7 2147483647",2147483648,2147483647,2147483647,"nan","2147483647","32147483647","[object Object]2147483647"],"subNeg":[-2147483647,-2147483647,-2147483646,-2147483645.5,-2147483649,"nan","inf","-inf",0,-4294967295,1e+300,-2147483647,-2147483642,"nan",-2147483640,-2147483646,-2147483647,-2147483647,"nan",-2147483647,-2147483644,"nan"],"notInt32":[[2147483648,-4294967296,0.5],[2147483648,-4294967296,0.5],[2147483649,-4294967295,1.5],[2147483649.5,-4294967294.5,2],[2147483646,-4294967298,-1.5],["nan","nan","nan"],["inf","inf","inf"],["-inf","-inf","-inf"],[4294967295,-2147483649,2147483647.5],[0,-6442450944,-2147483647.5],[1e+300,1e+300,1e+300],["2147483648",-4294967296,"0.5"],["52147483648",-4294967291,"50.5"],["abc2147483648","nan","abc0.5"],[" 7 2147483648",-4294967289," 7 0.5"],[2147483649,-4294967295,1.5],[2147483648,-4294967296,0.5],[2147483648,-4294967296,0.5],["nan","nan","nan"],["2147483648",-4294967296,"0.5"],["32147483648",-4294967293,"30.5"],["[object Object]2147483648","nan","[object Object]0.5"]],"lt":[1,1,1,1,1,0,0,1,0,1,0,1,0,0,0,1,1,1,0,1,0,0],"le":[1,1,1,0,1,0,0,1,0,1,0,1,0,0,0,1,1,1,0,1,0,0],"gt":[0,0,1,1,0,0,1,0,1,0,1,0,1,0,1,1,0,0,0,0,1,0],"ge":[1,1,1,1,0,0,1,0,1,0,1,1,1,0,1,1,1,1,0,1,1,0],"whileCond":[3,3,3,3,3,0,0,3,0,3,0,3,0,0,0,3,3,3,0,3,0,0],"ternary":["n","n","n","n","n","n","y","n","y","n","y","n","y","n","y","n","n","n","n","n","y","n"],"andOr":[0,0,1,1,1,0,0,1,0,1,0,0,1,0,1,1,0,0,0,0,1,0],"notCond":[0,0,0,0,0,1,1,0,1,0,1,0,1,1,1,0,0,0,1,0,1,1],"bigint":["TypeError","TypeError","gt","ge","le","lt"],"symbol":["TypeError","TypeError","TypeError","TypeError"],"hints":[[4,2,"lt","ge"],["default","number","number","number","number","number"]],"valueOfOrder":[[2,1,"x"],["v1","v2","s3"]],"throwingValueOf":["RangeError","EvalError","URIError"],"leftEffects":[6,4,7,7],"dateAdd":["string","number",-1],"stringConcat":["a111","b2"],"loops":[10,85,20.5,18],"sameRegister":[4,1,4],"captured":[[5,6,"big"],7],"tdz":"ReferenceError","undeclared":["ReferenceError","ReferenceError"],"global":[3,"41","gt"],"condReturn":["a","b",["neg","zero","odd","even","big"],"object","none"],"condReturnFinally":[1,2,9,2,3,["a","f","b","f"]],"condReturnThrowInArm":["TypeError",1],"condReturnIterClose":[2,0,["close","close"]],"condReturnBlockEnv":[11,2,1,1],"condReturnCtor":[2,1,5,4,4,6,"TypeError",4],"condReturnGenerator":[[{"value":1,"done":false},{"value":"x","done":true},{"done":true},{"value":2,"done":false},{"value":"y","done":true}],{"value":"f","done":false},{"value":1,"done":true},{"done":true}],"condReturnArguments":[1,2,2,null,1],"frames":[610,2000,2000,"TypeError","at 0:311",0,3,2,2],"gen":[2,1,-1],"methodThis":["done",0],"valueOfThrowInFrame":["at 0","at 0"],"generatorInValueOf":[2,null]}
+""";
+
+    [Fact]
+    public void LiteralOperandsAndConditionalReturnsMatchReferenceBehavior()
+    {
+        using var engine = new JsEngine();
+        var exp = System.Text.Json.JsonDocument.Parse(LiteralOperandExpected).RootElement;
+        var got = System.Text.Json.JsonDocument.Parse(engine.Evaluate(LiteralOperandScript).AsString()).RootElement;
+        foreach (var p in exp.EnumerateObject())
+        {
+            Assert.True(got.TryGetProperty(p.Name, out var g), $"missing case {p.Name}");
+            Assert.True(p.Value.ToString() == g.ToString(), $"{p.Name}: expected {p.Value} got {g}");
+        }
+    }
+
+    [Fact]
+    public void RecursionThroughLiteralOperandsHitsTheDepthLimit()
+    {
+        using var engine = new JsEngine(new JsEngineOptions { Limits = new JsLimits { MaxStackDepth = 500 } });
+        Assert.Equal(400, engine.Evaluate("function d(n) { return n <= 0 ? 0 : 1 + d(n - 1); } d(400)").AsNumber());
+        var ex = Assert.Throws<JsLimitExceededException>(() => engine.Evaluate("d(2000)"));
+        Assert.Equal(JsLimitKind.StackDepth, ex.Kind);
+        Assert.True(engine.IsFaulted);
+    }
+
+    // Strict comparison with a literal constant in the instruction (conditions and switch cases), and the string comparison
+    // behind it. Expected values were produced by Node from the same script.
+    private const string ConstantCompareScript = """
+const out = {};
+const vals = ['a', 'b', '', 'ab', 'a' + 'b', ['a', 'b'].join(''), 0, -0, 1, 1.5, NaN, true, false, null, undefined, 1n, 0n, [], {}, new String('a'), new Number(1), Symbol.iterator];
+out.eqA = vals.map(x => { if (x === 'a') return 1; return 0; });
+out.neA = vals.map(x => { if (x !== 'a') return 1; return 0; });
+out.eqAb = vals.map(x => x === 'ab' ? 1 : 0);
+out.eqEmpty = vals.map(x => x === '' ? 1 : 0);
+out.eqZero = vals.map(x => { if (x === 0) return 1; return 0; });
+out.neZero = vals.map(x => { if (x !== 0) return 1; return 0; });
+out.eqOne = vals.map(x => { if (x === 1) return 1; return 0; });
+out.eqFrac = vals.map(x => { if (x === 1.5) return 1; return 0; });
+out.negZeroLiteral = vals.map(x => { if (x === -0) return 1; return 0; });
+out.rope = (() => { let s = ''; for (let i = 0; i < 40; i++) s += 'xy'; const t = 'xy'.repeat(40); const u = s + 'z'; const r = []; if (s === 'xyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxy') r.push('eq'); if (u !== 'xyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxy') r.push('ne'); r.push(s === t, u === t, s + '' === t, 'p' + s === 'p' + t, 'q' + s === 'p' + t); return r; })();
+out.sameLengthLastChar = ['abcd' === 'abce', 'abcd' === 'abcd', 'abcd' === 'xbcd', 'é' === 'é', '😀' === '😁', (a => { if (a === 'abcz') return 1; return 0; })('abc' + 'y')];
+const sw = x => { switch (x) { case 'a': return 'A'; case 'b': return 'B'; case '': return 'E'; case 0: return 'Z'; case 1: return 'O'; case 1.5: return 'F'; case 'ab': return 'AB'; default: return 'D'; } };
+out.switchLiterals = vals.map(sw);
+out.switchFallThrough = ['a', 'b', 'c', 'd', 1].map(x => { const r = []; switch (x) { case 'a': r.push(1); case 'b': r.push(2); break; default: r.push(3); case 'd': r.push(4); case 1: r.push(5); } return r; });
+out.switchDefaultFirst = ['a', 'z'].map(x => { const r = []; switch (x) { default: r.push('d'); case 'a': r.push('a'); } return r; });
+out.switchMixedTests = (() => { const log = []; const t = (n, v) => { log.push(n); return v; }; const f = x => { switch (x) { case t('p', 'q'): return 1; case 'b': return 2; case t('r', 3): return 3; case 3 + 1: return 4; default: return 5; } }; return [f('q'), f('b'), f(3), f(4), f('n'), log]; })();
+out.switchLexical = (x => { switch (x) { case 'a': let y = 1; const g = () => y; y = y + 1; return g(); case 'b': return typeof y; } }).call(null, 'a');
+out.switchTdz = (() => { try { return (x => { switch (x) { case 'a': let y = 1; case 'b': return y; } })('b'); } catch (e) { return e.constructor.name; } })();
+out.switchDiscOnce = (() => { let n = 0; const d = () => { n++; return 'b'; }; switch (d()) { case 'a': n += 10; case 'b': n += 100; case 'c': n += 1000; } return n; })();
+out.switchInLoop = (() => { let s = ''; for (const c of 'abcab') { switch (c) { case 'a': s += '1'; continue; case 'b': s += '2'; break; default: s += '3'; } s += '|'; } return s; })();
+out.switchNoCases = (() => { let n = 0; switch (n++) { } return n; })();
+out.leftEffects = (() => { const log = []; const f = v => { log.push(v); return v; }; const r = []; if (f('a') === 'a') r.push(1); if (f('b') !== 'b') r.push(2); else r.push(3); while (f('c') === 'd') r.push(4); return [r, log]; })();
+out.undeclared = (() => { try { if (nope === 'a') return 1; return 0; } catch (e) { return e.constructor.name; } })();
+out.tdz = (() => { try { if (q === 1) return 1; let q = 1; return 0; } catch (e) { return e.constructor.name; } })();
+out.inLoop = (() => { const r = []; for (let i = 0; i < 6; i++) { const k = i % 3 === 0 ? 'x' : i % 3 === 1 ? 'y' : 'z'; const isX = k === 'x'; if (k === 'y') r.push('Y' + i); else if (k !== 'z') r.push(isX); } return r; })();
+out.typeofForm = vals.map(x => { if (typeof x === 'string') return 's'; if (typeof x === 'number') return 'n'; if (typeof x !== 'object') return 'o'; return 'O'; });
+out.frames = (() => { const tag = n => n % 2 === 0 ? 'even' : 'odd'; const rec = n => { switch (tag(n)) { case 'even': return n === 0 ? 'done' : rec(n - 1); case 'odd': try { if (n === 1) throw new Error('one'); return rec(n - 1); } catch (e) { return e.message; } } }; return [rec(4), rec(5), rec(0)]; })();
+out.generator = (() => { function* g(x) { switch (x) { case 'a': yield 1; case 'b': yield 2; break; case 'c': return 3; } yield 4; } return [[...g('a')], [...g('b')], [...g('c')], [...g('d')]]; })();
+JSON.stringify(out, (k, v) => typeof v === 'symbol' ? 'sym' : v);
+""";
+
+    private const string ConstantCompareExpected = """
+{"eqA":[1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"neA":[0,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],"eqAb":[0,0,0,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"eqEmpty":[0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"eqZero":[0,0,0,0,0,0,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"neZero":[1,1,1,1,1,1,0,0,1,1,1,1,1,1,1,1,1,1,1,1,1,1],"eqOne":[0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0],"eqFrac":[0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0],"negZeroLiteral":[0,0,0,0,0,0,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"rope":["eq","ne",true,false,true,true,false],"sameLengthLastChar":[false,true,false,false,false,0],"switchLiterals":["A","B","E","AB","AB","AB","Z","Z","O","F","D","D","D","D","D","D","D","D","D","D","D","D"],"switchFallThrough":[[1,2],[2],[3,4,5],[4,5],[5]],"switchDefaultFirst":[["a"],["d","a"]],"switchMixedTests":[1,2,3,4,5,["p","p","p","r","p","r","p","r"]],"switchLexical":2,"switchTdz":"ReferenceError","switchDiscOnce":1101,"switchInLoop":"12|3|12|","switchNoCases":1,"leftEffects":[[1,3],["a","b","c"]],"undeclared":"ReferenceError","tdz":"ReferenceError","inLoop":[true,"Y1",true,"Y4"],"typeofForm":["s","s","s","s","s","s","n","n","n","n","n","o","o","O","o","o","o","O","O","O","O","o"],"frames":["one","one","done"],"generator":[[1,2,4],[2,4],[],[4]]}
+""";
+
+    [Fact]
+    public void ConstantComparesAndSwitchesMatchReferenceBehavior()
+    {
+        using var engine = new JsEngine();
+        var exp = System.Text.Json.JsonDocument.Parse(ConstantCompareExpected).RootElement;
+        var got = System.Text.Json.JsonDocument.Parse(engine.Evaluate(ConstantCompareScript).AsString()).RootElement;
+        foreach (var p in exp.EnumerateObject())
+        {
+            Assert.True(got.TryGetProperty(p.Name, out var g), $"missing case {p.Name}");
+            Assert.True(p.Value.ToString() == g.ToString(), $"{p.Name}: expected {p.Value} got {g}");
+        }
+    }
+
+    // A pooled frame reused by another function at the same depth. Expected values were produced by Node from the same script.
+    private const string FrameReuseScript = """
+const out = {};
+// one depth, different functions: each must see its own code, constants and inline caches
+const a = o => 'a:' + o.x, b = o => 'b:' + o.y, c = function (o) { return 'c:' + (o.x + o.y); };
+out.alternate = (() => { const r = []; const fs = [a, b, c, a, a, c, b]; for (const f of fs) r.push(f({ x: 1, y: 2 })); return r; })();
+// one template, different closures: same code, different environments
+const mk = k => n => n + k;
+out.sameTemplate = (() => { const fs = [mk(1), mk(10), mk(100)]; const r = []; for (let i = 0; i < 7; i++) r.push(fs[i % 3](i)); return r; })();
+// inline caches are per function: a shape seen in one must not answer in the other
+out.ics = (() => { const g1 = o => o.v, g2 = o => o.v; const p = { v: 1 }, q = { w: 0, v: 2 }; const r = []; for (let i = 0; i < 4; i++) { r.push(g1(p)); r.push(g2(q)); } r.push(g1(q), g2(p)); return r; })();
+// frames left by a throw, a generator, an async function, eval and new Function, then the depth used again
+out.afterThrow = (() => { const t = () => { throw new RangeError('x'); }; const s = () => 'ok'; const r = []; for (let i = 0; i < 3; i++) { try { r.push(t()); } catch (e) { r.push(e.message); } r.push(s()); } return r; })();
+out.generators = (() => { function* g1() { const v = yield 'p'; yield 'q' + v; } function* g2() { yield 'r'; yield 's'; } const x = g1(), y = g2(); return [x.next().value, y.next().value, x.next(1).value, y.next().value, x.next().done, y.next().done]; })();
+out.evalAndFunction = (() => { const f = new Function('a', 'return "nf" + a'); const r = []; for (let i = 0; i < 3; i++) { r.push(f(i)); r.push(eval('"ev" + i')); r.push(a({ x: i })); } return r; })();
+out.classes = (() => { class A { constructor() { this.k = 'A'; } m() { return 'mA' + this.k; } } class B extends A { constructor() { super(); this.k += 'B'; } m() { return 'mB' + super.m(); } } return [new A().m(), new B().m(), new A().m()]; })();
+out.accessors = (() => { const o = { get g() { return 'gv'; }, set g(v) { this._ = 'sv' + v; } }; o.g = 1; return [o.g, o._, [1, 2].map(x => x + 1), [3, 1, 2].sort((p, q) => q - p)]; })();
+out.errorKinds = (() => { const r = []; const f1 = () => null.p, f2 = () => undefined(), f3 = () => zz; for (const f of [f1, f2, f3, f1]) { try { f(); } catch (e) { r.push(e.constructor.name); } } return r; })();
+out.recursionMix = (() => { const even = n => n === 0 ? 'even' : odd(n - 1); const odd = n => n === 0 ? 'odd' : even(n - 1); return [even(10), even(7), odd(301)]; })();
+JSON.stringify(out);
+""";
+
+    private const string FrameReuseExpected = """
+{"alternate":["a:1","b:2","c:3","a:1","a:1","c:3","b:2"],"sameTemplate":[1,11,102,4,14,105,7],"ics":[1,2,1,2,1,2,1,2,2,1],"afterThrow":["x","ok","x","ok","x","ok"],"generators":["p","r","q1","s",true,true],"evalAndFunction":["nf0","ev0","a:0","nf1","ev1","a:1","nf2","ev2","a:2"],"classes":["mAA","mBmAAB","mAA"],"accessors":["gv","sv1",[2,3],[3,2,1]],"errorKinds":["TypeError","TypeError","ReferenceError","TypeError"],"recursionMix":["even","odd","even"]}
+""";
+
+    [Fact]
+    public void FramesReusedByOtherFunctionsMatchReferenceBehavior()
+    {
+        using var engine = new JsEngine();
+        var exp = System.Text.Json.JsonDocument.Parse(FrameReuseExpected).RootElement;
+        var got = System.Text.Json.JsonDocument.Parse(engine.Evaluate(FrameReuseScript).AsString()).RootElement;
+        foreach (var p in exp.EnumerateObject())
+        {
+            Assert.True(got.TryGetProperty(p.Name, out var g), $"missing case {p.Name}");
+            Assert.True(p.Value.ToString() == g.ToString(), $"{p.Name}: expected {p.Value} got {g}");
+        }
+    }
 }
