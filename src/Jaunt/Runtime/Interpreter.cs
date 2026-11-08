@@ -818,8 +818,9 @@ internal sealed partial class Vm
                             if (fv.IsObject && fv.Ref is JsClosure c && (c.Template.Flags & InlineNewMask) == 0 && !c.IsDerived && c.FieldInit == null && c.Template.IsConstructor)
                             {
                                 if (--_ticks <= 0) Checkpoint();
-                                var obj = new JsObject(Realm, ConstructPrototype(c));
-                                var nf = PushNewFrame(c, regs, argStart, argc, obj, fv);
+                                var nf = c.IsDerived || c.FieldInit != null
+                                    ? PushClassNewFrame(c, f, argStart, argc, fv)
+                                    : PushNewFrame(c, regs, argStart, argc, NewInstance(c, ConstructPrototype(c)), fv);
                                 nf.RetIndex = dst;
                                 f = nf;
                                 code = f.Code; regs = f.Regs; bp = f.Base; pc = 0; k = f.K;

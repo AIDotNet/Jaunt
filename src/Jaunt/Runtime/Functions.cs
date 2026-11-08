@@ -114,6 +114,8 @@ internal sealed class Feedback
     public readonly IcEntry[] Ics;
     private Feedback?[]? _children;
     public readonly FunctionTemplate Template;
+    /// <summary>For a constructor: the slot count to give new instances, learned from those constructed so far (at most <see cref="Vm.MaxInstanceSlots"/>).</summary>
+    public int InstanceSlots;
 
     public Feedback(FunctionTemplate t)
     {
