@@ -283,6 +283,7 @@ internal static class ObjectBuiltins
         var result = realm.NewArray();
         if (o is JsArray arr && arr.Dense && kind == 0 && arr.Shape.Count == 0)
         {
+            arr.LeaveQueueMode();
             for (uint i = 0; i < arr.Length && i < (uint)arr.Items.Length; i++)
                 if (arr.Items[i].IsNotEmpty) result.Push(new JsValue(PropertyKey.IndexToString(i)));
             return JsValue.FromObject(result);

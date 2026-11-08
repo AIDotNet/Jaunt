@@ -2,6 +2,7 @@ using System;
 using System.Runtime.CompilerServices;
 using System.Collections.Generic;
 using System.Text;
+using Jaunt.Compiler;
 
 namespace Jaunt.Runtime;
 
@@ -79,12 +80,15 @@ internal static class ArrayBuiltins
             if (mapping && !mapFn.IsFunction) throw JsErrors.TypeError(realm, "Array.from: when provided, the second argument must be a function");
             if (a.This.IsObject && !ReferenceEquals(a.This.Ref, realm.ArrayConstructor) && Operations.IsConstructor(a.This))
                 return FromWithConstructor(realm, a.This, items, mapFn, thisArg);
-            var result = realm.NewArray();
             var args = new JsValue[2];
             if (items.IsNullOrUndefined) throw JsErrors.TypeError(realm, $"{items} is not iterable");
             var usingIterator = Operations.GetV(realm, items, JsSymbol.Iterator);
+            JsClosure? fast = null;
+            if (mapping) realm.Vm.TryPrepareFastCalls(mapFn, out fast);
             if (!usingIterator.IsNullOrUndefined)
             {
+                // an array source's current length is only a capacity hint: the result still takes what the iterator yields
+                var result = items.Ref is JsArray ia ? CreateArrayForAppend(realm, ia.Length) : realm.NewArray();
                 var it = IteratorRecord.Get(realm, items);
                 double k = 0;
                 while (it.Step(out var v))
@@ -92,7 +96,7 @@ internal static class ArrayBuiltins
                     if (mapping)
                     {
                         args[0] = v; args[1] = new JsValue(k);
-                        try { v = realm.Vm.Call(mapFn, thisArg, args); }
+                        try { v = fast != null ? realm.Vm.CallClosureFast(fast, thisArg, args) : realm.Vm.Call(mapFn, thisArg, args); }
                         catch (JsThrowException) { it.CloseQuiet(); throw; }
                     }
                     result.Push(v);
@@ -103,14 +107,15 @@ internal static class ArrayBuiltins
             }
             var o = Operations.ToObject(realm, items);
             long len = Operations.LengthOfArrayLike(realm, o);
+            var res = CreateArrayForAppend(realm, len);
             for (long i = 0; i < len; i++)
             {
                 var v = GetAt(o, i, JsValue.FromObject(o));
-                if (mapping) { args[0] = v; args[1] = new JsValue(i); v = realm.Vm.Call(mapFn, thisArg, args); }
-                result.Push(v);
+                if (mapping) { args[0] = v; args[1] = new JsValue(i); v = fast != null ? realm.Vm.CallClosureFast(fast, thisArg, args) : realm.Vm.Call(mapFn, thisArg, args); }
+                res.Push(v);
                 realm.Vm.Tick();
             }
-            return JsValue.FromObject(result);
+            return JsValue.FromObject(res);
         });
 
         r.Method(proto, "push", 1, PushFn);
@@ -119,6 +124,7 @@ internal static class ArrayBuiltins
             if (a.This.Ref is JsArray arr && arr.Dense && arr.LengthWritable)
             {
                 if (arr.Length == 0) return JsValue.Undefined;
+                if (arr.TryQueuePop(out var qv)) return qv;
                 uint i = arr.Length - 1;
                 if (arr.TryGetDense(i, out var dv))
                 {
@@ -139,15 +145,19 @@ internal static class ArrayBuiltins
         r.Method(proto, "shift", 0, static (in NativeArgs a) =>
         {
             var realm = a.Realm;
-            if (a.This.Ref is JsArray arr && arr.Dense && arr.LengthWritable && arr.Extensible && arr.Length <= arr.Items.Length && !JsArray.ProtoChainMayHaveIndices(arr.Proto))
+            if (a.This.Ref is JsArray arr && arr.Dense && arr.LengthWritable && arr.Extensible && !JsArray.ProtoChainMayHaveIndices(arr.Proto))
             {
                 if (arr.Length == 0) return JsValue.Undefined;
-                var first = arr.Items[0];
-                Array.Copy(arr.Items, 1, arr.Items, 0, (int)arr.Length - 1);
-                arr.Items[arr.Length - 1] = JsValue.Empty;
-                arr.Length--;
-                realm.Vm.Tick((int)Math.Min(arr.Length / 64, 1000));
-                return first.IsEmpty ? JsValue.Undefined : first;
+                if (arr.TryQueueShift(out var first)) return first.IsEmpty ? JsValue.Undefined : first;
+                if (arr.Length <= arr.Items.Length)
+                {
+                    first = arr.Items[0];
+                    Array.Copy(arr.Items, 1, arr.Items, 0, (int)arr.Length - 1);
+                    arr.Items[arr.Length - 1] = JsValue.Empty;
+                    arr.Length--;
+                    realm.Vm.Tick((int)Math.Min(arr.Length / 64, 1000));
+                    return first.IsEmpty ? JsValue.Undefined : first;
+                }
             }
             var o = Operations.ToObject(realm, a.This);
             long len = Operations.LengthOfArrayLike(realm, o);
@@ -174,13 +184,18 @@ internal static class ArrayBuiltins
             if (n > 0)
             {
                 CheckLength(realm, (double)len + n);
-                if (o is JsArray arr && arr.Dense && arr.Extensible && arr.LengthWritable && arr.Length <= arr.Items.Length && !JsArray.ProtoChainMayHaveIndices(arr.Proto))
+                if (o is JsArray arr && arr.Dense && arr.Extensible && arr.LengthWritable && !JsArray.ProtoChainMayHaveIndices(arr.Proto))
                 {
-                    arr.EnsureCapacity(arr.Length + (uint)n);
-                    Array.Copy(arr.Items, 0, arr.Items, n, (int)arr.Length);
-                    for (int i = 0; i < n; i++) arr.Items[i] = a.Args[i];
-                    arr.Length += (uint)n;
-                    return new JsValue(arr.Length);
+                    if (arr.TryQueueUnshift(a.Args)) return new JsValue(arr.Length);
+                    arr.LeaveQueueMode();
+                    if (arr.Length <= arr.Items.Length)
+                    {
+                        arr.EnsureCapacity(arr.Length + (uint)n);
+                        Array.Copy(arr.Items, 0, arr.Items, n, (int)arr.Length);
+                        for (int i = 0; i < n; i++) arr.Items[i] = a.Args[i];
+                        arr.Length += (uint)n;
+                        return new JsValue(arr.Length);
+                    }
                 }
                 for (long k = len; k > 0; k--)
                 {
@@ -203,11 +218,16 @@ internal static class ArrayBuiltins
             long k = Operations.RelativeIndex(realm, a[0], len, 0);
             long end = Operations.RelativeIndex(realm, a[1], len, len);
             long count = Math.Max(end - k, 0);
-            var resObj = ArraySpeciesCreate(realm, o, count);
-            if (resObj is JsArray res && res.Dense && res.Length == count && o is JsArray arr && arr.Dense && end <= arr.Items.Length && !JsArray.ProtoChainMayHaveIndices(arr.Proto))
+            var resObj = ArraySpeciesCreate(realm, o, count, out bool intrinsic);
+            if (o is JsArray qa) qa.LeaveQueueMode();
+            // a fresh array nobody has seen: one copy into the store it already has; a hole stays a hole
+            if (intrinsic && resObj is JsArray res && o is JsArray arr && arr.Dense && end <= arr.Items.Length && !JsArray.ProtoChainMayHaveIndices(arr.Proto))
             {
-                res.SetLength(0);
-                for (long i = k; i < end; i++) { var v = arr.Items[i]; if (v.IsEmpty) res.PushHole(); else res.Push(v); }
+                if (count > 0)
+                {
+                    res.EnsureCapacity((uint)count);
+                    Array.Copy(arr.Items, k, res.Items, 0, count);
+                }
                 realm.Vm.Tick((int)Math.Min(count / 64, 1000));
                 return JsValue.FromObject(res);
             }
@@ -233,22 +253,12 @@ internal static class ArrayBuiltins
             else delCount = (long)Math.Min(Math.Max(Operations.ToIntegerOrInfinity(realm, a[1]), 0), len - start);
             var items = a.Length > 2 ? a.Args.Slice(2).ToArray() : Array.Empty<JsValue>();
             CheckLength(realm, (double)len + items.Length - delCount);
-            var removedObj = ArraySpeciesCreate(realm, o, delCount);
-            if (removedObj is JsArray removed && removed.Dense && o is JsArray arr && arr.Dense && arr.Extensible && arr.LengthWritable && arr.Length <= arr.Items.Length && !JsArray.ProtoChainMayHaveIndices(arr.Proto))
+            var removedObj = ArraySpeciesCreate(realm, o, delCount, out bool intrinsic);
+            if (intrinsic && o is JsArray arr && arr.Dense && arr.Extensible && arr.LengthWritable && arr.Length == len && !JsArray.ProtoChainMayHaveIndices(arr.Proto) && (arr.IsQueue || len <= arr.Items.Length))
             {
-                removed.SetLength(0);
-                for (long i = 0; i < delCount; i++) { var v = arr.Items[start + i]; if (v.IsEmpty) removed.PushHole(); else removed.Push(v); }
-                long newLen = len - delCount + items.Length;
-                if (items.Length != delCount)
-                {
-                    arr.EnsureCapacity((uint)Math.Max(newLen, len));
-                    Array.Copy(arr.Items, start + delCount, arr.Items, start + items.Length, len - start - delCount);
-                    for (long i = newLen; i < len; i++) arr.Items[i] = JsValue.Empty;
-                }
-                for (int i = 0; i < items.Length; i++) arr.Items[start + i] = items[i];
-                arr.Length = (uint)newLen;
-                realm.Vm.Tick((int)Math.Min(len / 64, 1000));
-                return JsValue.FromObject(removed);
+                arr.SpliceDense((int)start, (int)delCount, items, (JsArray)removedObj);
+                realm.Vm.Tick((int)Math.Min(Math.Min(start, len - start - delCount) / 64, 1000));
+                return JsValue.FromObject(removedObj);
             }
             for (long i = 0; i < delCount; i++)
             {
@@ -287,8 +297,13 @@ internal static class ArrayBuiltins
         {
             var realm = a.Realm;
             var o = Operations.ToObject(realm, a.This);
-            var species = ArraySpeciesCreate(realm, o, 0);
-            var res = species as JsArray ?? realm.NewArray();
+            var species = ArraySpeciesCreate(realm, o, 0, out bool intrinsic);
+            // gathered in a fresh array; a species-created result (which may be anything, even non-empty) is written at the end
+            var res = intrinsic ? (JsArray)species : realm.NewArray();
+            // room for the common case of array arguments; reading their lengths observes nothing
+            long hint = o is JsArray oa ? oa.Length : 0;
+            foreach (var v in a.Args) hint += v.Ref is JsArray va ? va.Length : 1;
+            if (hint > 0 && hint <= realm.MaxArrayLength) res.EnsureCapacity((uint)hint);
             void Add(Realm realm, JsArray res, JsValue item)
             {
                 bool spreadable = false;
@@ -299,9 +314,19 @@ internal static class ArrayBuiltins
                 }
                 if (!spreadable) { res.Push(item); return; }
                 var e = item.AsObjectUnchecked;
+                if (e is JsArray qa) qa.LeaveQueueMode();
                 if (e is JsArray ea && ea.Dense && ea.Length <= ea.Items.Length && !JsArray.ProtoChainMayHaveIndices(ea.Proto))
                 {
-                    res.EnsureCapacity(res.Length + ea.Length);
+                    if (res.Dense && (ulong)res.Length + ea.Length <= int.MaxValue)
+                    {
+                        // one copy; a hole stays a hole
+                        uint at = res.Length;
+                        res.EnsureCapacity(at + ea.Length);
+                        Array.Copy(ea.Items, 0, res.Items, at, ea.Length);
+                        res.Length = at + ea.Length;
+                        realm.Vm.Tick((int)Math.Min(ea.Length / 64, 1000));
+                        return;
+                    }
                     for (uint i = 0; i < ea.Length; i++) { var v = ea.Items[i]; if (v.IsEmpty) res.PushHole(); else res.Push(v); }
                     return;
                 }
@@ -371,6 +396,7 @@ internal static class ArrayBuiltins
         {
             var realm = a.Realm;
             var o = Operations.ToObject(realm, a.This);
+            if (o is JsArray qa) qa.LeaveQueueMode();
             if (o is JsArray arr && arr.Dense && arr.Length <= arr.Items.Length && Array.IndexOf(arr.Items, JsValue.Empty, 0, (int)arr.Length) < 0 && arr.Extensible && arr.LengthWritable)
             {
                 Array.Reverse(arr.Items, 0, (int)arr.Length);
@@ -405,6 +431,7 @@ internal static class ArrayBuiltins
             var target = a[0];
             if (o is JsArray arr && arr.Dense && !JsArray.ProtoChainMayHaveIndices(arr.Proto))
             {
+                arr.LeaveQueueMode();
                 long end = Math.Min(len, arr.Items.Length);
                 for (long i = k; i < end; i++)
                 {
@@ -431,6 +458,7 @@ internal static class ArrayBuiltins
             double n = a.Length > 1 ? Operations.ToIntegerOrInfinity(realm, a[1]) : len - 1;
             long k = n >= 0 ? (long)Math.Min(n, len - 1) : (long)(len + n);
             var target = a[0];
+            if (o is JsArray qa) qa.LeaveQueueMode();
             if (o is JsArray arr && arr.Dense && len <= arr.Items.Length && !JsArray.ProtoChainMayHaveIndices(arr.Proto))
             {
                 for (long i = k; i >= 0; i--)
@@ -481,7 +509,16 @@ internal static class ArrayBuiltins
             long len = Operations.LengthOfArrayLike(realm, o);
             long k = Operations.RelativeIndex(realm, a[1], len, 0);
             long end = Operations.RelativeIndex(realm, a[2], len, len);
-            for (long i = k; i < end; i++) { SetAt(o, i, a[0], JsValue.FromObject(o)); realm.Vm.Tick(); }
+            // every target is an own data element or a hole that no prototype can intercept (rechecked here: converting
+            // the arguments ran user code); one exactly sized store instead of growing element by element
+            if (end > k && o is JsArray fa && fa.Dense && end <= fa.Length && end <= realm.MaxArrayLength && fa.Extensible && !JsArray.ProtoChainMayHaveIndices(fa.Proto))
+            {
+                fa.EnsureCapacity((uint)end);
+                fa.Items.AsSpan((int)k, (int)(end - k)).Fill(a[0]);
+                realm.Vm.Tick((int)Math.Min((end - k) / 64, 1000));
+                return JsValue.FromObject(o);
+            }
+            for (long i = k; i < end; i++) { SetAtOrThrow(realm, o, i, a[0]); realm.Vm.Tick(); }
             return JsValue.FromObject(o);
         });
         r.Method(proto, "copyWithin", 2, static (in NativeArgs a) =>
@@ -493,6 +530,7 @@ internal static class ArrayBuiltins
             long from = Operations.RelativeIndex(realm, a[1], len, 0);
             long final = Operations.RelativeIndex(realm, a[2], len, len);
             long count = Math.Min(final - from, len - to);
+            if (o is JsArray qa) qa.LeaveQueueMode();
             if (count > 0 && o is JsArray arr && arr.Dense && len <= arr.Items.Length && arr.Extensible && arr.LengthWritable && !JsArray.ProtoChainMayHaveIndices(arr.Proto))
             {
                 Array.Copy(arr.Items, from, arr.Items, to, count);   // overlap-safe
@@ -793,7 +831,13 @@ internal static class ArrayBuiltins
 
     private static JsValue GetAt(JsObject o, long i, JsValue receiver) => i < uint.MaxValue ? o.GetIndex((uint)i, receiver) : o.Get(Key(i), receiver);
 
-    private static bool SetAt(JsObject o, long i, JsValue v, JsValue receiver) => i < uint.MaxValue ? o.SetIndex((uint)i, v, receiver) : o.Set(Key(i), v, receiver);
+    /// <summary>Set(O, i, v, true).</summary>
+    private static void SetAtOrThrow(Realm realm, JsObject o, long i, JsValue v)
+    {
+        var self = JsValue.FromObject(o);
+        if (!(i < uint.MaxValue ? o.SetIndex((uint)i, v, self) : o.Set(Key(i), v, self)))
+            throw JsErrors.TypeError(realm, $"Cannot assign to element {i} of {o.ClassName}");
+    }
 
     public static bool IsArray(Realm realm, in JsValue v)
     {
@@ -986,17 +1030,26 @@ internal static class ArrayBuiltins
             var tmp = vm.TakeScratch(count);
             try
             {
-                if (cmp.IsUndefined) { var c = new DefaultSortCmp(realm); MergeSort(items, tmp, count, ref c); }
-                else if (vm.TryPrepareFastCalls(cmp, out var closure)) { var c = new ClosureSortCmp(vm, closure, new JsValue[2]); MergeSort(items, tmp, count, ref c); }
-                else { var c = new GenericSortCmp(realm, cmp, new JsValue[2]); MergeSort(items, tmp, count, ref c); }
+                if (cmp.IsUndefined)
+                {
+                    if (!TrySortByStringKeys(realm, items, tmp, count)) { var c = new DefaultSortCmp(realm); StableSort(items, tmp, count, ref c); }
+                }
+                else if (vm.TryPrepareFastCalls(cmp, out var closure))
+                {
+                    var c = new ClosureSortCmp(vm, closure, new JsValue[2]);
+                    int numeric = MatchNumericComparator(closure.Template);
+                    if (numeric != 0) { var nc = new NumericSortCmp(c, vm, numeric < 0); StableSort(items, tmp, count, ref nc); }
+                    else StableSort(items, tmp, count, ref c);
+                }
+                else { var c = new GenericSortCmp(realm, cmp, new JsValue[2]); StableSort(items, tmp, count, ref c); }
             }
             finally { vm.ReturnScratch(tmp, count); }
         }
-        for (int i = 0; i < count; i++) { SetAt(o, i, items[i], JsValue.FromObject(o)); vm.Tick(); }
-        for (long i = count; i < len; i++) { o.Delete(Key(i)); vm.Tick(); }
+        for (int i = 0; i < count; i++) { SetAtOrThrow(realm, o, i, items[i]); vm.Tick(); }
+        for (long i = count; i < len; i++) { DeleteOrThrow(realm, o, Key(i)); vm.Tick(); }
     }
 
-    private interface ISortCmp { int Compare(in JsValue x, in JsValue y); }
+    private interface ISortCmp<T> { int Compare(in T x, in T y); }
 
     /// <summary>Undefined sorts last; returns false when both are defined (the comparator decides).</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -1009,10 +1062,10 @@ internal static class ArrayBuiltins
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static int Sign(double v) => double.IsNaN(v) ? 0 : v < 0 ? -1 : v > 0 ? 1 : 0;
+    private static int Sign(double v) => (v > 0 ? 1 : 0) - (v < 0 ? 1 : 0);   // no branch on the data; NaN gives 0
 
     /// <summary>A plain closure comparator: pushed and run directly (no delegate, no per-call native stack probe).</summary>
-    private struct ClosureSortCmp(Vm vm, JsClosure closure, JsValue[] args) : ISortCmp
+    private struct ClosureSortCmp(Vm vm, JsClosure closure, JsValue[] args) : ISortCmp<JsValue>
     {
         public int Compare(in JsValue x, in JsValue y)
         {
@@ -1024,7 +1077,7 @@ internal static class ArrayBuiltins
         }
     }
 
-    private struct GenericSortCmp(Realm realm, JsValue cmp, JsValue[] args) : ISortCmp
+    private struct GenericSortCmp(Realm realm, JsValue cmp, JsValue[] args) : ISortCmp<JsValue>
     {
         public int Compare(in JsValue x, in JsValue y)
         {
@@ -1035,36 +1088,193 @@ internal static class ArrayBuiltins
         }
     }
 
-    private struct DefaultSortCmp(Realm realm) : ISortCmp
+    private struct DefaultSortCmp(Realm realm) : ISortCmp<JsValue>
     {
         public int Compare(in JsValue x, in JsValue y)
         {
             if (UndefinedOrder(x, y, out int r)) return r;
             realm.Vm.Tick();
-            if (x.IsNumber && y.IsNumber)
-            {
-                // default sort compares string forms; fast path for integers keeps correct ordering only if equal strings
-                return string.CompareOrdinal(NumberFormatting.ToString(x.Num), NumberFormatting.ToString(y.Num));
-            }
             return string.CompareOrdinal(Operations.ToString(realm, x), Operations.ToString(realm, y));
         }
     }
 
-    /// <summary>Stable bottom-up merge sort of <c>a[0..n)</c>, tolerant of inconsistent comparators.</summary>
-    private static void MergeSort<TCmp>(JsValue[] a, JsValue[] tmp, int n, ref TCmp cmp) where TCmp : struct, ISortCmp
+    /// <summary>
+    /// Whether a comparator is exactly <c>(a, b) =&gt; a - b</c> (1) or <c>(a, b) =&gt; b - a</c> (-1), else 0: the bytecode is
+    /// <c>Sub dst, r0, r1; Ret dst</c> with the two parameters in r0 and r1 and nothing before it. Subtracting two numbers
+    /// runs no user code and observes nothing, so such a comparator need not be called while both operands are numbers
+    /// (SpiderMonkey's array sort recognizes the same two comparators).
+    /// </summary>
+    private static int MatchNumericComparator(FunctionTemplate t)
     {
-        for (int width = 1; width < n; width *= 2)
+        var code = t.Code;
+        if (t.ParamCount != 2 || (t.Flags & FunctionFlags.HasRest) != 0 || code.Length < 6 || t.Handlers.Length != 0) return 0;
+        if ((Op)code[0] != Op.Sub || (Op)code[4] != Op.Ret || code[5] != code[1]) return 0;
+        if (code[2] == 0 && code[3] == 1) return 1;
+        if (code[2] == 1 && code[3] == 0) return -1;
+        return 0;
+    }
+
+    /// <summary>A comparator matched by <see cref="MatchNumericComparator"/>; any operand but a number (a string, a BigInt, an object with valueOf) calls the closure.</summary>
+    private struct NumericSortCmp(ClosureSortCmp call, Vm vm, bool reversed) : ISortCmp<JsValue>
+    {
+        private ClosureSortCmp _call = call;
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public int Compare(in JsValue x, in JsValue y)
         {
-            for (int lo = 0; lo < n - width; lo += 2 * width)
+            if (x.IsNumber && y.IsNumber)
             {
-                int mid = lo + width, hi = Math.Min(lo + 2 * width, n);
-                int i = lo, j = mid, k = lo;
-                while (i < mid && j < hi) tmp[k++] = cmp.Compare(a[j], a[i]) < 0 ? a[j++] : a[i++];
-                while (i < mid) tmp[k++] = a[i++];
-                while (j < hi) tmp[k++] = a[j++];
-                Array.Copy(tmp, lo, a, lo, hi - lo);
+                vm.Tick();
+                return Sign(reversed ? y.Num - x.Num : x.Num - y.Num);
+            }
+            return _call.Compare(x, y);
+        }
+    }
+
+    /// <summary>
+    /// Default sort when every value is a primitive other than a symbol. Their string forms can be computed once and in any
+    /// order, since no user code runs and nothing can throw; a number's default order otherwise formats two strings per
+    /// comparison. Sorts positions rather than values because equal strings can come from different values (1 and "1").
+    /// False when some value's ToString is observable (object) or throws (symbol): SortCompare converts per comparison then.
+    /// </summary>
+    private static bool TrySortByStringKeys(Realm realm, JsValue[] items, JsValue[] tmp, int count)
+    {
+        for (int i = 0; i < count; i++)
+        {
+            var tag = items[i].Tag;
+            if (tag == JsTag.Object || tag == JsTag.Symbol) return false;
+        }
+        var keys = new string[count];
+        var order = new int[count];
+        int defined = 0;
+        for (int i = 0; i < count; i++)
+        {
+            ref readonly var v = ref items[i];
+            if (v.IsUndefined) continue;   // these sort last, and all are alike
+            keys[i] = v.IsString ? v.AsStringUnchecked : Operations.ToString(realm, v);
+            order[defined++] = i;
+        }
+        var cmp = new KeySortCmp(realm.Vm, keys);
+        StableSort(order, new int[defined], defined, ref cmp);
+        Array.Copy(items, tmp, count);
+        for (int i = 0; i < defined; i++) items[i] = tmp[order[i]];
+        Array.Clear(items, defined, count - defined);
+        return true;
+    }
+
+    private struct KeySortCmp(Vm vm, string[] keys) : ISortCmp<int>
+    {
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public int Compare(in int x, in int y)
+        {
+            vm.Tick();
+            return string.CompareOrdinal(keys[x], keys[y]);
+        }
+    }
+
+    private const int MaxMinRun = 32;
+
+    /// <summary>
+    /// Stable merge sort of <c>a[0..n)</c> with natural runs (TimSort's run detection, run extension by binary insertion and
+    /// merge policy, without galloping): an ordered or reversed input takes n comparisons, and a random one fewer comparisons
+    /// and far fewer element copies than merging from single elements. <paramref name="tmp"/> holds at least n elements.
+    /// A comparator's result only steers indices that stay in bounds, so an inconsistent comparator leaves a permutation.
+    /// </summary>
+    private static void StableSort<T, TCmp>(T[] a, T[] tmp, int n, ref TCmp cmp) where TCmp : struct, ISortCmp<T>
+    {
+        if (n < 2) return;
+        int minRun = n, extra = 0;
+        while (minRun >= MaxMinRun) { extra |= minRun & 1; minRun >>= 1; }
+        minRun += extra;
+        Span<int> runStart = stackalloc int[64], runLen = stackalloc int[64];   // run lengths grow at least like Fibonacci numbers
+        int sp = 0;
+        for (int lo = 0; lo < n;)
+        {
+            int run = 1;
+            if (lo + 1 < n)
+            {
+                run = 2;
+                if (cmp.Compare(a[lo + 1], a[lo]) < 0)
+                {
+                    while (lo + run < n && cmp.Compare(a[lo + run], a[lo + run - 1]) < 0) run++;
+                    Array.Reverse(a, lo, run);   // strictly descending, so no equal elements change order
+                }
+                else
+                {
+                    while (lo + run < n && cmp.Compare(a[lo + run], a[lo + run - 1]) >= 0) run++;
+                }
+            }
+            if (run < minRun)
+            {
+                int end = Math.Min(lo + minRun, n);
+                BinaryInsertion(a, lo, lo + run, end, ref cmp);
+                run = end - lo;
+            }
+            runStart[sp] = lo;
+            runLen[sp++] = run;
+            lo += run;
+            // merge policy with the invariant fix of de Gouw et al. (2015)
+            while (sp > 1)
+            {
+                int i = sp - 2;
+                if ((i > 0 && runLen[i - 1] <= runLen[i] + runLen[i + 1]) || (i > 1 && runLen[i - 2] <= runLen[i - 1] + runLen[i]))
+                {
+                    if (runLen[i - 1] < runLen[i + 1]) i--;
+                }
+                else if (runLen[i] > runLen[i + 1]) break;
+                MergeAt(a, tmp, runStart, runLen, ref sp, i, ref cmp);
             }
         }
+        while (sp > 1)
+        {
+            int i = sp - 2;
+            if (i > 0 && runLen[i - 1] < runLen[i + 1]) i--;
+            MergeAt(a, tmp, runStart, runLen, ref sp, i, ref cmp);
+        }
+    }
+
+    private static void MergeAt<T, TCmp>(T[] a, T[] tmp, Span<int> runStart, Span<int> runLen, ref int sp, int i, ref TCmp cmp) where TCmp : struct, ISortCmp<T>
+    {
+        Merge(a, tmp, runStart[i], runStart[i + 1], runStart[i + 1] + runLen[i + 1], ref cmp);
+        runLen[i] += runLen[i + 1];
+        if (i == sp - 3) { runStart[i + 1] = runStart[i + 2]; runLen[i + 1] = runLen[i + 2]; }
+        sp--;
+    }
+
+    /// <summary>Extends the sorted <c>a[lo..start)</c> to <c>a[lo..end)</c>. Which half a comparison selects is unpredictable by nature, so it does not take a branch.</summary>
+    private static void BinaryInsertion<T, TCmp>(T[] a, int lo, int start, int end, ref TCmp cmp) where TCmp : struct, ISortCmp<T>
+    {
+        for (int i = start; i < end; i++)
+        {
+            T pivot = a[i];
+            int l = lo, r = i;
+            while (l < r)
+            {
+                int m = (l + r) >>> 1;
+                int below = cmp.Compare(pivot, a[m]) >> 31;   // -1 when pivot < a[m], else 0
+                r = (m & below) | (r & ~below);
+                l = (l & below) | ((m + 1) & ~below);
+            }
+            a.AsSpan(l, i - l).CopyTo(a.AsSpan(l + 1));
+            a[l] = pivot;
+        }
+    }
+
+    /// <summary>Merges the sorted <c>a[lo..mid)</c> and <c>a[mid..hi)</c>; the left element wins ties. Selects without a branch, like <see cref="BinaryInsertion"/>.</summary>
+    private static void Merge<T, TCmp>(T[] a, T[] tmp, int lo, int mid, int hi, ref TCmp cmp) where TCmp : struct, ISortCmp<T>
+    {
+        if (cmp.Compare(a[mid], a[mid - 1]) >= 0) return;   // already in order
+        Array.Copy(a, lo, tmp, lo, hi - lo);
+        int i = lo, j = mid, k = lo;
+        while (i < mid && j < hi)
+        {
+            int right = cmp.Compare(tmp[j], tmp[i]) >> 31;   // -1 when the right element comes first, else 0
+            a[k++] = tmp[i + ((j - i) & right)];
+            j -= right;
+            i += 1 + right;
+        }
+        // what remains of the right run is already in place: j == k once the left run is used up
+        if (i < mid) Array.Copy(tmp, i, a, k, mid - i);
     }
 
     /// <summary>FlattenIntoArray (23.1.3.13.1).</summary>

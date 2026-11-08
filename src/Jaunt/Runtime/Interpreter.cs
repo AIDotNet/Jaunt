@@ -102,7 +102,7 @@ internal sealed partial class Vm
                             for (int d = Unsafe.Add(ref ip, 2); d > 0; d--) e = e.Parent!;
                             var v = e.Slots[Unsafe.Add(ref ip, 3)];
                             if (v.IsEmpty) { f.Pc = PcAt(ref code0, ref ip) + 1; thrown = TdzError(f.K[Unsafe.Add(ref ip, 4)]); goto Unwind; }
-                            Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = v;
+                            JsValue.Store(ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)), v);
                             ip = ref Unsafe.Add(ref ip, 5);
                             continue;
                         }

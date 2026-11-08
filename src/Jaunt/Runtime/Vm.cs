@@ -499,7 +499,7 @@ internal sealed partial class Vm
             if (n <= 4)
             {
                 // element stores beat the bulk copy helper for the usual one to four arguments
-                for (int i = 0; i < n; i++) regs[b + i] = args[i];
+                for (int i = 0; i < n; i++) JsValue.Store(ref regs[b + i], args[i]);
             }
             else args.Slice(0, n).CopyTo(regs.AsSpan(b, n));
             // Registers are not cleared when a frame is popped (the pooled stack is cleared when the root execution
