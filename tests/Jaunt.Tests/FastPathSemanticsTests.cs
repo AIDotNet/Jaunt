@@ -224,6 +224,26 @@ out.bigShape = (() => {
   const o = mk();
   return [o['key' + 39], o['key' + 40], o.key7, o.key7x, o[s1], o[s2], s2 in o, 'key0' in o, '' in o, ({ ...o }).key39, Object.keys(o).length];
 })();
+// a store site that cycles through many shapes (Vm-wide store cache)
+out.megaStore = (() => {
+  const set = (o, v) => { o.x = v; return o; }, seen = [];
+  class Base { constructor() { set(this, 'b'); } }
+  const classes = []; for (let i = 0; i < 12; i++) classes.push(class extends Base {});
+  for (let round = 0; round < 3; round++) for (const C of classes) seen.push(Object.keys(new C()).join());
+  const r = [seen.every((k) => k === 'x')];
+  // same shape as the cached append, each with a different say in adding x
+  const fresh = () => ({ m: 1 }); set(fresh(), 1); set(fresh(), 1);
+  const ne = Object.preventExtensions(fresh()); set(ne, 1); r.push(ne.x);
+  const fz = Object.freeze({ x: 1 }); set(fz, 2); r.push(fz.x);
+  const proto = fresh(), kid = Object.create(proto), read = (o) => o.x; r.push(read(kid)); set(proto, 'via proto'); r.push(read(kid));
+  class G { set x(v) { this.hit = v; } } const g = new G(); set(g, 3); r.push(g.hit, Object.keys(g));
+  class H {} const h1 = new H(), h2 = new H(); set(h1, 1); Object.defineProperty(H.prototype, 'x', { set(v) { this.viaSetter = v; }, configurable: true }); set(h2, 2); r.push(Object.keys(h1), Object.keys(h2));
+  class R {} const r1 = new R(), r2 = new R(); set(r1, 1); Object.defineProperty(R.prototype, 'x', { value: 'ro', writable: false }); set(r2, 2); r.push(r1.x, r2.x, Object.keys(r2));
+  const ow = { x: 0 }; set(ow, 1); set(ow, 2); r.push(ow.x); Object.defineProperty(ow, 'x', { writable: false }); set(ow, 3); r.push(ow.x);
+  const arr = []; set(arr, 1); r.push(arr.x, arr.length); const pr = new Proxy({}, { set(t, k, v) { t[k] = v + 1; return true; } }); set(pr, 1); r.push(pr.x);
+  const many = {}; for (let i = 0; i < 70; i++) many['k' + i] = i; set(many, 'dict'); r.push(many.x, Object.keys(many).length);
+  return r;
+})();
 // private elements
 out.privates = (() => {
   class A { #x = 1; #m() { return 'm' + this.#x; } get #g() { return this.#x * 2; } set #g(v) { this.#x = v; } static has(o) { return #x in o; }
@@ -255,8 +275,24 @@ JSON.stringify(out);
 """;
 
     private const string ObjectModelExpected = """
-{"sloppy":{"alias":[10,10,20,2],"extra":["x","y",2,["0","1","3"]],"missing":[null,1,false],"deleteRemap":[null,2,3,["0"]],"definedRO":[2,1],"definedValue":[7,8],"getter":[41,1,41],"frozen":[9,5,true],"sealed":[1,9,true],"desc":[{"value":3,"writable":true,"enumerable":true,"configurable":true},{"value":1,"writable":true,"enumerable":false,"configurable":true},"function"],"named":[[2,0,1],["0","1","length","callee","extra","Symbol(Symbol.iterator)"],1],"stringKey":["new","new",true],"inherited":[2,1,5,2,["0"]],"iter":["p",2,[2],["p",2]],"tostr":["[object Arguments]",true],"icShare":["L","plain",1,"live"],"manyArgs":[["z",15,30,45,60],70,"q"]},"strict":[1,"b",2,["TypeError","TypeError"],true],"freeze":[1,1,5,1,1,null,1,true,true,false,false,1,{"value":1,"writable":false,"enumerable":true,"configurable":false},9,false,true,false,{"value":9,"writable":true,"enumerable":true,"configurable":false},{"a":1,"b":2},true,["a","b"],"{\"a\":1,\"b\":2}","function",true,true,false,true,false],"protoFreeze":[[2,["x"]],[1,[]],1,"getter"],"redefine":[2,2,["a","c"],"{\"a\":1,\"c\":3}",{"a":1,"c":3},{"value":2,"writable":true,"enumerable":false,"configurable":true},"g",true,["a","c"],"d",["a","b","c"],[["a",1],["b","d"],["c",3]],["b","c","d"],{"k":1,"m":2},{"k":1,"m":6},false,"n",9,["length","name"],2,null],"bigShape":[39,null,7,"dyn","s1",null,false,true,false,39,41],"privates":[[3,"m3",6],true,false,"TypeError","TypeError","TypeError","TypeError","TypeError",["y","z","w","v","u"],"TypeError","TypeError",[],"{}",7],"withScope":[[5,"outer","outer","has:log","has:a","get:Symbol(Symbol.unscopables)","has:a","get:a",1,"getter","V",true,"I","J",["inh"]],5,5]}
+{"sloppy":{"alias":[10,10,20,2],"extra":["x","y",2,["0","1","3"]],"missing":[null,1,false],"deleteRemap":[null,2,3,["0"]],"definedRO":[2,1],"definedValue":[7,8],"getter":[41,1,41],"frozen":[9,5,true],"sealed":[1,9,true],"desc":[{"value":3,"writable":true,"enumerable":true,"configurable":true},{"value":1,"writable":true,"enumerable":false,"configurable":true},"function"],"named":[[2,0,1],["0","1","length","callee","extra","Symbol(Symbol.iterator)"],1],"stringKey":["new","new",true],"inherited":[2,1,5,2,["0"]],"iter":["p",2,[2],["p",2]],"tostr":["[object Arguments]",true],"icShare":["L","plain",1,"live"],"manyArgs":[["z",15,30,45,60],70,"q"]},"strict":[1,"b",2,["TypeError","TypeError"],true],"freeze":[1,1,5,1,1,null,1,true,true,false,false,1,{"value":1,"writable":false,"enumerable":true,"configurable":false},9,false,true,false,{"value":9,"writable":true,"enumerable":true,"configurable":false},{"a":1,"b":2},true,["a","b"],"{\"a\":1,\"b\":2}","function",true,true,false,true,false],"protoFreeze":[[2,["x"]],[1,[]],1,"getter"],"redefine":[2,2,["a","c"],"{\"a\":1,\"c\":3}",{"a":1,"c":3},{"value":2,"writable":true,"enumerable":false,"configurable":true},"g",true,["a","c"],"d",["a","b","c"],[["a",1],["b","d"],["c",3]],["b","c","d"],{"k":1,"m":2},{"k":1,"m":6},false,"n",9,["length","name"],2,null],"bigShape":[39,null,7,"dyn","s1",null,false,true,false,39,41],"megaStore":[true,null,1,null,"via proto",3,["hit"],["x"],["viaSetter"],1,"ro",[],2,2,1,0,2,"dict",71],"privates":[[3,"m3",6],true,false,"TypeError","TypeError","TypeError","TypeError","TypeError",["y","z","w","v","u"],"TypeError","TypeError",[],"{}",7],"withScope":[[5,"outer","outer","has:log","has:a","get:Symbol(Symbol.unscopables)","has:a","get:a",1,"getter","V",true,"I","J",["inh"]],5,5]}
 """;
+
+    [Fact]
+    public void AddTransitionCacheBumpsTheEpochOfAPrototype()
+    {
+        using var engine = new JsEngine();
+        // the store site caches the append on the shape of `{}`, which `p` has as well; `read` caches the absence of x on c
+        var r = engine.Evaluate("""
+            function set(o) { o.x = 1; }
+            set({}); set({});
+            var p = {}, c = Object.create(p), read = function (o) { return o.x; };
+            var before = read(c); read(c);
+            set(p);
+            String(before) + ',' + read(c);
+            """).AsString();
+        Assert.Equal("undefined,1", r);
+    }
 
     [Fact]
     public void ObjectModelFastPathsMatchReferenceBehavior()

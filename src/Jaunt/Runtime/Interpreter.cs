@@ -248,7 +248,7 @@ internal sealed partial class Vm
                                 if (ReferenceEquals(obj.Shape, ic.Shape))
                                 {
                                     if (ic.Kind == IcKind.OwnData) { obj.Slots[ic.Slot] = regs[bp + code[pc + 3]]; pc += 5; continue; }
-                                    if (ic.Kind == IcKind.AddTransition && ic.Epoch == ProtoEpoch && obj.Extensible)
+                                    if (ic.Kind == IcKind.AddTransition && ic.Epoch == ProtoEpoch && obj.Extensible && !obj.IsPrototypeObject)
                                     {
                                         int slot = ic.Slot;
                                         if (slot >= obj.Slots.Length) GrowSlots(obj, slot);
