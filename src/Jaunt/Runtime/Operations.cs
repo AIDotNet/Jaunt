@@ -516,26 +516,49 @@ internal static class Operations
         return realm;
     }
 
+    /// <summary>
+    /// HasProperty(o, key) followed by Get(o, key) when true, in one walk of the chain when it consists of ordinary objects,
+    /// where those steps are not observable apart from running a getter, which this leaves to Get.
+    /// </summary>
+    private static bool DescriptorField(JsObject o, in PropertyKey key, out JsValue value)
+    {
+        for (var p = o; p != null; p = p.Proto)
+        {
+            if (p.GetType() != typeof(JsObject) && p is not JsImmutableProtoObject)
+            {
+                bool has = o.HasProperty(key);
+                value = has ? o.Get(key) : default;
+                return has;
+            }
+            int i = p.FindOwn(key, out var flags);
+            if (i >= 0)
+            {
+                value = (flags & PropFlags.Accessor) != 0 ? o.Get(key) : p.ReadSlot(i);
+                return true;
+            }
+        }
+        value = default;
+        return false;
+    }
+
     public static PropertyDescriptor ToPropertyDescriptor(Realm realm, in JsValue v)
     {
         if (v.IsNotObject) throw JsErrors.TypeError(realm, "Property description must be an object");
         var o = v.AsObjectUnchecked;
         var d = new PropertyDescriptor();
-        if (o.HasProperty("enumerable")) { d.HasEnumerable = true; d.Enumerable = ToBoolean(o.Get("enumerable")); }
-        if (o.HasProperty("configurable")) { d.HasConfigurable = true; d.Configurable = ToBoolean(o.Get("configurable")); }
-        if (o.HasProperty("value")) { d.HasValue = true; d.Value = o.Get("value"); }
-        if (o.HasProperty("writable")) { d.HasWritable = true; d.Writable = ToBoolean(o.Get("writable")); }
-        if (o.HasProperty("get"))
+        if (DescriptorField(o, "enumerable", out var field)) { d.HasEnumerable = true; d.Enumerable = ToBoolean(field); }
+        if (DescriptorField(o, "configurable", out field)) { d.HasConfigurable = true; d.Configurable = ToBoolean(field); }
+        if (DescriptorField(o, "value", out field)) { d.HasValue = true; d.Value = field; }
+        if (DescriptorField(o, "writable", out field)) { d.HasWritable = true; d.Writable = ToBoolean(field); }
+        if (DescriptorField(o, "get", out field))
         {
-            var g = o.Get("get");
-            if (!g.IsUndefined && !g.IsFunction) throw JsErrors.TypeError(realm, "Getter must be a function");
-            d.HasGet = true; d.Getter = g.IsUndefined ? null : g.AsObjectUnchecked;
+            if (!field.IsUndefined && !field.IsFunction) throw JsErrors.TypeError(realm, "Getter must be a function");
+            d.HasGet = true; d.Getter = field.IsUndefined ? null : field.AsObjectUnchecked;
         }
-        if (o.HasProperty("set"))
+        if (DescriptorField(o, "set", out field))
         {
-            var s = o.Get("set");
-            if (!s.IsUndefined && !s.IsFunction) throw JsErrors.TypeError(realm, "Setter must be a function");
-            d.HasSet = true; d.Setter = s.IsUndefined ? null : s.AsObjectUnchecked;
+            if (!field.IsUndefined && !field.IsFunction) throw JsErrors.TypeError(realm, "Setter must be a function");
+            d.HasSet = true; d.Setter = field.IsUndefined ? null : field.AsObjectUnchecked;
         }
         if ((d.HasGet || d.HasSet) && (d.HasValue || d.HasWritable))
             throw JsErrors.TypeError(realm, "Invalid property descriptor. Cannot both specify accessors and a value or writable attribute");
@@ -544,19 +567,21 @@ internal static class Operations
 
     public static JsValue FromPropertyDescriptor(Realm realm, in PropertyDescriptor d)
     {
-        var o = new JsObject(realm, realm.ObjectPrototype);
+        var o = new JsObject(realm, d.IsAccessor ? Shape.SharedAccessorDescriptorShape : Shape.SharedDataDescriptorShape, 4);
+        realm.ChargeProperties(4);
+        var slots = o.Slots;
         if (d.IsAccessor)
         {
-            o.FastAdd("get", d.Getter != null ? JsValue.FromObject(d.Getter) : JsValue.Undefined);
-            o.FastAdd("set", d.Setter != null ? JsValue.FromObject(d.Setter) : JsValue.Undefined);
+            slots[0] = d.Getter != null ? JsValue.FromObject(d.Getter) : JsValue.Undefined;
+            slots[1] = d.Setter != null ? JsValue.FromObject(d.Setter) : JsValue.Undefined;
         }
         else
         {
-            o.FastAdd("value", d.Value);
-            o.FastAdd("writable", JsValue.FromBool(d.Writable));
+            slots[0] = d.Value;
+            slots[1] = JsValue.FromBool(d.Writable);
         }
-        o.FastAdd("enumerable", JsValue.FromBool(d.Enumerable));
-        o.FastAdd("configurable", JsValue.FromBool(d.Configurable));
+        slots[2] = JsValue.FromBool(d.Enumerable);
+        slots[3] = JsValue.FromBool(d.Configurable);
         return JsValue.FromObject(o);
     }
 

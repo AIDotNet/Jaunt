@@ -85,14 +85,14 @@ internal class JsObject
         var extras = Extras ??= new ObjectExtras();
         var pe = extras.PrivateElements;
         int i = 0;
-        if (pe == null) PrivateElements = pe = new PrivateElement[2];
+        if (pe == null) extras.PrivateElements = pe = new PrivateElement[2];
         else
         {
             while (i < pe.Length && pe[i].Name != null) i++;
             if (i == pe.Length)
             {
                 Array.Resize(ref pe, i * 2);
-                PrivateElements = pe;
+                extras.PrivateElements = pe;
             }
         }
         pe[i].Name = name;
@@ -383,6 +383,12 @@ internal class JsObject
 
     private bool ValidateAndApply(int i, PropFlags cf, in PropertyDescriptor desc)
     {
+        // { value } alone on a writable data property changes nothing else (Reflect.set through a receiver, for one)
+        if ((cf & (PropFlags.Accessor | PropFlags.Writable)) == PropFlags.Writable && desc.HasValue && !desc.HasWritable && !desc.HasGet && !desc.HasSet && !desc.HasEnumerable && !desc.HasConfigurable)
+        {
+            WriteSlot(i, desc.Value);
+            return true;
+        }
         bool curConfigurable = (cf & PropFlags.Configurable) != 0;
         bool curEnumerable = (cf & PropFlags.Enumerable) != 0;
         bool curAccessor = (cf & PropFlags.Accessor) != 0;

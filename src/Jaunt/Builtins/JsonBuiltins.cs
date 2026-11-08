@@ -30,7 +30,7 @@ internal static class JsonBuiltins
                 if (p.Error != null) return realm.Vm.Raise(p.ErrorValue());
                 var root = realm.NewObject();
                 root.CreateDataProperty("", pv);
-                return Internalize(realm, root, "", a[1], rec, text, new JsValue[3]);
+                return Internalize(realm, root, "", a[1], context, rec, text, new JsValue[3]);
             }
             // a syntax error is raised without a CLR throw: JSON.parse of untrusted input inside try/catch is common
             return TryParse(realm, text, 512, out var v, out var error) ? v : realm.Vm.Raise(error);
@@ -117,7 +117,7 @@ internal static class JsonBuiltins
         }
         args[0] = new JsValue(name);
         args[1] = val;
-        args[2] = JsValue.FromObject(context);
+        args[2] = context != null ? JsValue.FromObject(context) : default;
         var result = realm.Vm.Call(reviver, JsValue.FromObject(holder), args);
         args[1] = default;
         args[2] = default;
@@ -671,7 +671,7 @@ internal static class JsonBuiltins
             try
             {
                 if (PropertyList == null && ReplacerFn.IsUndefined && Gap.Length == 0 && !o.IsExotic && o.Dict == null
-                    && !o.Shape.HasIndexKeys && !o.Shape.HasSymbolKeys && !o.Shape.HasSpecialProps)
+                    && !o.Shape.HasIndexKeys && !o.Shape.HasSymbolKeys && !o.Shape.HasAccessors)
                 {
                     // plain data properties: iterate the layout directly (no key list, no lookups)
                     var shape = o.Shape;

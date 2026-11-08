@@ -37,6 +37,8 @@ internal sealed class Shape
     public readonly bool HasSymbolKeys;
     /// <summary>True when any property is an accessor or non-writable (affects set fast paths).</summary>
     public readonly bool HasSpecialProps;
+    /// <summary>True when any property is an accessor: reading all values of the layout runs no code when this is false.</summary>
+    public readonly bool HasAccessors;
 
     /// <summary>Open-addressed key table (slot + 1, 0 = empty) of a shape too large for the linear scan.</summary>
     private byte[]? _index;
@@ -60,6 +62,10 @@ internal sealed class Shape
     public static readonly Shape SharedFunctionShape = SharedFunctionRoot.AddProperty("length", PropFlags.Configurable)!.AddProperty("name", PropFlags.Configurable)!;
     /// <summary>Shared layout of iterator result objects: value, done.</summary>
     public static readonly Shape SharedIterResultShape = SharedObjectRoot.AddProperty("value", PropFlags.Default)!.AddProperty("done", PropFlags.Default)!;
+    /// <summary>Layout of the objects Object.getOwnPropertyDescriptor returns for a data property.</summary>
+    public static readonly Shape SharedDataDescriptorShape = SharedObjectRoot.AddProperty("value", PropFlags.Default)!.AddProperty("writable", PropFlags.Default)!.AddProperty("enumerable", PropFlags.Default)!.AddProperty("configurable", PropFlags.Default)!;
+    /// <summary>Layout of the objects Object.getOwnPropertyDescriptor returns for an accessor property.</summary>
+    public static readonly Shape SharedAccessorDescriptorShape = SharedObjectRoot.AddProperty("get", PropFlags.Default)!.AddProperty("set", PropFlags.Default)!.AddProperty("enumerable", PropFlags.Default)!.AddProperty("configurable", PropFlags.Default)!;
     /// <summary>
     /// Root of arguments object layouts, apart from <see cref="SharedObjectRoot"/> so that no plain object ever has a shape of
     /// one: a mapped arguments object keeps stale values in the slots of its mapped indices, which ICs must not read.
@@ -95,6 +101,7 @@ internal sealed class Shape
         HasIndexKeys = hasIndex;
         HasSymbolKeys = hasSymbol;
         HasSpecialProps = special;
+        for (int i = 0; i < count; i++) if ((flags[i] & PropFlags.Accessor) != 0) HasAccessors = true;
     }
 
     public bool IsShared => Role != ProtoRole.Explicit;
@@ -127,16 +134,27 @@ internal sealed class Shape
             {
                 if (ReferenceEquals(keys[i].Value, kv)) return i;
             }
-            if (kv is string ks)
-            {
-                for (int i = 0; i < count; i++)
-                {
-                    if (keys[i].Value is string s && s.Length == ks.Length && string.Equals(s, ks)) return i;
-                }
-            }
-            return -1;
+            return kv is string ks ? IndexOfEqualString(ks) : -1;
         }
         return IndexOfSlow(key);
+    }
+
+    /// <summary>The second step of a scan: a key that isn't the same instance as the one in the layout. Usually a miss.</summary>
+    private int IndexOfEqualString(string key)
+    {
+        var keys = Keys;
+        int count = Count, n = key.Length;
+        if (n == 0)
+        {
+            for (int i = 0; i < count; i++) if (keys[i].Value is string { Length: 0 }) return i;
+            return -1;
+        }
+        char c0 = key[0], last = key[n - 1];
+        for (int i = 0; i < count; i++)
+        {
+            if (keys[i].Value is string s && s.Length == n && s[0] == c0 && s[n - 1] == last && string.Equals(s, key)) return i;
+        }
+        return -1;
     }
 
     private int IndexOfSlow(in PropertyKey key)

@@ -157,7 +157,7 @@ internal sealed partial class Vm
     {
         if (so.GetType() != typeof(JsObject) || so.Dict != null) return false;
         var shape = so.Shape;
-        if (shape.IsUnique || shape.HasSpecialProps || shape.HasIndexKeys || shape.HasSymbolKeys) return false;
+        if (shape.IsUnique || shape.HasAccessors || shape.HasIndexKeys || shape.HasSymbolKeys) return false;
         int n = shape.Count;
         var slots = so.Slots;
         if (target.GetType() == typeof(JsObject) && target.Dict == null && target.Extensible && excluded.Length == 0)
@@ -643,7 +643,10 @@ internal sealed partial class Vm
         if (setName || kind != 2) SetFunctionName(fn, key, kind == 0 ? "get" : kind == 1 ? "set" : null, onlyIfAnonymous: kind == 2);
         if (kind == 2)
         {
-            obj.DefinePropertyOrThrow(key, PropertyDescriptor.Data(fnValue, PropFlags.Writable | PropFlags.Configurable | (enumerable ? PropFlags.Enumerable : 0)));
+            var methodFlags = PropFlags.Writable | PropFlags.Configurable | (enumerable ? PropFlags.Enumerable : 0);
+            // a method of an object literal or a class: nearly always a new key on an ordinary object
+            if (!obj.IsExotic && obj.Extensible && obj.FindOwn(key, out _) < 0 && obj.GetType() == typeof(JsObject)) obj.AddOwnProperty(key, fnValue, methodFlags);
+            else obj.DefinePropertyOrThrow(key, PropertyDescriptor.Data(fnValue, methodFlags));
             return;
         }
         var desc = new PropertyDescriptor
