@@ -28,70 +28,136 @@ internal sealed class TableCursor { public int Index; public TableEpoch Epoch = 
 /// </summary>
 internal sealed class TableEpoch { public int[]? Remap; public TableEpoch? Next; }
 
-/// <summary>Insertion-ordered hash table with live-iteration semantics (Map/Set).</summary>
+/// <summary>
+/// Insertion-ordered hash table with live-iteration semantics (Map/Set). Entries live in parallel arrays in insertion
+/// order (a deleted entry leaves a dead slot until the next compaction); a chained hash index over the slots replaces
+/// the previous <c>Dictionary&lt;JsValue, int&gt;</c>: ~40 bytes per entry instead of ~70 (fewer and smaller
+/// large-object-heap arrays for big collections), the hash is computed once per operation with number/string fast
+/// paths, and a Set stores no value array.
+/// </summary>
 internal sealed class OrderedTable
 {
     private JsValue[] _keys = new JsValue[8];
-    private JsValue[] _values = new JsValue[8];
-    private bool[] _live = new bool[8];
+    /// <summary>null for a Set: the key is the value.</summary>
+    private JsValue[]? _values;
+    /// <summary>31-bit hash of each slot's key; -1 marks a dead (deleted) slot.</summary>
+    private int[] _hashes = new int[8];
+    /// <summary>Next slot in the same bucket's chain, or -1.</summary>
+    private int[] _next = new int[8];
+    /// <summary>Slot index + 1 of the first entry in each chain (0 = empty); the length is a power of two.</summary>
+    private int[] _buckets = new int[16];
     private int _count;
     private int _liveCount;
-    private readonly Dictionary<JsValue, int> _index = new(SameValueZeroComparer.Instance);
     private TableEpoch _epoch = new();
     /// <summary>Every slot before this index is dead, so a cursor may skip straight to it.</summary>
     private int _head;
 
+    public OrderedTable(bool isSet)
+    {
+        if (!isSet) _values = new JsValue[8];
+    }
+
     public int Size => _liveCount;
     public int End => _count;
 
+    /// <summary>SameValueZero hash (31-bit): numbers by value (-0 and 0 alike, every NaN alike), strings by content
+    /// (the runtime's randomized ordinal hash, so attacker-chosen keys cannot be made to collide), objects by identity.</summary>
+    private static int HashOf(in JsValue v)
+    {
+        uint h;
+        if (v.IsNumber)
+        {
+            double d = v.Num;
+            if (d == 0) return 0;
+            if (double.IsNaN(d)) return 1;
+            long bits = BitConverter.DoubleToInt64Bits(d);
+            h = (uint)bits ^ (uint)(bits >> 32);
+        }
+        else if (v.IsString) return v.AsStringUnchecked.GetHashCode() & 0x7FFFFFFF;   // Marvin: already well mixed
+        else if (v.IsObject) h = (uint)Unsafe.As<JsObject>(v.Ref!).IdentityHash;
+        else h = (uint)SameValueZeroComparer.Instance.GetHashCode(v);
+        // the buckets are indexed by the low bits: an integer-valued double differs from its neighbours only in its
+        // high bits, so the raw bits are mixed (MurmurHash3 finalizer) before use
+        h ^= h >> 16;
+        h *= 0x85EBCA6B;
+        h ^= h >> 13;
+        h *= 0xC2B2AE35;
+        h ^= h >> 16;
+        return (int)(h & 0x7FFFFFFF);
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static bool KeyEquals(in JsValue a, in JsValue b)
+    {
+        if (a.IsNumber) return b.IsNumber && (a.Num == b.Num || (double.IsNaN(a.Num) && double.IsNaN(b.Num)));
+        if (a.IsString) return b.IsString && a.StringLength == b.StringLength && string.Equals(a.AsStringUnchecked, b.AsStringUnchecked);
+        if (a.IsObject) return ReferenceEquals(a.Ref, b.Ref);
+        return Operations.SameValueZero(a, b);
+    }
+
+    private int Find(in JsValue key, int h)
+    {
+        var buckets = _buckets;
+        var hashes = _hashes;
+        var keys = _keys;
+        for (int i = buckets[h & (buckets.Length - 1)] - 1; i >= 0; i = _next[i])
+            if (hashes[i] == h && KeyEquals(keys[i], key)) return i;
+        return -1;
+    }
+
     public bool TryGet(in JsValue key, out JsValue value)
     {
-        if (_index.TryGetValue(key, out int i)) { value = _values[i]; return true; }
+        int i = Find(key, HashOf(key));
+        if (i >= 0) { value = _values == null ? _keys[i] : _values[i]; return true; }
         value = default;
         return false;
     }
 
-    public bool Has(in JsValue key) => _index.ContainsKey(key);
+    public bool Has(in JsValue key) => Find(key, HashOf(key)) >= 0;
 
     public void Set(Realm realm, JsValue key, JsValue value)
     {
         if (key.IsNumber && key.Num == 0) key = JsValue.Zero; // normalize -0
-        if (_index.TryGetValue(key, out int i)) { _values[i] = value; return; }
-        if (_count == _keys.Length)
-        {
-            if (_liveCount < _count / 2) Compact();
-            if (_count == _keys.Length)
-            {
-                int n = _keys.Length * 2;
-                Array.Resize(ref _keys, n);
-                Array.Resize(ref _values, n);
-                Array.Resize(ref _live, n);
-            }
-        }
+        int h = HashOf(key);
+        int i = Find(key, h);
+        if (i >= 0) { if (_values != null) _values[i] = value; return; }
+        if (_count == _keys.Length) Grow();
         realm.ChargeBytes(64);
-        _keys[_count] = key;
-        _values[_count] = value;
-        _live[_count] = true;
-        _index[key] = _count;
-        _count++;
+        i = _count++;
+        _keys[i] = key;
+        if (_values != null) _values[i] = value;
+        _hashes[i] = h;
+        int b = h & (_buckets.Length - 1);
+        _next[i] = _buckets[b] - 1;
+        _buckets[b] = i + 1;
         _liveCount++;
     }
 
     public bool Delete(in JsValue key)
     {
-        if (!_index.Remove(key, out int i)) return false;
-        _live[i] = false;
-        _keys[i] = default;
-        _values[i] = default;
-        _liveCount--;
-        if (i == _head) { while (_head < _count && !_live[_head]) _head++; }
-        return true;
+        int h = HashOf(key);
+        int b = h & (_buckets.Length - 1);
+        int prev = -1;
+        for (int i = _buckets[b] - 1; i >= 0; prev = i, i = _next[i])
+        {
+            if (_hashes[i] != h || !KeyEquals(_keys[i], key)) continue;
+            if (prev < 0) _buckets[b] = _next[i] + 1;
+            else _next[prev] = _next[i];
+            _hashes[i] = -1;
+            _keys[i] = default;
+            if (_values != null) _values[i] = default;
+            _liveCount--;
+            if (i == _head) { while (_head < _count && _hashes[_head] < 0) _head++; }
+            return true;
+        }
+        return false;
     }
 
     public void Clear()
     {
-        for (int i = 0; i < _count; i++) { _live[i] = false; _keys[i] = default; _values[i] = default; }
-        _index.Clear();
+        for (int i = 0; i < _count; i++) { _hashes[i] = -1; _keys[i] = default; }
+        if (_values != null) Array.Clear(_values, 0, _count);
+        Array.Clear(_buckets);
         _liveCount = 0;
         _head = _count;
     }
@@ -111,11 +177,39 @@ internal sealed class OrderedTable
         while (c.Index < _count)
         {
             int i = c.Index++;
-            if (_live[i]) { key = _keys[i]; value = _values[i]; return true; }
+            if (_hashes[i] >= 0) { key = _keys[i]; value = _values == null ? key : _values[i]; return true; }
         }
         key = default;
         value = default;
         return false;
+    }
+
+    /// <summary>Makes room for one more slot: compacts when at least half the slots are dead, otherwise doubles.</summary>
+    private void Grow()
+    {
+        if (_liveCount < _count / 2) { Compact(); return; }
+        int n = _keys.Length * 2;
+        Array.Resize(ref _keys, n);
+        if (_values != null) Array.Resize(ref _values, n);
+        Array.Resize(ref _hashes, n);
+        Array.Resize(ref _next, n);
+        RebuildIndex(n * 2);
+    }
+
+    private void RebuildIndex(int bucketCount)
+    {
+        var buckets = _buckets.Length == bucketCount ? _buckets : new int[bucketCount];
+        if (ReferenceEquals(buckets, _buckets)) Array.Clear(buckets);
+        int mask = bucketCount - 1;
+        for (int i = 0; i < _count; i++)
+        {
+            int h = _hashes[i];
+            if (h < 0) continue;
+            int b = h & mask;
+            _next[i] = buckets[b] - 1;
+            buckets[b] = i + 1;
+        }
+        _buckets = buckets;
     }
 
     private void Compact()
@@ -125,18 +219,18 @@ internal sealed class OrderedTable
         for (int r = 0; r < _count; r++)
         {
             remap[r] = w;
-            if (!_live[r]) continue;
+            if (_hashes[r] < 0) continue;
             _keys[w] = _keys[r];
-            _values[w] = _values[r];
-            _live[w] = true;
+            if (_values != null) _values[w] = _values[r];
+            _hashes[w] = _hashes[r];
             w++;
         }
         remap[_count] = w;
-        for (int i = w; i < _count; i++) { _keys[i] = default; _values[i] = default; _live[i] = false; }
+        for (int i = w; i < _count; i++) { _keys[i] = default; _hashes[i] = -1; }
+        if (_values != null) Array.Clear(_values, w, _count - w);
         _count = w;
         _head = 0;
-        _index.Clear();
-        for (int i = 0; i < _count; i++) _index[_keys[i]] = i;
+        RebuildIndex(_buckets.Length);
         var next = new TableEpoch();
         _epoch.Remap = remap;
         _epoch.Next = next;
@@ -146,9 +240,9 @@ internal sealed class OrderedTable
 
 internal sealed class JsMap : JsObject
 {
-    public readonly OrderedTable Table = new();
+    public readonly OrderedTable Table;
     public readonly bool IsSet;
-    public JsMap(Realm realm, JsObject proto, bool isSet) : base(realm, proto) => IsSet = isSet;
+    public JsMap(Realm realm, JsObject proto, bool isSet) : base(realm, proto) { IsSet = isSet; Table = new OrderedTable(isSet); }
     public override string ClassName => IsSet ? "Set" : "Map";
 }
 

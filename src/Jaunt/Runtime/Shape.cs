@@ -56,6 +56,8 @@ internal sealed class Shape
     public static readonly Shape SharedFunctionShape = SharedFunctionRoot.AddProperty("length", PropFlags.Configurable)!.AddProperty("name", PropFlags.Configurable)!;
     /// <summary>Shared layout of iterator result objects: value, done.</summary>
     public static readonly Shape SharedIterResultShape = SharedObjectRoot.AddProperty("value", PropFlags.Default)!.AddProperty("done", PropFlags.Default)!;
+    /// <summary>Shared layout of a JSON.parse reviver's context object for a primitive value: source.</summary>
+    public static readonly Shape SharedJsonContextShape = SharedObjectRoot.AddProperty("source", PropFlags.Default)!;
 
     private Shape(JsObject? proto, ProtoRole role)
     {

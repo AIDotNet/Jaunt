@@ -66,6 +66,7 @@ internal static class Intrinsics
         r.ObjectPrototype.IsPrototypeObject = true;
         r.ObjectRootShape = Shape.SharedObjectRoot;
         r.IterResultShape = Shape.SharedIterResultShape;
+        r.JsonContextShape = Shape.SharedJsonContextShape;
         r.FunctionPrototype = new JsBuiltin(r, "", 0, static (in NativeArgs a) => JsValue.Undefined, proto: r.ObjectPrototype);
         r.FunctionPrototype.IsPrototypeObject = true;
 

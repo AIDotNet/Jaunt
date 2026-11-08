@@ -152,6 +152,7 @@ internal sealed partial class Realm
 
     public Shape ObjectRootShape = null!;
     public Shape IterResultShape = null!;
+    public Shape JsonContextShape = null!;
     /// <summary>GlobalSymbolRegistry: agent-wide, so shared with every realm created on the same Vm.</summary>
     public readonly Dictionary<string, JsSymbol> SymbolRegistry;
 

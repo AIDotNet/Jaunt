@@ -1,6 +1,6 @@
 # 性能优化设计：基于 2026-11-07 Jaunt / MoeJS / Jint 对比
 
-> 状态：阶段 A 与阶段 B 中的 K1/K3/T1/O1/C2 已于 2026-11-07 实施并验证（见 §8）；第二轮的访问器/不存在/megamorphic IC、字符串 for-of、JsRegExp 精简见 §9；第三轮的调用路径（C3 评估为无独立价值、C5 评估为不做、新增重叠寄存器窗口）见 §10。未做：K2、A4、A5、D2/D3、4.7 文档。下文的方案与估计保留为设计记录。所有数字来自本机实测（Apple M4，10 核，macOS 26；.NET SDK 10.0.401，Workstation 并发 GC；Go 1.27.3；MoeJS v0.1.0-alpha.11；Jint 4.17.0），只用于排序优先级与设定验收口径，不是对外承诺。标注“估计”的数字未经测量。
+> 状态：阶段 A 与阶段 B 中的 K1/K3/T1/O1/C2 已于 2026-11-07 实施并验证（见 §8）；第二轮的访问器/不存在/megamorphic IC、字符串 for-of、JsRegExp 精简见 §9；第三轮的调用路径（C3 评估为无独立价值、C5 评估为不做、新增重叠寄存器窗口）见 §10；第四轮的 Map/Set 表、A4（reviver 路径）、A5、字符串拼整数与 4.7 GC 指引见 §11。未做：K2、D2/D3。下文的方案与估计保留为设计记录。所有数字来自本机实测（Apple M4，10 核，macOS 26；.NET SDK 10.0.401，Workstation 并发 GC；Go 1.27.3；MoeJS v0.1.0-alpha.11；Jint 4.17.0），只用于排序优先级与设定验收口径，不是对外承诺。标注“估计”的数字未经测量。
 > 方法与规则沿用 [04-performance.md](04-performance.md)（公平比较、回归门槛）与 [02-architecture.md](02-architecture.md)（所有快路径必须有 guard 与等价慢路径；不运行时发 IL；不把引用藏进数值；无界缓存禁止）。
 
 ## 1. 现状与目标
@@ -309,3 +309,31 @@ METRIC=cpu python3 bench/cross/report.py ...            # 以 CPU 时间交叉�
 | `new` 也用重叠窗口 | 2862 (−18%) | 1704 (−21%) | ~2850 (−4%) | 9977 (−30%) | 4990 (−6.5%) |
 
 `PushCallFrame` 的 Tier1 快路径从约 140 条指令降到 116 条且不再含参数拷贝；每次 JS→JS 调用约 21.7 → 17 ns（fib 口径），进入 §1 目标 2 的区间（MoeJS 16–19 ns）。剩余成本：方法 prologue/epilogue（10 个被调用者保存寄存器，约 24 条）、返回值写入的写屏障、`_ticks` 预算计数。
+
+## 11. 第四轮实施记录：A4/A5、Map 字符串键、GC 指引（2026-11-08，9782dce 之后）
+
+先用 `dotnet-trace` 对 map-set、json-roundtrip、higher-order 和一个字符串键 Map 微基准采样，再按证据改。采样的第一个结论是这四个负载的瓶颈不在设计稿假设的位置：**GC 暂停占墙钟 20–26%**（`--run-loop` 的 pause 计数：map-set 2.06 s / 8 s，json-roundtrip 2.10 s，higher-order 1.57 s），每次运行都触发 gen2——8000 项的 Map/Set 和 10000 项数组的倍增链都是 ≥85 KB 的大对象堆分配，LOH 预算一满就是一次 gen2。
+
+**Map/Set（`OrderedTable`）**：`Dictionary<JsValue,int>` 索引换成内联的链式哈希索引（`_hashes`/`_next`/`_buckets` 三个 int 数组），哈希只算一次，数字/字符串/对象各有快路径，Set 不再存值数组；每项约 70 → 40 字节，大集合的 LOH 数组更少更小。第一版数字键退化 6.6 倍：`double.GetHashCode()` 对整数值只在高位不同，按低位取桶全部撞链，而 `Dictionary` 的素数取模掩盖了这一点——现在数字和对象标识哈希过一遍 MurmurHash3 finalizer，字符串仍用运行时随机化的 Marvin 哈希（攻击者选的键无法制造碰撞）。map-str 微基准 4382 → 2777 µs（−37%，含下面的拼接优化），map-num 持平（3350 µs：每次 `has`/`get` 约 20 ns，瓶颈是 CallMethod + 内建调用而不是查表），map-set −6%。
+
+**A4（JSON）**：采样显示 json-roundtrip 的大头不是 stringify（14%）而是带 reviver 的 `JSON.parse`（`Internalize` 56%）：每个属性新建一个 context 对象并走 shape 转换、每个对象 `OwnPropertyKeys` 列表 + 逐键 `GetOwnProperty`、每次调用新建参数数组，以及 source-text-access 记录对每个对象建一个 `Dictionary`。现在 context 用共享的单槽 shape（`Shape.SharedJsonContextShape`），shape 模式对象直接遍历布局取键，参数数组复用，记录的条目改为按解析顺序的列表并用游标匹配（键重复时才退回扫描；是否重复由解析完的属性数与条目数之差判定）。json-roundtrip 9619 → 8063 µs（−16%）。设计稿里的输出分块写入没有做：序列化器已有线程缓存的 `StringBuilder`，采样里 `Quote`/`Append` 合计不到 5%。
+
+**A5（结果数组）**：filter/flat/flatMap 的结果不再从空数组倍增，而是收集进 Vm 的 scratch 缓冲（与排序共用 `TakeScratch`），结束时一次分配精确大小的元素数组：倍增链约分配最终大小的两倍，大结果的每一段都是 LOH；只在 `ArraySpeciesCreate` 走内建 Array 路径时启用（用户 species 构造的结果可能被用户持有，必须边产生边写入）。higher-order 10388 → 9622 µs（−7%）。
+
+**字符串 + 整数**：`'k' + i` 之前先把整数格式化成一个字符串再拼接；现在 `Operations.Add` 对平坦字符串与 32 位整数直接按最终长度一次分配、原地写入数字（`-0` 仍打印 "0"，超出 int 或非整数走原路径）。
+
+**GC 指引（4.7，宿主级，不是引擎默认）**：同一台机器、同一构建，`--run-loop` 8 s：
+
+| 配置 | map-set | json-roundtrip | higher-order |
+|---|---:|---:|---:|
+| 默认（Workstation 并发 GC） | 3261 µs，pause 1943 ms | 8282 µs，pause 1997 ms | 9449 µs，pause 1526 ms |
+| `DOTNET_GCgen0size=0x4000000`（64 MB） | 2441（−25%） | 7153（−14%） | 11012（+17%） |
+| `DOTNET_gcConcurrent=0` | 2530（−22%） | 7275（−12%） | 8904（−6%） |
+| 两者 | 2510（−23%） | 7275（−12%） | 9112（−4%） |
+| `DOTNET_GCLOHThreshold=0x100000`（1 MB） | 2496（−23%，gen2 491 → 1） | 7880（−5%） | 9175（−3%，gen2 507 → 0） |
+
+结论：分配密集的宿主可以考虑提高 LOH 阈值到 1 MB（几乎消灭 gen2，对其它负载没有副作用）或关闭并发 GC；增大 gen0 对对象多但存活短的负载有利、对 higher-order 这类反而更慢，不能一概而论。`bench/cross` 继续用默认配置，报告里披露。
+
+三引擎对比（两轮取优，MoeJS ×1.001）：state-reducer −19%、map-set −19%、json-roundtrip −18%、concat-build −7%、dynamic-props −7%；**MoeJS/Jaunt 几何均值 1.028 → 1.049**，最快项数 Jaunt 31 / MoeJS 26 / Jint 2。higher-order 在对比里显示 +8%，但它是 GC 主导的负载，同一构建连续两次 `--run-loop` 相差 30%；交替运行各三次的受控 A/B 为带 scratch 收集 9.8–10.0 ms、不带 10.6–11.0 ms（−7%），以 A/B 为准。
+
+验证：单测 578/578（两种模式）与 17 个新对照用例（Map 表的迭代中删除/插入、压缩、-0/NaN、绳子键、clear、两万项表；reviver 的重复键、`context.source`、holder 变更、索引键顺序、嵌套数组；字符串拼接边界；结果收集的 species、重入、抛错、大结果）、test262 100,167/100,169（两种模式）。

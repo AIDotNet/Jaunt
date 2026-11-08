@@ -319,9 +319,13 @@ internal sealed partial class Vm
 
     /// <summary>
     /// Debug aid: fill the registers a call does not initialize with a recognizable string, so that a bytecode read of
-    /// an uninitialized register shows up in test results (JAUNT_POISON_REGISTERS=1).
+    /// an uninitialized register shows up in test results (JAUNT_POISON_REGISTERS=1). Read once per process into
+    /// <see cref="RegisterPoison"/>, then copied into this instance field: the check runs on every pushed frame, and an
+    /// instance field is a plain load, whereas a static of a class whose static constructor reads the environment
+    /// cannot be pre-initialized by the NativeAOT compiler and costs a class-initialization check per read there (the JIT
+    /// folds the static to a constant, so CoreCLR never paid for it).
     /// </summary>
-    internal static readonly bool PoisonRegisters = Environment.GetEnvironmentVariable("JAUNT_POISON_REGISTERS") == "1";
+    private readonly bool _poisonRegisters = RegisterPoison.Enabled;
     private static readonly JsValue s_poison = new("<<uninitialized register>>");
 
     /// <summary>
@@ -437,10 +441,10 @@ internal sealed partial class Vm
             else args.Slice(0, n).CopyTo(regs.AsSpan(b, n));
             // Registers are not cleared when a frame is popped (the pooled stack is cleared when the root execution
             // ends); the callee's function-scope bindings and missing parameters must start as undefined, every other
-            // register is written before it is read (see FunctionTemplate.InitUndefEnd; PoisonRegisters checks it).
+            // register is written before it is read (see FunctionTemplate.InitUndefEnd; _poisonRegisters checks it).
             int initEnd = t.InitUndefEnd < 0 ? t.RegisterCount : t.InitUndefEnd;
             for (int i = n; i < initEnd; i++) regs[b + i] = default;
-            if (PoisonRegisters) for (int i = initEnd; i < t.RegisterCount; i++) regs[b + i] = s_poison;
+            if (_poisonRegisters) for (int i = initEnd; i < t.RegisterCount; i++) regs[b + i] = s_poison;
         }
         if ((t.Flags & FunctionFlags.NeedsArgsArray) != 0) f.Args = args.ToArray();   // otherwise still null from PopFrame
         SetupFrame(f, c, thisValue, newTarget, flags);
@@ -451,7 +455,7 @@ internal sealed partial class Vm
     /// <see cref="PushFrame"/> for the interpreter's Call/CallMethod. The callee's register window starts at the caller's
     /// first argument register, so the arguments are already in place and nothing is copied: the compiler evaluates a
     /// call's arguments into the topmost registers that are live at the call (<c>CodeGen.Arguments</c>), so the callee
-    /// may clobber every caller register from <paramref name="argStart"/> up (<see cref="PoisonRegisters"/> checks that the
+    /// may clobber every caller register from <paramref name="argStart"/> up (<see cref="_poisonRegisters"/> checks that the
     /// caller never reads them again). The window does not overlap when the caller's registers are not the shared stack
     /// (a coroutine frame owns its registers) or the callee does not fit in the chunk: those calls copy as PushFrame does.
     /// </summary>
@@ -510,7 +514,7 @@ internal sealed partial class Vm
         if ((t.Flags & FunctionFlags.NeedsArgsArray) != 0) f.Args = new ReadOnlySpan<JsValue>(callerRegs, argStart, argc).ToArray();
         int initEnd = t.InitUndefEnd < 0 ? count : t.InitUndefEnd;
         for (int i = n; i < initEnd; i++) regs[b + i] = default;
-        if (PoisonRegisters) for (int i = initEnd; i < count; i++) regs[b + i] = s_poison;
+        if (_poisonRegisters) for (int i = initEnd; i < count; i++) regs[b + i] = s_poison;
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -655,7 +659,7 @@ internal sealed partial class Vm
             int ci = f.SavedChunkIndex;
             if (_chunkIndex != ci) { _chunkIndex = ci; _chunk = _chunks[ci]; }
             _top = f.SavedTop;
-            if (PoisonRegisters) PoisonReleasedWindow(f);
+            if (_poisonRegisters) PoisonReleasedWindow(f);
             f.Args = null;
             f.NewTarget = default;
         }
@@ -664,7 +668,7 @@ internal sealed partial class Vm
     }
 
     /// <summary>
-    /// Debug aid (see <see cref="PoisonRegisters"/>): after a call whose window overlapped the caller's registers, the
+    /// Debug aid (see <see cref="_poisonRegisters"/>): after a call whose window overlapped the caller's registers, the
     /// caller's registers from the first argument up are poisoned. The compiler guarantees they are dead at the call;
     /// a read of one afterwards is a codegen bug that this makes visible in test results.
     /// </summary>
@@ -798,8 +802,8 @@ internal sealed partial class Vm
 
     private JsValue[]? _sortScratch;
 
-    /// <summary>A merge buffer of at least <paramref name="n"/> elements; taken out of the Vm while in use (re-entrant sorts allocate their own).</summary>
-    internal JsValue[] TakeSortScratch(int n)
+    /// <summary>A scratch buffer of at least <paramref name="n"/> elements (sort merges, result-array collection); taken out of the Vm while in use, so a re-entrant use allocates its own.</summary>
+    internal JsValue[] TakeScratch(int n)
     {
         var s = _sortScratch;
         _sortScratch = null;
@@ -808,7 +812,7 @@ internal sealed partial class Vm
     }
 
     /// <summary>Returns the buffer cleared of references; buffers over 64K elements (1 MB) are not retained.</summary>
-    internal void ReturnSortScratch(JsValue[] s, int used)
+    internal void ReturnScratch(JsValue[] s, int used)
     {
         Array.Clear(s, 0, used);
         if (s.Length <= 1 << 16) _sortScratch = s;
@@ -981,4 +985,10 @@ internal sealed partial class Vm
     {
         if (_chunks.Count > 4) _chunks.RemoveRange(4, _chunks.Count - 4);
     }
+}
+
+/// <summary>Process-wide switch for <c>JAUNT_POISON_REGISTERS=1</c>; kept out of <see cref="Vm"/> so that class has no environment-dependent static initializer.</summary>
+internal static class RegisterPoison
+{
+    internal static readonly bool Enabled = Environment.GetEnvironmentVariable("JAUNT_POISON_REGISTERS") == "1";
 }
