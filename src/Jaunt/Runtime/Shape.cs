@@ -43,10 +43,13 @@ internal sealed class Shape
     private Shape? _t1;
     private Dictionary<(PropertyKey, PropFlags), Shape>? _transitions;
     private object? _lock;
+    private Shape? _sealed, _frozen;
 
     public const int MaxShapeProperties = 64;
     private const int LinearLimit = 8;
-    private const int MaxTransitionsPerSharedShape = 128;
+    /// <summary>Above this size an attribute change, which copies the flags, sends the object to dictionary mode instead.</summary>
+    private const int MaxFlagChangeProperties = 32;
+    internal const int MaxTransitionsPerSharedShape = 128;
     private const int MaxSharedShapes = 200_000;
     private static int s_sharedShapes;
 
@@ -175,13 +178,103 @@ internal sealed class Shape
             }
             if (table != null && table.Count >= MaxTransitionsPerSharedShape) return shape;
             var copy = table == null
-                ? new Dictionary<(PropertyKey, PropFlags), Shape>()
-                : new Dictionary<(PropertyKey, PropFlags), Shape>(table);
+                ? new Dictionary<(PropertyKey, PropFlags), Shape>(TransitionComparer.Instance)
+                : new Dictionary<(PropertyKey, PropFlags), Shape>(table, TransitionComparer.Instance);
             copy[(key, flags)] = shape;
             Interlocked.Increment(ref s_sharedShapes);
             Volatile.Write(ref _transitions, copy);
             return shape;
         }
+    }
+
+    /// <summary>
+    /// Returns the shape with the attributes of the property in slot <paramref name="idx"/> changed (slots keep their place),
+    /// or null when the object should go to dictionary mode. Cached in the transition table, where it can't be mistaken for
+    /// an appended property: nothing appends a key the shape already has.
+    /// </summary>
+    public Shape? WithFlags(int idx, PropFlags flags)
+    {
+        if (IsUnique || Count > MaxFlagChangeProperties) return null;
+        var key = Keys[idx];
+        if (!IsShared)
+        {
+            if (_transitions != null && _transitions.TryGetValue((key, flags), out var existing)) return existing;
+            var shape = ChangeFlags(idx, flags);
+            (_transitions ??= new Dictionary<(PropertyKey, PropFlags), Shape>())[(key, flags)] = shape;
+            return shape;
+        }
+        var table = Volatile.Read(ref _transitions);
+        if (table != null && table.TryGetValue((key, flags), out var found)) return found;
+        bool cacheable = key.Value is string || IsWellKnownSymbol(key.Value);
+        if (!cacheable || Volatile.Read(ref s_sharedShapes) >= MaxSharedShapes) return ChangeFlags(idx, flags);
+        lock (_lock ?? Interlocked.CompareExchange(ref _lock, new object(), null) ?? _lock)
+        {
+            table = _transitions;
+            if (table != null && table.TryGetValue((key, flags), out var existing)) return existing;
+            var shape = ChangeFlags(idx, flags);
+            if (table != null && table.Count >= MaxTransitionsPerSharedShape) return shape;
+            var copy = table == null
+                ? new Dictionary<(PropertyKey, PropFlags), Shape>(TransitionComparer.Instance)
+                : new Dictionary<(PropertyKey, PropFlags), Shape>(table, TransitionComparer.Instance);
+            copy[(key, flags)] = shape;
+            Interlocked.Increment(ref s_sharedShapes);
+            Volatile.Write(ref _transitions, copy);
+            return shape;
+        }
+    }
+
+    private Shape ChangeFlags(int idx, PropFlags flags)
+    {
+        var fl = (PropFlags[])Flags.Clone();
+        fl[idx] = flags;
+        return WithAllFlags(fl);
+    }
+
+    private Shape WithAllFlags(PropFlags[] flags)
+    {
+        bool special = false;
+        foreach (var f in flags) if ((f & (PropFlags.Accessor | PropFlags.Writable)) != PropFlags.Writable) special = true;
+        return new Shape(Prototype, Role, Count, Keys, flags, false, HasIndexKeys, HasSymbolKeys, special) { _index = Volatile.Read(ref _index) };
+    }
+
+    /// <summary>The shape with every property non-configurable, and when <paramref name="frozen"/> every data property read-only as well; null for a unique shape.</summary>
+    public Shape? WithIntegrity(bool frozen)
+    {
+        if (IsUnique) return null;
+        ref Shape? cache = ref frozen ? ref _frozen : ref _sealed;
+        var shape = Volatile.Read(ref cache);
+        if (shape != null) return shape;
+        var fl = new PropFlags[Count];
+        bool changed = false;
+        for (int i = 0; i < fl.Length; i++)
+        {
+            var f = Flags[i] & ~PropFlags.Configurable;
+            if (frozen && (f & PropFlags.Accessor) == 0) f &= ~PropFlags.Writable;
+            fl[i] = f;
+            if (f != Flags[i]) changed = true;
+        }
+        if (!changed) shape = this;
+        else
+        {
+            shape = WithAllFlags(fl);
+            if (IsShared)
+            {
+                if (Volatile.Read(ref s_sharedShapes) >= MaxSharedShapes) return shape;
+                Interlocked.Increment(ref s_sharedShapes);
+            }
+        }
+        return Interlocked.CompareExchange(ref cache, shape, null) ?? shape;
+    }
+
+    /// <summary>Whether every property is non-configurable, and when <paramref name="frozen"/> every data property read-only as well.</summary>
+    public bool HasIntegrity(bool frozen)
+    {
+        foreach (var f in Flags)
+        {
+            if ((f & PropFlags.Configurable) != 0) return false;
+            if (frozen && (f & (PropFlags.Accessor | PropFlags.Writable)) == PropFlags.Writable) return false;
+        }
+        return true;
     }
 
     private static bool IsWellKnownSymbol(object k) =>

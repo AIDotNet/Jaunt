@@ -359,6 +359,11 @@ internal static class ObjectBuiltins
 
     public static bool SetIntegrityLevel(Realm realm, JsObject o, bool frozen)
     {
+        if (o.GetType() == typeof(JsObject) && o.Dict == null && o.Shape.WithIntegrity(frozen) is { } shape)
+        {
+            o.Shape = shape;
+            return o.PreventExtensions();   // an object used as a prototype invalidates the prototype ICs here
+        }
         if (!o.PreventExtensions()) return false;
         var keys = new List<PropertyKey>();
         o.OwnPropertyKeys(keys);
@@ -382,6 +387,7 @@ internal static class ObjectBuiltins
     public static bool TestIntegrityLevel(JsObject o, bool frozen)
     {
         if (o.IsExtensibleCheck()) return false;
+        if (o.GetType() == typeof(JsObject) && o.Dict == null) return o.Shape.HasIntegrity(frozen);
         var keys = new List<PropertyKey>();
         o.OwnPropertyKeys(keys);
         foreach (var k in keys)

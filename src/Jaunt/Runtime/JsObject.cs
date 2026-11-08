@@ -234,6 +234,13 @@ internal class JsObject
         if (Dict == null)
         {
             if (Shape.Flags[idx] == flags) return;
+            var next = Shape.WithFlags(idx, flags);
+            if (next != null)
+            {
+                Shape = next;
+                if (IsPrototypeObject) Realm.ProtoEpoch++;
+                return;
+            }
             ConvertToDictionary();
         }
         Dict!.Flags[idx] = flags;
