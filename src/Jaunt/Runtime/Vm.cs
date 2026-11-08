@@ -36,10 +36,9 @@ internal readonly struct StackFrameRecord
 /// <summary>Activation record of a bytecode function. Frames are pooled except for coroutines.</summary>
 internal sealed class Frame
 {
-    public FunctionTemplate T = null!;
-    public int[] Code = null!;
-    /// <summary><c>T.Constants</c>, at hand so a call or return reloads the interpreter's constant pool with one load.</summary>
-    public JsValue[] K = null!;
+    public FunctionTemplate T => Feedback.Template;
+    public int[] Code => Feedback.Code;
+    public JsValue[] K => Feedback.Constants;
     public JsValue[] Regs = null!;
     public int Base;
     public int Pc;
@@ -50,6 +49,10 @@ internal sealed class Frame
     /// <summary>Shared this-binding of a derived constructor once it created arrow functions (or of such an arrow).</summary>
     public ThisBox? ThisBox;
     public JsClosure Callee = null!;
+    /// <summary>
+    /// The inline caches of the running function, and through them its template, code and constants: one reference store when a
+    /// pooled frame changes function (each costs a GC write barrier), where separate fields would take four.
+    /// </summary>
     public Feedback Feedback = null!;
     public JsValue[]? Args;
     /// <summary>
@@ -653,10 +656,8 @@ internal sealed partial class Vm
         if (!ReferenceEquals(f.Callee, c))
         {
             f.Callee = c;
-            f.T = t;
-            f.Code = t.Code;
-            f.K = t.Constants;
-            f.Feedback = c.Feedback;
+            var fb = c.Feedback;
+            if (!ReferenceEquals(f.Feedback, fb)) f.Feedback = fb;
         }
         f.Pc = 0;
         // compared even for the same callee: a frame that left through a throw or a return from inside a block keeps
@@ -707,10 +708,8 @@ internal sealed partial class Vm
         if (!ReferenceEquals(f.Callee, c))
         {
             f.Callee = c;
-            f.T = t;
-            f.Code = t.Code;
-            f.K = t.Constants;
-            f.Feedback = c.Feedback;
+            var fb = c.Feedback;
+            if (!ReferenceEquals(f.Feedback, fb)) f.Feedback = fb;
         }
         f.Pc = 0;
         var env = c.Env;
@@ -822,9 +821,6 @@ internal sealed partial class Vm
             var f = pool[i];
             if (f == null) break;
             f.Callee = null!;
-            f.T = null!;
-            f.Code = null!;
-            f.K = null!;
             f.Feedback = null!;
             f.Env = null;
             f.ThisBox = null;
@@ -994,6 +990,7 @@ internal sealed partial class Vm
 
     internal JsClosure CreateClosure(FunctionTemplate t, Env? env, Feedback fb, Frame? creator, JsObject? protoOverride = null)
     {
+        System.Diagnostics.Debug.Assert(ReferenceEquals(fb.Template, t));   // a frame finds its code and constants through the feedback
         var realm = Realm;
         JsObject fproto = protoOverride ?? (t.IsGenerator ? (t.IsAsync ? realm.AsyncGeneratorFunctionPrototype : realm.GeneratorFunctionPrototype) : t.IsAsync ? realm.AsyncFunctionPrototype : realm.FunctionPrototype);
         var c = new JsClosure(realm, t, env, fb, fproto);

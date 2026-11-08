@@ -114,12 +114,17 @@ internal sealed class Feedback
     public readonly IcEntry[] Ics;
     private Feedback?[]? _children;
     public readonly FunctionTemplate Template;
+    /// <summary><c>Template.Code</c> and <c>Template.Constants</c>, one load from the frame (see <see cref="Frame.Feedback"/>).</summary>
+    public readonly int[] Code;
+    public readonly JsValue[] Constants;
     /// <summary>For a constructor: the slot count to give new instances, learned from those constructed so far (at most <see cref="Vm.MaxInstanceSlots"/>).</summary>
     public int InstanceSlots;
 
     public Feedback(FunctionTemplate t)
     {
         Template = t;
+        Code = t.Code;
+        Constants = t.Constants;
         Ics = t.IcCount == 0 ? Array.Empty<IcEntry>() : new IcEntry[t.IcCount];
     }
 

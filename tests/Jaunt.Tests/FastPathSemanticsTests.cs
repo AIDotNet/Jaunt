@@ -780,4 +780,43 @@ JSON.stringify(out, (k, v) => typeof v === 'symbol' ? 'sym' : v);
             Assert.True(p.Value.ToString() == g.ToString(), $"{p.Name}: expected {p.Value} got {g}");
         }
     }
+
+    // A pooled frame reused by another function at the same depth. Expected values were produced by Node from the same script.
+    private const string FrameReuseScript = """
+const out = {};
+// one depth, different functions: each must see its own code, constants and inline caches
+const a = o => 'a:' + o.x, b = o => 'b:' + o.y, c = function (o) { return 'c:' + (o.x + o.y); };
+out.alternate = (() => { const r = []; const fs = [a, b, c, a, a, c, b]; for (const f of fs) r.push(f({ x: 1, y: 2 })); return r; })();
+// one template, different closures: same code, different environments
+const mk = k => n => n + k;
+out.sameTemplate = (() => { const fs = [mk(1), mk(10), mk(100)]; const r = []; for (let i = 0; i < 7; i++) r.push(fs[i % 3](i)); return r; })();
+// inline caches are per function: a shape seen in one must not answer in the other
+out.ics = (() => { const g1 = o => o.v, g2 = o => o.v; const p = { v: 1 }, q = { w: 0, v: 2 }; const r = []; for (let i = 0; i < 4; i++) { r.push(g1(p)); r.push(g2(q)); } r.push(g1(q), g2(p)); return r; })();
+// frames left by a throw, a generator, an async function, eval and new Function, then the depth used again
+out.afterThrow = (() => { const t = () => { throw new RangeError('x'); }; const s = () => 'ok'; const r = []; for (let i = 0; i < 3; i++) { try { r.push(t()); } catch (e) { r.push(e.message); } r.push(s()); } return r; })();
+out.generators = (() => { function* g1() { const v = yield 'p'; yield 'q' + v; } function* g2() { yield 'r'; yield 's'; } const x = g1(), y = g2(); return [x.next().value, y.next().value, x.next(1).value, y.next().value, x.next().done, y.next().done]; })();
+out.evalAndFunction = (() => { const f = new Function('a', 'return "nf" + a'); const r = []; for (let i = 0; i < 3; i++) { r.push(f(i)); r.push(eval('"ev" + i')); r.push(a({ x: i })); } return r; })();
+out.classes = (() => { class A { constructor() { this.k = 'A'; } m() { return 'mA' + this.k; } } class B extends A { constructor() { super(); this.k += 'B'; } m() { return 'mB' + super.m(); } } return [new A().m(), new B().m(), new A().m()]; })();
+out.accessors = (() => { const o = { get g() { return 'gv'; }, set g(v) { this._ = 'sv' + v; } }; o.g = 1; return [o.g, o._, [1, 2].map(x => x + 1), [3, 1, 2].sort((p, q) => q - p)]; })();
+out.errorKinds = (() => { const r = []; const f1 = () => null.p, f2 = () => undefined(), f3 = () => zz; for (const f of [f1, f2, f3, f1]) { try { f(); } catch (e) { r.push(e.constructor.name); } } return r; })();
+out.recursionMix = (() => { const even = n => n === 0 ? 'even' : odd(n - 1); const odd = n => n === 0 ? 'odd' : even(n - 1); return [even(10), even(7), odd(301)]; })();
+JSON.stringify(out);
+""";
+
+    private const string FrameReuseExpected = """
+{"alternate":["a:1","b:2","c:3","a:1","a:1","c:3","b:2"],"sameTemplate":[1,11,102,4,14,105,7],"ics":[1,2,1,2,1,2,1,2,2,1],"afterThrow":["x","ok","x","ok","x","ok"],"generators":["p","r","q1","s",true,true],"evalAndFunction":["nf0","ev0","a:0","nf1","ev1","a:1","nf2","ev2","a:2"],"classes":["mAA","mBmAAB","mAA"],"accessors":["gv","sv1",[2,3],[3,2,1]],"errorKinds":["TypeError","TypeError","ReferenceError","TypeError"],"recursionMix":["even","odd","even"]}
+""";
+
+    [Fact]
+    public void FramesReusedByOtherFunctionsMatchReferenceBehavior()
+    {
+        using var engine = new JsEngine();
+        var exp = System.Text.Json.JsonDocument.Parse(FrameReuseExpected).RootElement;
+        var got = System.Text.Json.JsonDocument.Parse(engine.Evaluate(FrameReuseScript).AsString()).RootElement;
+        foreach (var p in exp.EnumerateObject())
+        {
+            Assert.True(got.TryGetProperty(p.Name, out var g), $"missing case {p.Name}");
+            Assert.True(p.Value.ToString() == g.ToString(), $"{p.Name}: expected {p.Value} got {g}");
+        }
+    }
 }
