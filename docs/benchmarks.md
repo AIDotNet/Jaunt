@@ -478,3 +478,44 @@ during iteration, compaction under a live iterator, −0/NaN keys, rope and mixe
 20000-entry table; reviver with duplicate keys, `context.source`, holder mutation, index-like key order, nested arrays;
 string + integer edge cases; result collection with a user species, re-entrant filter/flatMap, a throwing callback,
 70000-element results), test262 100,167/100,169 in both modes.
+
+## Fifth pass: array destructuring, private fields, `**`; two negative results (2026-11-08)
+
+Fresh baseline first, both engines on the same machine in the same hour (Apple M4, .NET SDK 10.0.300 / runtime 10.0.8,
+MoeJS v0.1.0-alpha.11; the earlier passes' numbers in this file come from a different machine): **MoeJS/Jaunt geometric
+mean 1.42** over 56 shared workloads, Jaunt ahead on all but compute/float-loop (0.98, bound by `Math.sin` itself) and
+level on functional/higher-order (1.03). With no laggards left, this pass went after language constructs with a large
+absolute cost, found with isolated micro-benchmarks (`--run-loop`, same build, alternating A/B); `dotnet-trace` sampling
+is still dominated by the GC poll thread on this machine and was only used to point at the callback machinery.
+
+| Change | Micro (µs/run, 8 s hot loop) | Cross-engine effect (JIT) |
+| --- | ---: | --- |
+| **Array patterns as one instruction.** `const [v, w] = x`, `for (const [k, v] of map)`: when every target is an elision or an identifier bound to a register or environment slot, CodeGen emits `Op.DestructArray src, dst, n` instead of GetIterator + n × IterNextOrUndef + IterClose (four rare-op dispatches and an `IteratorRecord`). The fast path reads the first n elements straight from a dense array whose iteration is pristine; a hole, paged storage or any other iterable takes the full protocol (an abrupt `next()` closes nothing, a normal end calls `return`). Script-level, `with`/`eval`-dynamic and import targets stay on the general path, as do const / function-name / TDZ-checked targets in assignment patterns, because those throw between two iterator steps. | destructure 3263 → 650 (the same loop reading `e[0], e[1]`: 632); destructure-decl 3115 → 712 | graph-algos −6% (NativeAOT −9%, 5.5 → 3.4 MB allocated per call), map-set −8%, astar-heap −8.5%, dynamic-props −13% |
+| **Private fields in the dispatch loop.** `PrivateGet`/`PrivateSet` are main-switch cases whose common case (the object has the field) is a small out-of-line scan of `PrivateElements`; methods, accessors and the error cases keep the previous slow path. `PrivateDefine` is called from the main loop too. | class-base-fields 4152 → 3631 (−12.5%); class-new 4481 → 3965 | classes-inheritance −9.6% |
+| **`**` number fast path.** `Op.Exp` in the main switch: two numbers go straight to `MathBuiltins.Pow` (`x ** 2` is `x * x`), everything else to the BigInt/ToNumeric path. | pow 10943 → 4769 (equivalent multiplications: 3876) | bigint −19% (its number exponentiations) |
+
+Jaunt alone: geometric mean ×0.986 over the 59 workloads; **MoeJS/Jaunt 1.418 → 1.438**. Everything not touched
+is within ±3% (intl-format +3.8% is noise). Results of every workload still match Node.
+
+**Measured and not adopted.**
+
+* *Interpreter-driven callback builtins.* forEach/map/filter/some/every/find/findIndex/reduce were implemented as loops
+  driven by the running `RunLoop` (a `Driver` frame whose return hook pushes the next callback frame), so a callback no
+  longer re-entered the interpreter through `CallCallback → Run → RunGuarded → RunLoop`. Semantics matched Node on
+  every edge case tried (mutating callbacks, early exit, species, bound/native/generator callbacks, throws, `error.stack`).
+  It bought nothing: JIT cb-foreach 1345 µs vs 1320 µs for the builtin path (`Array.prototype.forEach.call`), cb-map
+  1533 vs 1511; NativeAOT 1650 vs 1597 and 1786 vs 1788. The nested loop entry is not a cost on the current code (the
+  earlier "+12 ns per native→JS re-entry under AOT" is not reproducible on this build), so the change was reverted.
+* *Polymorphic inline caches:* a method call over three alternating classes costs 1.6 ns more than the monomorphic one
+  (3111 vs 2965 µs for 90k calls); the Vm-wide megamorphic cache already covers it.
+* *`instanceof`:* about 20 ns per check; 0.7% of classes-inheritance.
+* *Math unary builtins:* the whole call (`GetGlobal Math`, `CallMethod`, delegate, `ToNumber`) is about 5 ns; float-loop
+  is `Math.sin`. Hoisting `Math.sqrt` into a local saves only the 4 ns of `GetGlobal`.
+
+Verified: unit tests 622/622 (one new Node-generated comparison covering array patterns over arrays, strings, Sets,
+Maps, custom iterators with `return`, exhausted and throwing iterators, holes and prototype indices, defaults, swaps,
+captured loop bindings, parameters, member targets, rest, generators, `eval`/`with`, queue-mode and sparse arrays;
+private fields, methods, accessors, `#x in o`, frozen objects, proxies, missing fields; `**` edge cases), test262
+100,167/100,169 (the two Apple ICU locale-data differences, nothing skipped), NativeAOT `verify` gate all PASS on
+ILCompiler 10.0.14, and under NativeAOT 58/59 workloads match Node (strings/unicode-text is the known
+InvariantGlobalization mismatch).

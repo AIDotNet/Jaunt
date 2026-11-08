@@ -139,11 +139,6 @@ internal sealed partial class Vm
             case Op.Ne:
                 regs[bp + code[pc + 1]] = JsValue.FromBool(!Operations.LooseEquals(realm, regs[bp + code[pc + 2]], regs[bp + code[pc + 3]]));
                 return pc + 4;
-            case Op.Exp:
-            {
-                regs[bp + code[pc + 1]] = BigIntOps.Arith(realm, Op.Exp, regs[bp + code[pc + 2]], regs[bp + code[pc + 3]]);
-                return pc + 4;
-            }
             case Op.InstanceOf:
                 regs[bp + code[pc + 1]] = JsValue.FromBool(Operations.InstanceOf(realm, regs[bp + code[pc + 2]], regs[bp + code[pc + 3]]));
                 return pc + 4;
@@ -231,15 +226,6 @@ internal sealed partial class Vm
                 }
                 return pc + 4;
             }
-            case Op.PrivateDefine:
-                PrivateDefine(regs[bp + code[pc + 1]], (JsPrivateName)regs[bp + code[pc + 2]].Ref!, regs[bp + code[pc + 3]]);
-                return pc + 4;
-            case Op.PrivateGet:
-                regs[bp + code[pc + 1]] = PrivateGet(regs[bp + code[pc + 2]], (JsPrivateName)regs[bp + code[pc + 3]].Ref!);
-                return pc + 4;
-            case Op.PrivateSet:
-                PrivateSet(regs[bp + code[pc + 1]], (JsPrivateName)regs[bp + code[pc + 2]].Ref!, regs[bp + code[pc + 3]]);
-                return pc + 4;
             case Op.PrivateIn:
             {
                 var ov = regs[bp + code[pc + 2]];

@@ -419,6 +419,13 @@ internal sealed partial class Vm
                             if (a.IsNumber && b.IsNumber) { Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = new JsValue(JsMod(a.Num, b.Num)); ip = ref Unsafe.Add(ref ip, 4); continue; }
                             goto ArithOutOfLine;
                         }
+                        case Op.Exp:
+                        {
+                            ref var a = ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 2));
+                            ref var b = ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 3));
+                            if (a.IsNumber && b.IsNumber) { Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = new JsValue(MathBuiltins.Pow(a.Num, b.Num)); ip = ref Unsafe.Add(ref ip, 4); continue; }
+                            goto ArithOutOfLine;
+                        }
                         case Op.BitAnd:
                         {
                             ref var a = ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 2));
@@ -866,6 +873,38 @@ internal sealed partial class Vm
                             continue;
                         }
 
+                        // ---------------------------------------------------------- private names (#x): a field read or write
+                        // on an object that has it is the common case; everything else (methods, accessors, errors) is out of line
+                        case Op.PrivateGet:
+                        {
+                            ref readonly var ov = ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 2));
+                            var name = Unsafe.As<JsPrivateName>(Unsafe.Add(ref r0, Unsafe.Add(ref ip, 3)).Ref!);
+                            if (!PrivateGetFast(ov, name, ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1))))
+                            {
+                                f.Pc = PcAt(ref code0, ref ip) + 1;
+                                Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = PrivateGet(ov, name);
+                            }
+                            ip = ref Unsafe.Add(ref ip, 4);
+                            continue;
+                        }
+                        case Op.PrivateSet:
+                        {
+                            ref readonly var ov = ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1));
+                            var name = Unsafe.As<JsPrivateName>(Unsafe.Add(ref r0, Unsafe.Add(ref ip, 2)).Ref!);
+                            if (!PrivateSetFast(ov, name, Unsafe.Add(ref r0, Unsafe.Add(ref ip, 3))))
+                            {
+                                f.Pc = PcAt(ref code0, ref ip) + 1;
+                                PrivateSet(ov, name, Unsafe.Add(ref r0, Unsafe.Add(ref ip, 3)));
+                            }
+                            ip = ref Unsafe.Add(ref ip, 4);
+                            continue;
+                        }
+                        case Op.PrivateDefine:
+                            f.Pc = PcAt(ref code0, ref ip) + 1;
+                            PrivateDefine(Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)), Unsafe.As<JsPrivateName>(Unsafe.Add(ref r0, Unsafe.Add(ref ip, 2)).Ref!), Unsafe.Add(ref r0, Unsafe.Add(ref ip, 3)));
+                            ip = ref Unsafe.Add(ref ip, 4);
+                            continue;
+
                         // ---------------------------------------------------------- loops over iterators
                         case Op.IterNext:
                         {
@@ -879,6 +918,16 @@ internal sealed partial class Vm
                             int pc = PcAt(ref code0, ref ip);
                             f.Pc = pc + 1;
                             ip = ref Unsafe.Add(ref code0, ForInNextOp(f, pc));
+                            continue;
+                        }
+                        case Op.DestructArray:
+                        {
+                            ref readonly var sv = ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1));
+                            int dst = Unsafe.Add(ref ip, 2), n = Unsafe.Add(ref ip, 3);
+                            if (sv.IsObject && sv.Ref is JsArray da && TryDestructDense(da, ref Unsafe.Add(ref r0, dst), n)) { ip = ref Unsafe.Add(ref ip, 4); continue; }
+                            f.Pc = PcAt(ref code0, ref ip) + 1;
+                            DestructArraySlow(sv, f.Regs, f.Base + dst, n);
+                            ip = ref Unsafe.Add(ref ip, 4);
                             continue;
                         }
 
@@ -1372,6 +1421,41 @@ internal sealed partial class Vm
 
     [MethodImpl(MethodImplOptions.NoInlining)]
     private JsValue NewArrayValue(int capacity) => JsValue.FromObject(new JsArray(Realm, capacity));
+
+    /// <summary>
+    /// Op.DestructArray on an array whose iteration is unobservable (pristine %ArrayIteratorPrototype%.next and
+    /// @@iterator, dense contiguous storage): the first <paramref name="n"/> elements straight from the store, undefined past
+    /// the end. False for anything else, a hole included (it reads through the prototype chain): the general path then
+    /// starts over, nothing observable has happened yet.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private bool TryDestructDense(JsArray a, ref JsValue dst, int n)
+    {
+        if (!a.Dense || !Realm.IsArrayIterationPristine(a)) return false;
+        var items = a.Items;
+        uint len = a.Length;
+        for (int i = 0; i < n; i++)
+        {
+            if ((uint)i < len)
+            {
+                if ((uint)i >= (uint)items.Length) return false;
+                var v = items[i];
+                if (v.IsEmpty) return false;
+                JsValue.Store(ref Unsafe.Add(ref dst, i), v);
+            }
+            else Unsafe.Add(ref dst, i) = default;
+        }
+        return true;
+    }
+
+    /// <summary>Op.DestructArray by the iterator protocol: GetIterator, <paramref name="n"/> steps (an abrupt step closes nothing), IteratorClose.</summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private void DestructArraySlow(in JsValue src, JsValue[] regs, int dst, int n)
+    {
+        var rec = IteratorRecord.Get(Realm, src);
+        for (int i = 0; i < n; i++) regs[dst + i] = rec.Step(out var v) ? v : default;
+        rec.Close();
+    }
 
     [MethodImpl(MethodImplOptions.NoInlining)]
     private static bool TypedGetFast(JsTypedArray ta, double key, ref JsValue dst)

@@ -50,6 +50,12 @@ internal enum Op : int
     Closure, ClassCreate, SetHomeObject, InitFields, SetFieldInit,
     NewPrivateName, PrivateMethod, PrivateGet, PrivateSet, PrivateDefine, PrivateIn,
     GetIterator, GetIteratorObj, IterNext, IterNextOrUndef, IterRest, IterClose, IterCloseQuiet,
+    /// <summary>
+    /// Array pattern of plain local targets: src, dst, count — the first count iteration values of src into the registers
+    /// from dst on (undefined past the end), then IteratorClose. Equivalent to GetIterator, count IterNextOrUndef, IterClose,
+    /// which it replaces when nothing observable can run between the steps (the targets are registers or environment slots).
+    /// </summary>
+    DestructArray,
     ForInPrepare, ForInNext,
     Yield, YieldRaw, Await, InitialYield, GetAsyncIterator, ThrowIfNotObject,
     PushEnvNamed, PushWith, LdName, LdNameCall, StName, DelName, CallEval, CallEvalSpread, EvalDeclare, EvalInitVar, ResolveRef, LdRef, StRef, CreateMappedArguments, ParseJsonConst, NewDisposeStack, AddDisposable, DisposeSync, DisposeNext, DisposeMerge,
@@ -143,6 +149,7 @@ internal static class OpInfo
         S(Op.IterNextOrUndef, R, R);
         S(Op.IterRest, R, R);
         S(Op.IterClose, R); S(Op.IterCloseQuiet, R);
+        S(Op.DestructArray, R, R, N);   // the count is checked as a register window from the second operand
         S(Op.ForInPrepare, R, R); S(Op.ForInNext, R, R, J);
         S(Op.Yield, R, R, R); S(Op.YieldRaw, R, R, R); S(Op.Await, R, R, R); S(Op.InitialYield, R, R);
         S(Op.GetAsyncIterator, R, R); S(Op.ThrowIfNotObject, R, K);

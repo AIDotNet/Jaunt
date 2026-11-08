@@ -832,6 +832,7 @@ internal sealed partial class Vm
 
     // ------------------------------------------------------------------ private names
 
+    [MethodImpl(MethodImplOptions.NoInlining)]
     private void PrivateDefine(in JsValue target, JsPrivateName name, JsValue value)
     {
         var obj = target.AsObjectUnchecked;
@@ -843,6 +844,35 @@ internal sealed partial class Vm
         obj.AddPrivate(name, value);
     }
 
+    /// <summary>Reads private field <paramref name="name"/> of an object that has it; false (nothing written) for every other case.</summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static bool PrivateGetFast(in JsValue target, JsPrivateName name, ref JsValue dst)
+    {
+        if (target.IsNotObject || name.Kind != 0) return false;
+        var pe = Unsafe.As<JsObject>(target.Ref!).Extras?.PrivateElements;
+        if (pe == null) return false;
+        for (int i = 0; i < pe.Length; i++)
+        {
+            if (ReferenceEquals(pe[i].Name, name)) { JsValue.Store(ref dst, pe[i].Value); return true; }
+        }
+        return false;
+    }
+
+    /// <summary>Writes private field <paramref name="name"/> of an object that has it; false (nothing written) for every other case.</summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static bool PrivateSetFast(in JsValue target, JsPrivateName name, in JsValue value)
+    {
+        if (target.IsNotObject || name.Kind != 0) return false;
+        var pe = Unsafe.As<JsObject>(target.Ref!).Extras?.PrivateElements;
+        if (pe == null) return false;
+        for (int i = 0; i < pe.Length; i++)
+        {
+            if (ReferenceEquals(pe[i].Name, name)) { JsValue.Store(ref pe[i].Value, value); return true; }
+        }
+        return false;
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
     private JsValue PrivateGet(in JsValue target, JsPrivateName name)
     {
         int i = target.IsNotObject ? -1 : target.AsObjectUnchecked.FindPrivate(name);
@@ -858,6 +888,7 @@ internal sealed partial class Vm
         }
     }
 
+    [MethodImpl(MethodImplOptions.NoInlining)]
     private void PrivateSet(in JsValue target, JsPrivateName name, JsValue value)
     {
         int i = target.IsNotObject ? -1 : target.AsObjectUnchecked.FindPrivate(name);

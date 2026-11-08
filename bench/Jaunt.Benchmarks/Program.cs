@@ -12,8 +12,16 @@ if (args.Length > 1 && args[0] == "--eval")
     foreach (var code in args.Skip(1))
     {
         try { Console.WriteLine(eng.Evaluate(File.Exists(code) ? File.ReadAllText(code) : code).ToString()); }
-        catch (Exception ex) { Console.WriteLine($"{ex.GetType().Name}: {ex.Message}"); }
+        catch (Exception ex) { Console.WriteLine($"{ex.GetType().Name}: {ex.Message}"); if (ex.InnerException != null) Console.WriteLine(ex.InnerException.StackTrace); }
     }
+    return;
+}
+if (args.Length > 1 && args[0] == "--disasm")
+{
+    // bytecode of a script and all its nested functions (development aid)
+    var script = Jaunt.JsCompiler.CompileScript(File.Exists(args[1]) ? File.ReadAllText(args[1]) : args[1]);
+    void Dump(Jaunt.Compiler.FunctionTemplate t) { Console.WriteLine(t.Disassemble()); foreach (var c in t.Functions) Dump(c); }
+    Dump(script.Template.Body);
     return;
 }
 if (args.Length > 1 && args[0] == "--micro")
