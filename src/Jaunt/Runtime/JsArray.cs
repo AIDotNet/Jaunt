@@ -37,6 +37,8 @@ internal sealed class JsArray : JsObject
         public int Accesses;
         /// <summary>Page mode (see <see cref="PageSize"/>) when not null: <see cref="Store"/> is empty and the elements are here.</summary>
         public JsValue[][]? Pages;
+        /// <summary>Page mode: the index of the last access by index, to tell a sequential scan.</summary>
+        public uint LastIndex;
     }
 
     /// <summary>
@@ -59,7 +61,7 @@ internal sealed class JsArray : JsObject
     /// How long an array growing by push stays in page mode. It stays contiguous above this: the interpreter's element
     /// access misses on a paged array, and an array this long is more likely to live long and be indexed than to be temporary.
     /// </summary>
-    private const uint MaxPushedPaged = 1 << 16;
+    private const uint MaxPushedPaged = 1 << 14;
 
     /// <summary>The elements as one span, for internal arrays built by Push (spread call arguments).</summary>
     internal ReadOnlySpan<JsValue> ContiguousElements()
@@ -241,16 +243,26 @@ internal sealed class JsArray : JsObject
     }
 
     /// <summary>
-    /// How many accesses by index a queue or page mode array serves before it leaves that mode. Page mode allows more: the
-    /// move out of it allocates a large object, which costs about as much as these accesses over the fast path.
+    /// Counts an access by index; false when a queue or page mode array has served enough of them and should leave that
+    /// mode. Page mode allows more: the move out of it allocates a large object, which costs about as much as these accesses
+    /// over the fast path. But an access right after the previous index is probably a loop over all elements, which
+    /// is better off in the contiguous store soon, so those count more.
     /// </summary>
-    private uint AccessLimit(QueueState q) => q.Pages != null ? Length / 4 + 64 : Length / 8 + 8;
+    private bool CountAccess(QueueState q, uint index)
+    {
+        if (q.Pages == null) return ++q.Accesses <= Length / 8 + 8;
+        q.Accesses += index == q.LastIndex + 1 ? SequentialAccessWeight : 1;
+        q.LastIndex = index;
+        return q.Accesses <= Length / 4 + 64;
+    }
+
+    private const int SequentialAccessWeight = 8;
 
     private bool TryQueueGet(uint index, out JsValue value)
     {
         var q = _queue!;
         value = default;
-        if (index >= Length || ++q.Accesses > AccessLimit(q)) return false;
+        if (index >= Length || !CountAccess(q, index)) return false;
         value = q.Pages != null ? q.Pages[index >> PageShift][index & PageMask] : q.Store[q.Head + (int)index];
         return value.IsNotEmpty;
     }
@@ -258,7 +270,7 @@ internal sealed class JsArray : JsObject
     private bool TryQueueSet(uint index, in JsValue value)
     {
         var q = _queue!;
-        if (index >= Length || ++q.Accesses > AccessLimit(q)) return false;
+        if (index >= Length || !CountAccess(q, index)) return false;
         ref var slot = ref q.Pages != null ? ref q.Pages[index >> PageShift][index & PageMask] : ref q.Store[q.Head + (int)index];
         if (slot.IsEmpty) return false;
         slot = value;
