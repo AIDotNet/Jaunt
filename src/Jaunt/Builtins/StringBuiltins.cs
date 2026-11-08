@@ -310,7 +310,7 @@ internal static class StringBuiltins
             });
             f.State = (tag, attr);
         }
-        r.Method(proto, JsSymbol.Iterator, "[Symbol.iterator]", 0, static (in NativeArgs a) => JsValue.FromObject(new JsStringIterator(a.Realm, Str(a))));
+        r.StringProtoIterator = r.Method(proto, JsSymbol.Iterator, "[Symbol.iterator]", 0, static (in NativeArgs a) => JsValue.FromObject(new JsStringIterator(a.Realm, Str(a))));
     }
 
     private static string ThisString(in NativeArgs a, string method)

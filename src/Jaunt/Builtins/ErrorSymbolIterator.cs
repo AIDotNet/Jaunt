@@ -223,7 +223,7 @@ internal static class IteratorBuiltins
 
         var stringIter = new JsObject(r, iterProto);
         r.StringIteratorPrototype = stringIter;
-        r.Method(stringIter, "next", 0, static (in NativeArgs a) =>
+        r.StringIteratorNext = r.MethodEager(stringIter, "next", 0, static (in NativeArgs a) =>
         {
             var realm = a.Realm;
             if (a.This.Ref is not JsStringIterator it) throw JsErrors.TypeError(realm, "next method called on incompatible receiver");

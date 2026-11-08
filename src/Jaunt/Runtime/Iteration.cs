@@ -20,6 +20,9 @@ internal sealed class IteratorRecord
     private OrderedTable? _table;
     private TableCursor? _cursor;
     private bool _entries;
+    // string fast path: code points are produced directly, no iterator or result objects
+    private string? _string;
+    private int _strIndex;
 
     private IteratorRecord(Realm realm) => _realm = realm;
 
@@ -40,6 +43,11 @@ internal sealed class IteratorRecord
                 rec._entries = !m.IsSet;
                 return rec;
             }
+        }
+        else if (iterable.IsString && realm.IsStringIterationPristine())
+        {
+            rec._string = iterable.AsStringUnchecked;
+            return rec;
         }
         var method = Operations.GetV(realm, iterable, JsSymbol.Iterator);
         if (!method.IsFunction) throw JsErrors.TypeError(realm, $"{JsErrors.Describe(iterable)} is not iterable");
@@ -68,6 +76,21 @@ internal sealed class IteratorRecord
             {
                 if (!a.TryGetDense(_index, out value)) value = a.GetIndex(_index, JsValue.FromObject(a));
                 _index++;
+                return true;
+            }
+            Done = true;
+            value = default;
+            return false;
+        }
+        if (_string != null)
+        {
+            var s = _string;
+            int i = _strIndex;
+            if (i < s.Length)
+            {
+                char c = s[i];
+                if (char.IsHighSurrogate(c) && i + 1 < s.Length && char.IsLowSurrogate(s[i + 1])) { value = new JsValue(s.Substring(i, 2)); _strIndex = i + 2; }
+                else { value = new JsValue(_realm.CharString(c)); _strIndex = i + 1; }
                 return true;
             }
             Done = true;

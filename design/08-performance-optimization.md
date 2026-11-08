@@ -276,3 +276,11 @@ METRIC=cpu python3 bench/cross/report.py ...            # 以 CPU 时间交叉�
 与 §3 的估计相比：K1/T1 对 matmul 的收益高于估计；C1 的收益（fib −11%）与实验一致；C2 约 −3%；O1 对 obj-numkey 为 −38%（估计约 −55%），因为 (shape, key) 缓存命中仍需一次哈希与三次比较；A2/C4 对排序只有 −6%，确认排序成本就是比较器调用本身。下一步按 §6 的阶段 B/C：C3、D1/D2（dispatch）、A4/A5（JSON/LOH）、K2。
 
 遗留的既有差异（本轮发现、未改）：`o[k] op= v` 的键转换只做一次，而现行规范在读和写各转换一次（V8 调用两次 `toString`）；已记入 `docs/FEATURES.md`。
+
+## 9. 第二轮实施记录（2026-11-07，c0f2631 之后）
+
+用临时计数器聚合每次 `GetPropSlow` 的接收者与 IC 状态，找到三类系统性漏洞并修复：**访问器属性从不进 IC**（typed array `length`、`Map.size`、类 getter：每次完整查找 + 字符串哈希）→ `OwnGetter`/`ProtoGetter` 缓存槽位；**字符串接收者的方法在 `GetProp` 路径永远 miss**（`StringProtoData` 只有 `CallMethod` 认）；**属性不存在不缓存** → `NotFound` 种类（受 ProtoEpoch 保护）；另加 **megamorphic 站点的 Vm 级 (shape, name) 二级缓存**、**字符串 for-of 直接按码点迭代**（pristine 守卫）、**JsRegExp 只持有共享编译产物的一个引用**。尝试并回退：D1（无边界检查 dispatch）无可测收益。
+
+实测（两轮取优，MoeJS 本轮测量与上轮一致 ×0.999）：huffman-lz −40%、crc-base64 −27%、spectral-norm −27%、unicode-text −26%、levenshtein −22%、classes −6%、json-roundtrip −4%；**MoeJS/Jaunt 几何均值 0.976 → 1.013**，§1 目标 1 达成；目标 2（每次调用 ≤ 16 ns）未达成（仍约 21 ns），fib/sort-compare/higher-order/async 仍落后 1.3–1.6 倍。
+
+验证：单测 578/578（两种模式）、13 个新对照用例、test262 100,167/100,169、AOT 门禁未变。

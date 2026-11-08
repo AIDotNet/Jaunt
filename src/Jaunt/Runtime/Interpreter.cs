@@ -178,6 +178,38 @@ internal sealed partial class Vm
                                         var v = ic.Holder!.Slots[ic.Slot];
                                         if (v.IsNotEmpty) { regs[bp + code[pc + 1]] = v; pc += 5; continue; }
                                     }
+                                    else if (ic.Kind == IcKind.ProtoGetter && ic.Epoch == ProtoEpoch)
+                                    {
+                                        // accessor on the prototype chain (typed array length, Map size, class getters)
+                                        // an accessor slot carries the Accessor as an Empty-tagged reference
+                                        if (ic.Holder!.Slots[ic.Slot].Ref is Accessor acc)
+                                        {
+                                            f.Pc = pc + 1;
+                                            var gv = CallCachedGetter(acc, ov);
+                                            regs = f.Regs;
+                                            regs[bp + code[pc + 1]] = gv;
+                                            pc += 5;
+                                            continue;
+                                        }
+                                    }
+                                    else if (ic.Kind == IcKind.OwnGetter)
+                                    {
+                                        if (obj.Slots[ic.Slot].Ref is Accessor acc)
+                                        {
+                                            f.Pc = pc + 1;
+                                            var gv = CallCachedGetter(acc, ov);
+                                            regs = f.Regs;
+                                            regs[bp + code[pc + 1]] = gv;
+                                            pc += 5;
+                                            continue;
+                                        }
+                                    }
+                                    else if (ic.Kind == IcKind.NotFound && ic.Epoch == ProtoEpoch)
+                                    {
+                                        regs[bp + code[pc + 1]] = default;
+                                        pc += 5;
+                                        continue;
+                                    }
                                 }
                                 else if (ic.Kind == IcKind.ArrayLength && obj is JsArray la)
                                 {
@@ -186,11 +218,19 @@ internal sealed partial class Vm
                                     continue;
                                 }
                             }
-                            else if (ov.IsString && ic.Kind == IcKind.StringLength)
+                            else if (ov.IsString)
                             {
-                                regs[bp + code[pc + 1]] = new JsValue((double)ov.StringLength);
-                                pc += 5;
-                                continue;
+                                if (ic.Kind == IcKind.StringLength)
+                                {
+                                    regs[bp + code[pc + 1]] = new JsValue((double)ov.StringLength);
+                                    pc += 5;
+                                    continue;
+                                }
+                                if (ic.Kind == IcKind.StringProtoData && ic.Epoch == ProtoEpoch && ReferenceEquals(ic.Holder!.Shape, ic.Shape))
+                                {
+                                    var v = ic.Holder.Slots[ic.Slot];
+                                    if (v.IsNotEmpty) { regs[bp + code[pc + 1]] = v; pc += 5; continue; }
+                                }
                             }
                             f.Pc = pc + 1;
                             if (ov.IsNullOrUndefined) { thrown = NullishReadError(ov, k[code[pc + 3]]); goto Unwind; }

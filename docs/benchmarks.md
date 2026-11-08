@@ -280,3 +280,54 @@ Remaining gap to MoeJS (fib, sort-compare, spectral-norm, higher-order, huffman-
 json-roundtrip, classes-inheritance; 1.3–1.5×): the per-call cost (~21 ns vs 16–19 ns) and dispatch density
 (~5 ns per instruction). Stages B/C of `design/08` (frame setup folding, call-site IC, unchecked operand access
 justified by the verifier, superinstructions, JSON output buffering) target these.
+
+## Second cross-engine pass: inline caches for accessors and absences, string iteration (2026-11-07)
+
+Same harness, two rounds, best of both; MoeJS measured the same as in the previous pass (geometric mean ×0.999),
+so this time the relative numbers are comparable. **MoeJS/Jaunt geometric mean 0.976 → 1.013** (Jaunt now
+slightly ahead overall; Jint/Jaunt 2.59 → 2.68). Jaunt alone: ×0.963. Fastest per workload: Jaunt 26, MoeJS 30, Jint 3.
+
+| Workload | Jaunt before | Jaunt after | Δ | MoeJS/Jaunt before → after |
+| --- | ---: | ---: | ---: | ---: |
+| apps/huffman-lz | 24.4 ms | 14.7 ms | −40% | 0.69 → 1.17 |
+| compute/crc-base64 | 14.9 ms | 10.9 ms | −27% | 0.68 → 0.93 |
+| compute/spectral-norm | 7.95 ms | 5.84 ms | −27% | 0.73 → 0.98 |
+| strings/unicode-text | 3.82 ms | 2.84 ms | −26% | 0.93 → 1.26 |
+| compute/levenshtein | 6.74 ms | 5.24 ms | −22% | 0.70 → 0.90 |
+| objects/alloc-shapes / classes-inheritance | 7.80 / 7.50 ms | 7.32 / 7.06 ms | −6% | 1.11 → 1.18 / 0.71 → 0.75 |
+| advanced/json-roundtrip | 10.1 ms | 9.6 ms | −4% | 0.71 → 0.74 |
+
+Per category (MoeJS/Jaunt): apps 0.92 → 0.97, compute 0.92 → 0.97, strings 1.06 → 1.14, objects 1.10 → 1.13,
+collections 0.97 → 0.98, advanced 0.97 → 0.99, functional 1.17 → 1.16, async 0.83 → 0.82.
+
+Found by aggregating the receivers and IC states of every `GetPropSlow` call (a temporary counter): the profiler
+had shown `GetPropSlow` at 33% of spectral-norm, 26% of crc-base64 and 16% of levenshtein, but not why.
+
+* **Accessor properties never entered the inline caches.** `u.length` on a typed array, `map.size`, every class
+  getter and every `get` on a prototype did a full lookup (string hash, prototype walk) on each access, then called
+  the getter. The getter slot is now cached like a data slot (`IcKind.OwnGetter`/`ProtoGetter`, guarded by the shape
+  and the prototype epoch; the slot is re-read on every hit, so a redefined getter is seen). Typed-array `length`
+  read: 28 → 12 ns.
+* **A string receiver's methods missed in `GetProp`.** The `StringProtoData` cache kind was honoured by `CallMethod`
+  only; `a.charCodeAt(i)` compiled through `GetProp` + `Call` took the slow path 64 million times per levenshtein run.
+* **Absent properties were not cached.** `node.ch` on a tree whose leaves have `ch` and inner nodes do not walked
+  the chain every time. `IcKind.NotFound` caches the absence for a receiver shape while the prototype epoch is
+  unchanged (and every object on the chain is in shape mode).
+* **Megamorphic sites stayed slow for good.** After eight shapes a site did a full lookup per access. A Vm-wide
+  direct-mapped (shape, name) → lookup-result cache now sits behind megamorphic sites (own/prototype data, getters,
+  absences); 4-shape polymorphic access: 23 ns.
+* **`for (const c of str)`** walked the iterator protocol (a result object and two property reads per code point).
+  With String.prototype[Symbol.iterator] and %StringIteratorPrototype%.next unmodified (the same pristine guard the
+  array and Map paths use), the record yields code points directly. huffman-lz −31% from this alone.
+* **RegExp objects** carry one reference to the shared, immutable compiled program (backends, group tables, source,
+  flags, pre-parsed flag bits) instead of a copy of eleven fields and four flag scans per literal evaluation:
+  regex-literal micro 1.48 → 1.27 ms, 420 → 340 bytes per evaluation (the rest is the match result).
+
+Tried and reverted (no measurable gain): reading operands and registers in the interpreter loop without bounds
+checks (justified by the verifier) — dispatch-dense workloads moved −3…+7%, within noise; the checks are
+predicted and effectively free on this machine.
+
+Verified: unit tests (plain and `JAUNT_POISON_REGISTERS=1`), 13 new `FastPathSemanticsTests` cases (getter
+redefinition and prototype mutation, absence then addition on the prototype and on `Object.prototype`, a Proxy
+on the chain, megamorphic sites with later redefinition, patched `String.prototype.charCodeAt`, string iteration
+with surrogate pairs and patched `Symbol.iterator`/`next`), test262 100,167/100,169, NativeAOT gate unchanged.

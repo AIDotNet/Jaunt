@@ -133,6 +133,7 @@ internal sealed partial class Realm
     public JsBuiltin ArrayIteratorNext { get => _arrayIteratorNext ?? Ensure(IntrinsicGroup.Iterator)._arrayIteratorNext!; set => _arrayIteratorNext = value; }
     /// <summary>Original Map.prototype.entries / Set.prototype.values and the iterator prototypes' next (for-of fast path).</summary>
     public JsBuiltin? MapProtoEntries, MapIteratorNext, SetProtoValues, SetIteratorNext;
+    public JsBuiltin? StringProtoIterator, StringIteratorNext;
     private JsBuiltin? _throwTypeErrorFunction;
     public JsBuiltin ThrowTypeErrorFunction { get => _throwTypeErrorFunction ?? Ensure(IntrinsicGroup.Function)._throwTypeErrorFunction!; set => _throwTypeErrorFunction = value; }
     private JsBuiltin? _evalFunction;
@@ -666,6 +667,23 @@ internal sealed partial class Realm
     /// Whether iterating <paramref name="m"/> with for-of/spread observably equals walking its table: the object has no own
     /// @@iterator, its prototype's @@iterator is the original entries/values and the iterator prototype's next is the original.
     /// </summary>
+    private int _strIterSlot = -1, _strNextSlot = -1, _strPristineEpoch = -1;
+
+    /// <summary>Whether for-of over a string may walk the code points directly: String.prototype[Symbol.iterator] and %StringIteratorPrototype%.next are the intrinsics.</summary>
+    public bool IsStringIterationPristine()
+    {
+        if (StringProtoIterator == null || StringIteratorNext == null) return false;
+        if (_strPristineEpoch != ProtoEpoch)
+        {
+            _strIterSlot = StringPrototype.FindOwn(JsSymbol.Iterator, out _);
+            _strNextSlot = StringIteratorPrototype.FindOwn("next", out _);
+            _strPristineEpoch = ProtoEpoch;
+        }
+        return _strIterSlot >= 0 && _strNextSlot >= 0
+            && ReferenceEquals(StringPrototype.ReadSlot(_strIterSlot).Ref, StringProtoIterator)
+            && ReferenceEquals(StringIteratorPrototype.ReadSlot(_strNextSlot).Ref, StringIteratorNext);
+    }
+
     public bool IsMapIterationPristine(JsMap m)
     {
         var proto = m.IsSet ? SetPrototype : MapPrototype;
