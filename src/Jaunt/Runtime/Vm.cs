@@ -230,13 +230,39 @@ internal sealed partial class Vm
         Tick(1 + ints / 64);
     }
 
-    internal JsValue Run(Frame entry)
+    /// <summary>
+    /// Whether this VM is <see cref="t_current"/> on the thread running it. The fields below save a thread-static access
+    /// (several calls on NativeAOT) each time native code runs JS or checks the stack; a Vm has one executor at a time.
+    /// </summary>
+    private bool _isCurrent;
+    /// <summary>While <see cref="_isCurrent"/>: the lowest stack address at which the stack probe has passed since it became current.</summary>
+    private nuint _stackProbedAt;
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal JsValue Run(Frame entry) => _isCurrent ? RunLoop(entry) : RunOnThread(entry);
+
+    private JsValue RunOnThread(Frame entry)
+    {
+        var saved = EnterThread();
+        try { return RunLoop(entry); }
+        finally { LeaveThread(saved); }
+    }
+
+    private Vm? EnterThread()
     {
         var saved = t_current;
-        if (ReferenceEquals(saved, this)) return RunLoop(entry);   // nested native→JS call: already current
+        if (saved != null) saved._isCurrent = false;
         t_current = this;
-        try { return RunLoop(entry); }
-        finally { t_current = saved; }
+        _isCurrent = true;
+        _stackProbedAt = nuint.MaxValue;
+        return saved;
+    }
+
+    private void LeaveThread(Vm? saved)
+    {
+        _isCurrent = false;
+        t_current = saved;
+        if (saved != null) saved._isCurrent = true;
     }
 
     /// <summary>Whether the active execution has a wall-clock deadline.</summary>
@@ -283,9 +309,19 @@ internal sealed partial class Vm
 
     /// <summary>Guards native (CLR-stack) recursion: nested interpreter runs, bound/proxy chains, recursive builtins.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public void EnsureNativeStack()
+    public unsafe void EnsureNativeStack()
+    {
+        byte marker;
+        nuint sp = (nuint)(&marker);
+        // the stack grows down: at or above an address where the probe passed, it passes
+        if (!_isCurrent || sp < _stackProbedAt) ProbeNativeStack(sp);
+    }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private void ProbeNativeStack(nuint sp)
     {
         if (!RuntimeHelpers.TryEnsureSufficientExecutionStack()) NativeStackOverflow();
+        if (_isCurrent) _stackProbedAt = sp;
     }
 
     [MethodImpl(MethodImplOptions.NoInlining)]

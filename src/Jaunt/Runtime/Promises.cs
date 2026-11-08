@@ -219,7 +219,8 @@ internal sealed class JsPromise : JsObject
     /// <summary>While pending: the reactions, most recently added first.</summary>
     private PromiseReaction? _reactions;
 
-    public JsPromise(Realm realm, JsObject? proto = null) : base(realm, proto ?? realm.PromisePrototype) { }
+    public JsPromise(Realm realm) : base(realm, realm.PromiseInstanceShape, 0) { }
+    public JsPromise(Realm realm, JsObject proto) : base(realm, proto) { }
 
     public override string ClassName => "Promise";
 
@@ -404,6 +405,20 @@ internal sealed partial class Vm
 
     /// <summary>Runs ready microtasks until the queue is empty (each job is budgeted).</summary>
     public void RunJobs()
+    {
+        if (_jobCount == 0 && _asyncWaiters is not { Count: > 0 }) return;
+        if (_isCurrent)
+        {
+            DrainJobs();
+            return;
+        }
+        // a job that runs JS then needs no thread-static access
+        var saved = EnterThread();
+        try { DrainJobs(); }
+        finally { LeaveThread(saved); }
+    }
+
+    private void DrainJobs()
     {
         int n = 0;
         while (true)

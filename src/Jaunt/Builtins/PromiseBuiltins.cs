@@ -14,6 +14,8 @@ internal sealed partial class Realm
     /// <summary>The intrinsic %Promise.prototype.then%.</summary>
     public JsBuiltin PromiseThenFunction = null!;
     private Shape? _promiseInstanceShape;
+    /// <summary>The empty layout of a promise inheriting from %Promise.prototype%.</summary>
+    public Shape PromiseInstanceShape => _promiseInstanceShape ?? Ensure(IntrinsicGroup.Promise)._promiseInstanceShape!;
     private object? _promiseSpeciesAccessor;
     private Shape? _promiseProtoShape;
     private Shape? _promiseCtorShape;
