@@ -727,4 +727,57 @@ JSON.stringify(out);
         Assert.Equal(JsLimitKind.StackDepth, ex.Kind);
         Assert.True(engine.IsFaulted);
     }
+
+    // Strict comparison with a literal constant in the instruction (conditions and switch cases), and the string comparison
+    // behind it. Expected values were produced by Node from the same script.
+    private const string ConstantCompareScript = """
+const out = {};
+const vals = ['a', 'b', '', 'ab', 'a' + 'b', ['a', 'b'].join(''), 0, -0, 1, 1.5, NaN, true, false, null, undefined, 1n, 0n, [], {}, new String('a'), new Number(1), Symbol.iterator];
+out.eqA = vals.map(x => { if (x === 'a') return 1; return 0; });
+out.neA = vals.map(x => { if (x !== 'a') return 1; return 0; });
+out.eqAb = vals.map(x => x === 'ab' ? 1 : 0);
+out.eqEmpty = vals.map(x => x === '' ? 1 : 0);
+out.eqZero = vals.map(x => { if (x === 0) return 1; return 0; });
+out.neZero = vals.map(x => { if (x !== 0) return 1; return 0; });
+out.eqOne = vals.map(x => { if (x === 1) return 1; return 0; });
+out.eqFrac = vals.map(x => { if (x === 1.5) return 1; return 0; });
+out.negZeroLiteral = vals.map(x => { if (x === -0) return 1; return 0; });
+out.rope = (() => { let s = ''; for (let i = 0; i < 40; i++) s += 'xy'; const t = 'xy'.repeat(40); const u = s + 'z'; const r = []; if (s === 'xyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxy') r.push('eq'); if (u !== 'xyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxyxy') r.push('ne'); r.push(s === t, u === t, s + '' === t, 'p' + s === 'p' + t, 'q' + s === 'p' + t); return r; })();
+out.sameLengthLastChar = ['abcd' === 'abce', 'abcd' === 'abcd', 'abcd' === 'xbcd', 'é' === 'é', '😀' === '😁', (a => { if (a === 'abcz') return 1; return 0; })('abc' + 'y')];
+const sw = x => { switch (x) { case 'a': return 'A'; case 'b': return 'B'; case '': return 'E'; case 0: return 'Z'; case 1: return 'O'; case 1.5: return 'F'; case 'ab': return 'AB'; default: return 'D'; } };
+out.switchLiterals = vals.map(sw);
+out.switchFallThrough = ['a', 'b', 'c', 'd', 1].map(x => { const r = []; switch (x) { case 'a': r.push(1); case 'b': r.push(2); break; default: r.push(3); case 'd': r.push(4); case 1: r.push(5); } return r; });
+out.switchDefaultFirst = ['a', 'z'].map(x => { const r = []; switch (x) { default: r.push('d'); case 'a': r.push('a'); } return r; });
+out.switchMixedTests = (() => { const log = []; const t = (n, v) => { log.push(n); return v; }; const f = x => { switch (x) { case t('p', 'q'): return 1; case 'b': return 2; case t('r', 3): return 3; case 3 + 1: return 4; default: return 5; } }; return [f('q'), f('b'), f(3), f(4), f('n'), log]; })();
+out.switchLexical = (x => { switch (x) { case 'a': let y = 1; const g = () => y; y = y + 1; return g(); case 'b': return typeof y; } }).call(null, 'a');
+out.switchTdz = (() => { try { return (x => { switch (x) { case 'a': let y = 1; case 'b': return y; } })('b'); } catch (e) { return e.constructor.name; } })();
+out.switchDiscOnce = (() => { let n = 0; const d = () => { n++; return 'b'; }; switch (d()) { case 'a': n += 10; case 'b': n += 100; case 'c': n += 1000; } return n; })();
+out.switchInLoop = (() => { let s = ''; for (const c of 'abcab') { switch (c) { case 'a': s += '1'; continue; case 'b': s += '2'; break; default: s += '3'; } s += '|'; } return s; })();
+out.switchNoCases = (() => { let n = 0; switch (n++) { } return n; })();
+out.leftEffects = (() => { const log = []; const f = v => { log.push(v); return v; }; const r = []; if (f('a') === 'a') r.push(1); if (f('b') !== 'b') r.push(2); else r.push(3); while (f('c') === 'd') r.push(4); return [r, log]; })();
+out.undeclared = (() => { try { if (nope === 'a') return 1; return 0; } catch (e) { return e.constructor.name; } })();
+out.tdz = (() => { try { if (q === 1) return 1; let q = 1; return 0; } catch (e) { return e.constructor.name; } })();
+out.inLoop = (() => { const r = []; for (let i = 0; i < 6; i++) { const k = i % 3 === 0 ? 'x' : i % 3 === 1 ? 'y' : 'z'; const isX = k === 'x'; if (k === 'y') r.push('Y' + i); else if (k !== 'z') r.push(isX); } return r; })();
+out.typeofForm = vals.map(x => { if (typeof x === 'string') return 's'; if (typeof x === 'number') return 'n'; if (typeof x !== 'object') return 'o'; return 'O'; });
+out.frames = (() => { const tag = n => n % 2 === 0 ? 'even' : 'odd'; const rec = n => { switch (tag(n)) { case 'even': return n === 0 ? 'done' : rec(n - 1); case 'odd': try { if (n === 1) throw new Error('one'); return rec(n - 1); } catch (e) { return e.message; } } }; return [rec(4), rec(5), rec(0)]; })();
+out.generator = (() => { function* g(x) { switch (x) { case 'a': yield 1; case 'b': yield 2; break; case 'c': return 3; } yield 4; } return [[...g('a')], [...g('b')], [...g('c')], [...g('d')]]; })();
+JSON.stringify(out, (k, v) => typeof v === 'symbol' ? 'sym' : v);
+""";
+
+    private const string ConstantCompareExpected = """
+{"eqA":[1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"neA":[0,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1],"eqAb":[0,0,0,1,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"eqEmpty":[0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"eqZero":[0,0,0,0,0,0,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"neZero":[1,1,1,1,1,1,0,0,1,1,1,1,1,1,1,1,1,1,1,1,1,1],"eqOne":[0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0],"eqFrac":[0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0],"negZeroLiteral":[0,0,0,0,0,0,1,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0],"rope":["eq","ne",true,false,true,true,false],"sameLengthLastChar":[false,true,false,false,false,0],"switchLiterals":["A","B","E","AB","AB","AB","Z","Z","O","F","D","D","D","D","D","D","D","D","D","D","D","D"],"switchFallThrough":[[1,2],[2],[3,4,5],[4,5],[5]],"switchDefaultFirst":[["a"],["d","a"]],"switchMixedTests":[1,2,3,4,5,["p","p","p","r","p","r","p","r"]],"switchLexical":2,"switchTdz":"ReferenceError","switchDiscOnce":1101,"switchInLoop":"12|3|12|","switchNoCases":1,"leftEffects":[[1,3],["a","b","c"]],"undeclared":"ReferenceError","tdz":"ReferenceError","inLoop":[true,"Y1",true,"Y4"],"typeofForm":["s","s","s","s","s","s","n","n","n","n","n","o","o","O","o","o","o","O","O","O","O","o"],"frames":["one","one","done"],"generator":[[1,2,4],[2,4],[],[4]]}
+""";
+
+    [Fact]
+    public void ConstantComparesAndSwitchesMatchReferenceBehavior()
+    {
+        using var engine = new JsEngine();
+        var exp = System.Text.Json.JsonDocument.Parse(ConstantCompareExpected).RootElement;
+        var got = System.Text.Json.JsonDocument.Parse(engine.Evaluate(ConstantCompareScript).AsString()).RootElement;
+        foreach (var p in exp.EnumerateObject())
+        {
+            Assert.True(got.TryGetProperty(p.Name, out var g), $"missing case {p.Name}");
+            Assert.True(p.Value.ToString() == g.ToString(), $"{p.Name}: expected {p.Value} got {g}");
+        }
+    }
 }

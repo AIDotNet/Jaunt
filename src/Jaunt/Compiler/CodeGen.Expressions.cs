@@ -35,6 +35,13 @@ internal sealed partial class CodeGen
                     ResetTo(m);
                     return;
                 }
+                if (op is Op.StrictEqJmpFalse or Op.StrictNeJmpFalse && LiteralConstant(be.Right) is { } lit)
+                {
+                    int l = Expr(be.Left);
+                    _fb.JumpCmp(op == Op.StrictEqJmpFalse ? Op.StrictEqKJmpFalse : Op.StrictNeKJmpFalse, l, lit, falseLabel);
+                    ResetTo(m);
+                    return;
+                }
                 var (a, b) = Operands(be.Left, be.Right);
                 _fb.JumpCmp(op.Value, a, b, falseLabel);
                 ResetTo(m);
@@ -93,6 +100,17 @@ internal sealed partial class CodeGen
             _ => null,
         };
     }
+
+    /// <summary>
+    /// The constant of a string or number literal, for the compare-and-jump instructions that take one (<c>x === 'a'</c>, a
+    /// switch case): nothing to order against the left operand, and no dispatch and GC write barrier to bring it into a register.
+    /// </summary>
+    private int? LiteralConstant(Expression e) => e switch
+    {
+        StringLiteral s => _fb.Const(s.Value),
+        NumericLiteral n => _fb.Const(n.Value),
+        _ => null,
+    };
 
     /// <summary>A numeric literal an int32 holds exactly (not -0, which has no int32 form).</summary>
     private static bool TryInt32Literal(Expression e, out int value)

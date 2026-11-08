@@ -750,7 +750,7 @@ internal sealed partial class CodeGen
             if (n is IFunction or ClassBody) return;
             if (n is BinaryExpression be && be is not LogicalExpression)
             {
-                if (ImmediateForm(be) != null) { }   // the literal travels in the instruction
+                if (ImmediateForm(be) != null || be.Operator is Operator.StrictEquality or Operator.StrictInequality) { }   // the literal travels in the instruction
                 else if (be.Right is NumericLiteral rn && !nums.Contains(rn.Value) && !(_loopConsts?.ContainsKey(rn.Value) ?? false)) nums.Add(rn.Value);
                 else if (be.Right is StringLiteral rs && !strs.Contains(rs.Value) && !(_loopStringConsts?.ContainsKey(rs.Value) ?? false)) strs.Add(rs.Value);
             }
@@ -1257,6 +1257,12 @@ internal sealed partial class CodeGen
             var c = sw.Cases[i];
             if (c.Test == null) { defaultIdx = i; continue; }
             int mm = Mark;
+            if (LiteralConstant(c.Test) is { } lit)
+            {
+                // "jump unless they differ": the instruction falls through to the next case test when they differ
+                _fb.JumpCmp(Op.StrictNeKJmpFalse, disc, lit, caseLabels[i]);
+                continue;
+            }
             int t = Expr(c.Test);
             int cmp = Temp();
             _fb.Emit(Op.StrictEq, cmp, disc, t);

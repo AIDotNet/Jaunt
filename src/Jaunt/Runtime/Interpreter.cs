@@ -697,6 +697,14 @@ internal sealed partial class Vm
                             if (StrictEqualsInline(a, b) == ((Op)ip == Op.StrictEqJmpFalse)) { ip = ref Unsafe.Add(ref ip, 4); continue; }
                             goto JumpOperand3;
                         }
+                        case Op.StrictEqKJmpFalse:
+                        case Op.StrictNeKJmpFalse:
+                        {
+                            ref var a = ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1));
+                            ref var b = ref f.K[Unsafe.Add(ref ip, 2)];
+                            if (StrictEqualsInline(a, b) == ((Op)ip == Op.StrictEqKJmpFalse)) { ip = ref Unsafe.Add(ref ip, 4); continue; }
+                            goto JumpOperand3;
+                        }
 
                         // ---------------------------------------------------------- jumps
                         case Op.Jmp:
@@ -1433,7 +1441,16 @@ internal sealed partial class Vm
     private static bool ToBooleanSlow(in JsValue a) => Operations.ToBoolean(a);
 
     [MethodImpl(MethodImplOptions.NoInlining)]
-    private static bool StrictEqualsSlow(in JsValue a, in JsValue b) => Operations.StrictEquals(a, b);
+    private static bool StrictEqualsSlow(in JsValue a, in JsValue b)
+    {
+        // two different flat strings of one type tag, which usually differ early (a tag such as e.kind against a case label)
+        if (a.Ref is string x && b.Ref is string y)
+        {
+            if (x.Length != y.Length) return false;
+            return x.Length == 0 || (x[0] == y[0] && string.Equals(x, y));
+        }
+        return Operations.StrictEquals(a, b);
+    }
 
     [MethodImpl(MethodImplOptions.NoInlining)]
     private JsObject ConstructPrototype(JsClosure c)
