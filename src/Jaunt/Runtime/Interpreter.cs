@@ -911,6 +911,7 @@ internal sealed partial class Vm
     Unwind:
         f = UnwindToHandler(f, thrown);
     Reload:
+        if (ReferenceEquals(f, _resultThrown)) return TakePending();
         code0 = ref MemoryMarshal.GetArrayDataReference(f.Code);
         ip = ref Unsafe.Add(ref code0, f.Pc);
         r0 = ref Unsafe.Add(ref MemoryMarshal.GetArrayDataReference(f.Regs), f.Base);
@@ -993,7 +994,7 @@ internal sealed partial class Vm
     /// <summary>
     /// Finds the handler for <paramref name="thrown"/>, raised by the instruction at <c>f.Pc - 1</c>: pops the frames without one,
     /// stores the value in the exception register and returns the frame, with <c>Pc</c> at the handler. Past the loop's entry
-    /// frame the value continues as a CLR exception.
+    /// frame the value continues as a CLR exception, or as the loop's result for a <see cref="FrameFlags.ThrowAsResult"/> frame.
     /// </summary>
     [MethodImpl(MethodImplOptions.NoInlining)]
     private Frame UnwindToHandler(Frame f, JsValue thrown)
@@ -1015,7 +1016,16 @@ internal sealed partial class Vm
             }
             if ((f.Flags & FrameFlags.Entry) != 0)
             {
-                if ((f.Flags & FrameFlags.Coroutine) != 0) FinishCoroutine(f);
+                if ((f.Flags & FrameFlags.Coroutine) != 0)
+                {
+                    FinishCoroutine(f);
+                    if ((f.Flags & FrameFlags.ThrowAsResult) != 0)
+                    {
+                        f.Suspend = SuspendKind.Thrown;
+                        Pending = thrown;
+                        return _resultThrown;
+                    }
+                }
                 else PopFrame(f);
                 throw EscapeLoop(thrown);
             }
@@ -1023,6 +1033,12 @@ internal sealed partial class Vm
             f = FrameAt(Sp - 1);
         }
     }
+
+    /// <summary>
+    /// What <see cref="UnwindToHandler"/> returns when a <see cref="FrameFlags.ThrowAsResult"/> entry frame finished by throwing: the
+    /// loop then returns the value in <see cref="Pending"/>, whichever path unwound. It is a marker, never run.
+    /// </summary>
+    private readonly Frame _resultThrown = new();
 
     /// <summary>A coroutine's entry frame ran to completion or threw: it detaches for good.</summary>
     [MethodImpl(MethodImplOptions.NoInlining)]

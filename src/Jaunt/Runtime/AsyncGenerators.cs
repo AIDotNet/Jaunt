@@ -9,7 +9,7 @@ internal struct AsyncGenRequest
 {
     public int Mode;
     public JsValue Value;
-    public PromiseCapability Capability;
+    public JsPromise Promise;
 }
 
 internal sealed class JsAsyncGenerator : JsObject
@@ -17,6 +17,8 @@ internal sealed class JsAsyncGenerator : JsObject
     public Frame? Frame;
     public AsyncGenState State;
     public readonly Queue<AsyncGenRequest> Queue = new();
+    /// <summary>The reaction of the body's awaits (one at a time).</summary>
+    public PromiseReaction? AwaitReaction;
 
     public JsAsyncGenerator(Realm realm, JsObject proto) : base(realm, proto) { }
     public override string ClassName => "AsyncGenerator";
@@ -28,8 +30,9 @@ internal static class AsyncGenerators
     public static JsValue Start(Vm vm, JsClosure c, JsValue thisValue, ReadOnlySpan<JsValue> args)
     {
         var realm = c.Realm;
-        var frame = vm.PushFrame(c, thisValue, args, JsValue.Undefined, FrameFlags.OwnsRegs | FrameFlags.Coroutine);
-        vm.Run(frame); // parameter initialization up to InitialYield (errors are thrown synchronously)
+        var frame = vm.PushFrame(c, thisValue, args, JsValue.Undefined, FrameFlags.OwnsRegs | FrameFlags.Coroutine | FrameFlags.ThrowAsResult);
+        var r = vm.Run(frame); // parameter initialization up to InitialYield (errors are thrown synchronously)
+        if (frame.Suspend == SuspendKind.Thrown) throw new JsThrowException(r);
         var protoV = c.Get("prototype");   // read after parameter initialization
         var proto = protoV.IsObject ? protoV.AsObjectUnchecked : realm.AsyncGeneratorPrototype;
         var gen = new JsAsyncGenerator(realm, proto) { Frame = frame, State = AsyncGenState.SuspendedStart };
@@ -40,13 +43,12 @@ internal static class AsyncGenerators
     public static JsValue Enqueue(Realm realm, JsValue thisValue, int mode, JsValue value, string method)
     {
         var promise = new JsPromise(realm);
-        var cap = new PromiseCapability(promise);
         if (thisValue.IsNotObject || thisValue.Ref is not JsAsyncGenerator gen)
         {
-            cap.DoReject(realm, JsErrors.TypeError(realm, $"{method} method called on incompatible receiver {thisValue}").Value);
+            promise.RejectWith(JsErrors.TypeError(realm, $"{method} method called on incompatible receiver {thisValue}").Value);
             return JsValue.FromObject(promise);
         }
-        gen.Queue.Enqueue(new AsyncGenRequest { Mode = mode, Value = value, Capability = cap });
+        gen.Queue.Enqueue(new AsyncGenRequest { Mode = mode, Value = value, Promise = promise });
         if (gen.State != AsyncGenState.Executing && gen.State != AsyncGenState.AwaitingReturn) ResumeNext(realm, gen);
         return JsValue.FromObject(promise);
     }
@@ -54,8 +56,8 @@ internal static class AsyncGenerators
     private static void CompleteStep(Realm realm, JsAsyncGenerator gen, bool normal, JsValue value, bool done)
     {
         var req = gen.Queue.Dequeue();
-        if (!normal) req.Capability.DoReject(realm, value);
-        else req.Capability.DoResolve(realm, Coroutines.CreateIterResult(realm, value, done));
+        if (!normal) req.Promise.RejectWith(value);
+        else req.Promise.ResolveWith(Coroutines.CreateIterResult(realm, value, done));
     }
 
     /// <summary>Drains the request queue while the generator is not running (AsyncGeneratorResumeNext / AwaitReturn / DrainQueue).</summary>
@@ -115,13 +117,13 @@ internal static class AsyncGenerators
         }
     }
 
-    private sealed class AwaitResume : IPromiseContinuation
+    private sealed class AwaitResume : PromiseReaction
     {
         private readonly JsAsyncGenerator _gen;
         public AwaitResume(JsAsyncGenerator gen) => _gen = gen;
-        public void OnSettled(Realm realm, bool fulfilled, JsValue value)
+        public override void Run(Realm realm, bool fulfilled, in JsValue argument)
         {
-            Step(realm, _gen, fulfilled ? Coroutines.ModeNext : Coroutines.ModeThrow, value);
+            Step(realm, _gen, fulfilled ? Coroutines.ModeNext : Coroutines.ModeThrow, argument);
             ResumeNext(realm, _gen);
         }
     }
@@ -137,33 +139,27 @@ internal static class AsyncGenerators
             frame.Regs[frame.ResumeSentReg] = value;
             frame.Regs[frame.ResumeModeReg] = new JsValue(mode);
             vm.AttachFrame(frame);
-            JsValue r;
-            try
-            {
-                r = vm.Run(frame);
-            }
-            catch (JsThrowException ex)
-            {
-                gen.State = AsyncGenState.Completed;
-                gen.Frame = null;
-                CompleteStep(realm, gen, false, ex.Value, true);
-                return;
-            }
+            var r = vm.Run(frame);
             switch (frame.Suspend)
             {
+                case SuspendKind.Thrown:
+                    gen.State = AsyncGenState.Completed;
+                    gen.Frame = null;
+                    vm.ReleaseCoroutineFrame(frame);
+                    CompleteStep(realm, gen, false, r, true);
+                    return;
                 case SuspendKind.Await:
-                {
-                    JsPromise awaited;
-                    try { awaited = JsPromise.Resolve(realm, r); }
+                    try
+                    {
+                        JsPromise.Await(realm, r, gen.AwaitReaction ??= new AwaitResume(gen));
+                        return; // still Executing
+                    }
                     catch (JsThrowException ex)
                     {
                         mode = Coroutines.ModeThrow;
                         value = ex.Value;
-                        continue;
                     }
-                    awaited.Then(new AwaitResume(gen));
-                    return; // still Executing
-                }
+                    continue;
                 case SuspendKind.Yield:
                 case SuspendKind.YieldRaw:
                     gen.State = AsyncGenState.SuspendedYield;
@@ -172,6 +168,7 @@ internal static class AsyncGenerators
                 default:
                     gen.State = AsyncGenState.Completed;
                     gen.Frame = null;
+                    vm.ReleaseCoroutineFrame(frame);
                     CompleteStep(realm, gen, true, r, true);
                     return;
             }

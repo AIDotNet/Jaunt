@@ -94,78 +94,85 @@ internal static class Coroutines
             default:
                 gen.State = GeneratorState.Completed;
                 gen.Frame = null;
+                vm.ReleaseCoroutineFrame(frame);
                 return CreateIterResult(realm, r, true);
         }
     }
 
     // ------------------------------------------------------------------ async functions
 
-    private sealed class AsyncState : IPromiseContinuation
+    /// <summary>A running async function; the same object is the reaction of each of its awaits.</summary>
+    private sealed class AsyncState : PromiseReaction
     {
-        public required Frame Frame;
-        public required PromiseCapability Capability;
+        public readonly Frame Frame;
+        public readonly JsPromise Promise;
+        public AsyncState(Frame frame, JsPromise promise) { Frame = frame; Promise = promise; }
 
-        public void OnSettled(Realm realm, bool fulfilled, JsValue value) => Step(realm, this, fulfilled ? ModeNext : ModeThrow, value, first: false);
+        public override void Run(Realm realm, bool fulfilled, in JsValue argument)
+        {
+            var frame = Frame;
+            frame.Regs[frame.ResumeSentReg] = argument;
+            frame.Regs[frame.ResumeModeReg] = new JsValue(fulfilled ? ModeNext : ModeThrow);
+            var vm = realm.Vm;
+            vm.EnsureNativeStack();
+            vm.AttachFrame(frame);
+            Step(realm, this);
+        }
     }
 
     public static JsValue StartAsync(Vm vm, JsClosure c, JsValue thisValue, ReadOnlySpan<JsValue> args)
     {
-        var realm = c.Realm;
-        var promise = new JsPromise(realm);
-        var frame = vm.PushFrame(c, thisValue, args, JsValue.Undefined, FrameFlags.OwnsRegs | FrameFlags.Coroutine);
-        var state = new AsyncState { Frame = frame, Capability = new PromiseCapability(promise) };
-        Step(realm, state, ModeNext, JsValue.Undefined, first: true);
+        var promise = new JsPromise(c.Realm);
+        vm.EnsureNativeStack();
+        var frame = vm.PushFrame(c, thisValue, args, JsValue.Undefined, FrameFlags.OwnsRegs | FrameFlags.Coroutine | FrameFlags.ThrowAsResult);
+        Step(c.Realm, new AsyncState(frame, promise));
         return JsValue.FromObject(promise);
     }
 
     /// <summary>Starts an async body (module with top-level await) and returns its completion promise.</summary>
     public static JsPromise StartAsyncBody(Vm vm, JsClosure c, JsValue thisValue)
     {
-        var realm = c.Realm;
-        var promise = new JsPromise(realm);
-        var frame = vm.PushFrame(c, thisValue, ReadOnlySpan<JsValue>.Empty, JsValue.Undefined, FrameFlags.OwnsRegs | FrameFlags.Coroutine);
-        var state = new AsyncState { Frame = frame, Capability = new PromiseCapability(promise) };
-        Step(realm, state, ModeNext, JsValue.Undefined, first: true);
+        var promise = new JsPromise(c.Realm);
+        vm.EnsureNativeStack();
+        var frame = vm.PushFrame(c, thisValue, ReadOnlySpan<JsValue>.Empty, JsValue.Undefined, FrameFlags.OwnsRegs | FrameFlags.Coroutine | FrameFlags.ThrowAsResult);
+        Step(c.Realm, new AsyncState(frame, promise));
         return promise;
     }
 
-    private static void Step(Realm realm, AsyncState state, int mode, JsValue value, bool first)
+    /// <summary>Runs the attached frame until its next await or its completion.</summary>
+    private static void Step(Realm realm, AsyncState state)
     {
         var vm = realm.Vm;
-        vm.EnsureNativeStack();
         var frame = state.Frame;
-        if (!first)
+        while (true)
         {
-            frame.Regs[frame.ResumeSentReg] = value;
-            frame.Regs[frame.ResumeModeReg] = new JsValue(mode);
-            vm.AttachFrame(frame);
-        }
-        JsValue r;
-        try
-        {
-            r = vm.Run(frame);
-        }
-        catch (JsThrowException ex)
-        {
-            state.Capability.DoReject(realm, ex.Value);
-            return;
-        }
-        if (frame.Suspend == SuspendKind.Await)
-        {
-            JsPromise awaited;
-            try
+            var r = vm.Run(frame);
+            switch (frame.Suspend)
             {
-                awaited = JsPromise.Resolve(realm, r);
+                case SuspendKind.Await:
+                    try
+                    {
+                        JsPromise.Await(realm, r, state);
+                        return;
+                    }
+                    catch (JsThrowException ex)
+                    {
+                        // resume with a throw completion
+                        frame.Regs[frame.ResumeSentReg] = ex.Value;
+                        frame.Regs[frame.ResumeModeReg] = new JsValue(ModeThrow);
+                        vm.EnsureNativeStack();
+                        vm.AttachFrame(frame);
+                    }
+                    break;
+                case SuspendKind.Thrown:
+                    vm.ReleaseCoroutineFrame(frame);
+                    state.Promise.RejectWith(r);
+                    return;
+                default:
+                    vm.ReleaseCoroutineFrame(frame);
+                    state.Promise.ResolveWith(r);
+                    return;
             }
-            catch (JsThrowException ex)
-            {
-                // resume with a throw completion
-                Step(realm, state, ModeThrow, ex.Value, first: false);
-                return;
-            }
-            awaited.Then(state);
-            return;
         }
-        state.Capability.DoResolve(realm, r);
     }
 }

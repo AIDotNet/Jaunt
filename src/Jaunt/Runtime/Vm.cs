@@ -19,9 +19,11 @@ internal enum FrameFlags : byte
     RealmSwitch = 8,
     /// <summary>Entry frame of a <c>RunLoop</c> invocation: returning from or unwinding past it leaves the loop.</summary>
     Entry = 16,
+    /// <summary>Entry coroutine frame whose driver takes an uncaught throw as a return value with <see cref="SuspendKind.Thrown"/>, instead of a CLR exception.</summary>
+    ThrowAsResult = 32,
 }
 
-internal enum SuspendKind : byte { None, Yield, YieldRaw, Await, Initial }
+internal enum SuspendKind : byte { None, Yield, YieldRaw, Await, Initial, Thrown }
 
 /// <summary>One captured stack frame: the function and the pc of the instruction it was executing.</summary>
 internal readonly struct StackFrameRecord
@@ -242,18 +244,26 @@ internal sealed partial class Vm
     [MethodImpl(MethodImplOptions.NoInlining)]
     private JsValue RunOnThread(Frame entry)
     {
+        var saved = EnterThread();
+        try { return RunGuarded(entry); }
+        finally { LeaveThread(saved); }
+    }
+
+    private Vm? EnterThread()
+    {
         var saved = t_current;
         if (saved != null) saved._onThread = false;   // a host function of that Vm entered this one
         t_current = this;
         _onThread = true;
-        try { return RunGuarded(entry); }
-        finally
-        {
-            _onThread = false;
-            t_current = saved;
-            if (saved != null) saved._onThread = true;
-            else _stackCheckedTo = nuint.MaxValue;   // the next execution may run on another thread
-        }
+        return saved;
+    }
+
+    private void LeaveThread(Vm? saved)
+    {
+        _onThread = false;
+        t_current = saved;
+        if (saved != null) saved._onThread = true;
+        _stackCheckedTo = nuint.MaxValue;   // the next execution of this Vm may run on another thread
     }
 
     /// <summary>Whether the active execution has a wall-clock deadline.</summary>
@@ -470,6 +480,39 @@ internal sealed partial class Vm
         f.Displaced = null;
     }
 
+    /// <summary>Finished coroutine frames for reuse, linked through <see cref="Frame.Displaced"/>. Like the register stack they keep stale references until the root execution ends.</summary>
+    private Frame? _freeCoroutineFrames;
+    private int _freeCoroutineFrameCount;
+    private const int MaxFreeCoroutineFrames = 32;
+    private const int MaxPooledCoroutineRegisters = 128;
+
+    private Frame RentCoroutineFrame(int registerCount)
+    {
+        var f = _freeCoroutineFrames;
+        if (f == null)
+        {
+            f = new Frame { ChunkIndex = -1 };
+            f.Regs = new JsValue[registerCount];
+            return f;
+        }
+        _freeCoroutineFrames = f.Displaced;
+        _freeCoroutineFrameCount--;
+        f.Displaced = null;
+        if (f.Regs.Length < registerCount) f.Regs = new JsValue[registerCount];
+        return f;
+    }
+
+    /// <summary>Takes back the frame of a coroutine that ran to completion; nothing may refer to it any more.</summary>
+    internal void ReleaseCoroutineFrame(Frame f)
+    {
+        if (_freeCoroutineFrameCount >= MaxFreeCoroutineFrames || f.Regs.Length > MaxPooledCoroutineRegisters) return;
+        f.Args = null;
+        f.NewTarget = default;
+        f.Displaced = _freeCoroutineFrames;
+        _freeCoroutineFrames = f;
+        _freeCoroutineFrameCount++;
+    }
+
     /// <summary>Pushes a frame for a closure call; arguments are copied into the new register window.</summary>
     internal Frame PushFrame(JsClosure c, JsValue thisValue, ReadOnlySpan<JsValue> args, JsValue newTarget, FrameFlags flags)
     {
@@ -479,10 +522,7 @@ internal sealed partial class Vm
         int savedTop = _top, savedChunk = _chunkIndex;
         if ((flags & FrameFlags.OwnsRegs) != 0)
         {
-            f = new Frame();
-            f.Regs = new JsValue[t.RegisterCount];
-            f.Base = 0;
-            f.ChunkIndex = -1;
+            f = RentCoroutineFrame(t.RegisterCount);
             PlaceHeapFrame(f);
         }
         else
@@ -773,6 +813,9 @@ internal sealed partial class Vm
         if (_sortScratch != null && _sortScratch.Length > 1 << 12) _sortScratch = null;   // an idle engine keeps at most 64 KB of sort scratch
         // a compacting GC may have moved the chunk to 8 mod 16; it is empty now, and is rarely moved again once it is old
         if (_chunkIndex == 0 && !IsAligned(_chunk)) _chunks[0] = _chunk = NewChunk(_chunk.Length);
+        TrimJobs();
+        _freeCoroutineFrames = null;
+        _freeCoroutineFrameCount = 0;
         var pool = _frames;   // Sp is 0 here: every slot holds a pooled frame (or nothing)
         for (int i = 0; i < pool.Length; i++)
         {
