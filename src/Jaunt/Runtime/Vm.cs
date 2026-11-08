@@ -396,7 +396,7 @@ internal sealed partial class Vm
         if (_top == 0 && _chunkIndex == 0 && prevLen < MaxChunkSize)
         {
             // nothing live in the first chunk yet: just grow it
-            _chunks[0] = _chunk = chunk = new JsValue[Math.Max(prevLen == 0 ? InitialChunkSize : Math.Min(prevLen * 4, MaxChunkSize), count)];
+            _chunks[0] = _chunk = chunk = NewChunk(Math.Max(prevLen == 0 ? InitialChunkSize : Math.Min(prevLen * 4, MaxChunkSize), count));
             baseIndex = 0;
             chunkIndex = 0;
             _top = count;
@@ -405,8 +405,8 @@ internal sealed partial class Vm
         }
         _chunkIndex++;
         int size = Math.Max(Math.Min(prevLen * 2, MaxChunkSize), count);
-        if (_chunkIndex == _chunks.Count) _chunks.Add(new JsValue[size]);
-        else if (_chunks[_chunkIndex].Length < count) _chunks[_chunkIndex] = new JsValue[size];
+        if (_chunkIndex == _chunks.Count) _chunks.Add(NewChunk(size));
+        else if (_chunks[_chunkIndex].Length < count) _chunks[_chunkIndex] = NewChunk(size);
         _chunk = chunk = _chunks[_chunkIndex];
         _top = 0;
         baseIndex = 0;
@@ -415,6 +415,21 @@ internal sealed partial class Vm
         if (_chunkIndex > _chunkHwm) _chunkHwm = _chunkIndex;
         return chunk;
     }
+
+    /// <summary>
+    /// A register chunk whose elements are 16-byte aligned. The GC aligns objects to 8 bytes, and with the elements at 8 mod 16 a
+    /// register load right after the store of the same register (the interpreter's usual pattern) straddles what the
+    /// store wrote as a pair: the same workload ran up to 35% slower depending on what was allocated before the chunk.
+    /// An array's size is 8 mod 16, so the next object after a misaligned array is aligned.
+    /// </summary>
+    private static JsValue[] NewChunk(int size)
+    {
+        var chunk = new JsValue[size];
+        for (int i = 0; i < 8 && !IsAligned(chunk); i++) chunk = new JsValue[size];
+        return chunk;
+    }
+
+    private static unsafe bool IsAligned(JsValue[] chunk) => chunk.Length == 0 || ((nuint)Unsafe.AsPointer(ref chunk[0]) & 15) == 0;
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private Frame RentFrame()
@@ -751,6 +766,8 @@ internal sealed partial class Vm
     {
         ClearRegisterStack();
         if (_sortScratch != null && _sortScratch.Length > 1 << 12) _sortScratch = null;   // an idle engine keeps at most 64 KB of sort scratch
+        // a compacting GC may have moved the chunk to 8 mod 16; it is empty now, and is rarely moved again once it is old
+        if (_chunkIndex == 0 && !IsAligned(_chunk)) _chunks[0] = _chunk = NewChunk(_chunk.Length);
         var pool = _frames;   // Sp is 0 here: every slot holds a pooled frame (or nothing)
         for (int i = 0; i < pool.Length; i++)
         {
