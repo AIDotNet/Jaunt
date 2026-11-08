@@ -367,7 +367,7 @@ internal sealed partial class Vm
             var e = (DecoratedElement)x.Callee.State!;
             if (!x[0].IsObject) throw JsErrors.TypeError(x.Realm, "access.has called on a non-object");
             var o = x[0].AsObjectUnchecked;
-            if (e.Private != null) return JsValue.FromBool(o.PrivateElements is { } pe && pe.ContainsKey(e.Private));
+            if (e.Private != null) return JsValue.FromBool(o.FindPrivate(e.Private) >= 0);
             return JsValue.FromBool(o.HasProperty(e.Key));
         }) { State = el };
         access.CreateDataPropertyOrThrow("has", JsValue.FromObject(has));

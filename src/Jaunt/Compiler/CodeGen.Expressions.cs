@@ -375,7 +375,7 @@ internal sealed partial class CodeGen
     private int ObjectLiteral(ObjectExpression oe, int dst)
     {
         int d = Dst(dst);
-        _fb.Emit(Op.NewObject, d);
+        _fb.Emit(Op.NewObject, d, Math.Min(oe.Properties.Count, Jaunt.Runtime.Shape.MaxShapeProperties));   // slots to start with
         foreach (var p in oe.Properties)
         {
             int m = Mark;
@@ -401,14 +401,15 @@ internal sealed partial class CodeGen
             }
             else if (prop.Method)
             {
-                int key = Temp();
-                LoadKey(prop, key);
+                int key = staticName == null ? Temp() : -1;
+                if (staticName == null) LoadKey(prop, key);
                 int fn = Temp();
                 int idx = CompileNestedFunction((FunctionExpression)prop.Value, staticName ?? "", FunctionFlags.Method, prop.Start);
                 _fb.Emit(Op.Closure, fn, idx);
                 _fb.Emit(Op.SetHomeObject, fn, d);
                 // computed method keys (incl. symbols) name the function at run time
-                _fb.Emit(Op.DefineAccessor, d, key, fn, 2 | 4 | (staticName == null ? 8 : 0));
+                if (staticName != null) _fb.Emit(Op.DefinePropK, d, _fb.Const(staticName), fn, _fb.NewIc());
+                else _fb.Emit(Op.DefineAccessor, d, key, fn, 2 | 4 | 8);
             }
             else if (staticName != null)
             {
@@ -420,7 +421,7 @@ internal sealed partial class CodeGen
                 else
                 {
                     int v = Expr((Expression)prop.Value, -1, staticName);
-                    _fb.Emit(Op.DefinePropK, d, _fb.Const(staticName), v);
+                    _fb.Emit(Op.DefinePropK, d, _fb.Const(staticName), v, _fb.NewIc());
                 }
             }
             else
@@ -944,6 +945,7 @@ internal sealed partial class CodeGen
                 _fb.Position(call);
                 _fb.Emit(Op.SuperCall, d, start, call.Arguments.Count);
             }
+            _fb.Emit(Op.SuperBind, d);
             ResetTo(Math.Max(m, d + 1));
             return d;
         }
@@ -1880,11 +1882,10 @@ internal sealed partial class CodeGen
         _fb = FunctionBuilder.Rent();
         if ((flags & FunctionFlags.Derived) != 0)
         {
-            t.Flags |= FunctionFlags.NeedsArgsArray | FunctionFlags.HasRest;
-            t.RestIndex = 0;
-            int arr = _fb.AllocReg(), d = _fb.AllocReg();
-            _fb.Emit(Op.CreateRestArray, arr, 0);
-            _fb.Emit(Op.SuperCallSpread, d, arr);
+            t.Flags |= FunctionFlags.NeedsArgsArray;
+            int d = _fb.AllocReg();
+            _fb.Emit(Op.SuperCall, d, d, -1);   // forwards the arguments of the frame
+            _fb.Emit(Op.SuperBind, d);
         }
         _fb.Emit(Op.RetUndef);
         _fb.Finish(t);

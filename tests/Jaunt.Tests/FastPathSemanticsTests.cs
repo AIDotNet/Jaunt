@@ -169,6 +169,313 @@ JSON.stringify(out)
         Assert.Equal(exp.EnumerateObject().Count(), got.EnumerateObject().Count());
     }
 
+    // Object model fast paths: shape-mode arguments objects (mapping, attribute changes, ICs), attribute changes that keep
+    // an object in shape mode, big-shape lookup, array-backed private elements, `with`. Expected value from Node (V8), except
+    // for the has:a before get:a under a proxy `with` object: GetBindingValue calls HasProperty (9.1.1.2.6), which V8 omits.
+    private const string ObjectModelScript = """
+const out = {};
+const sloppy = new Function(`
+  const r = {};
+  r.alias = (function (a, b) { arguments[0] = 10; b = 20; return [a, arguments[0], arguments[1], arguments.length]; })(1, 2);
+  r.extra = (function (a) { arguments[1] = 'x'; arguments[3] = 'y'; return [arguments[1], arguments[3], arguments.length, Object.keys(arguments)]; })(1, 2);
+  r.missing = (function (a, b) { b = 5; return [arguments[1], arguments.length, 1 in arguments]; })(1);
+  r.deleteRemap = (function (a) { delete arguments[0]; a = 2; const u = arguments[0]; arguments[0] = 3; return [u, a, arguments[0], Object.keys(arguments)]; })(1);
+  r.definedRO = (function (a) { Object.defineProperty(arguments, '0', { writable: false }); a = 2; arguments[0] = 3; return [a, arguments[0]]; })(1);
+  r.definedValue = (function (a) { Object.defineProperty(arguments, '0', { value: 7 }); const x = a; a = 8; return [x, arguments[0]]; })(1);
+  r.getter = (function (a) { let n = 0; Object.defineProperty(arguments, '0', { get() { return ++n; }, set(v) { n = v; } }); arguments[0]; arguments[0] = 40; return [arguments[0], a, n]; })(1);
+  r.frozen = (function (a) { Object.freeze(arguments); a = 9; arguments[0] = 1; return [a, arguments[0], Object.isFrozen(arguments)]; })(5);
+  r.sealed = (function (a) { Object.seal(arguments); a = 9; const v = arguments[0]; arguments[0] = 1; return [a, v, Object.isSealed(arguments)]; })(5);
+  r.desc = (function (a) { a = 3; const d = Object.getOwnPropertyDescriptor(arguments, '0'); const l = Object.getOwnPropertyDescriptor(arguments, 'length'); return [d, l, typeof Object.getOwnPropertyDescriptor(arguments, 'callee').value]; })(1);
+  r.named = (function (a) { const o = []; for (let i = 0; i < 3; i++) { o.push(arguments.length); arguments.length = i; } arguments.extra = 1; return [o, Reflect.ownKeys(arguments).map(String), arguments['0']]; })(1, 2);
+  r.stringKey = (function (a) { a = 'new'; const k = '0'; return [arguments[k], arguments['0'], k in arguments]; })('old');
+  r.inherited = (function (a) { const c = Object.create(arguments); a = 2; return [c[0], c.length, (c[0] = 5, c[0]), arguments[0], Object.keys(c)]; })(1);
+  r.iter = (function (a, b) { a = 'p'; return [...arguments, Array.prototype.slice.call(arguments, 1), Array.from(arguments)]; })(1, 2);
+  r.tostr = (function () { return [Object.prototype.toString.call(arguments), arguments[Symbol.iterator] === Array.prototype.values]; })();
+  r.icShare = (function () { const get = (o) => o.length, read = (o) => o[0]; const res = []; const plain = {}; plain[0] = 'plain'; Object.defineProperty(plain, 'length', { value: 'L', writable: true, configurable: true }); res.push(get(plain), read(plain)); (function (a) { a = 'live'; res.push(get(arguments), read(arguments)); })('stale'); return res; })();
+  r.manyArgs = (function (a, b) { a = 'z'; const n = []; for (let i = 0; i < arguments.length; i += 15) n.push(arguments[i]); arguments[69] = 'q'; return [n, arguments.length, arguments[69]]; }).apply(null, Array.from({ length: 70 }, (_, i) => i));
+  return r;
+`)();
+out.sloppy = sloppy;
+out.strict = (function (a) { 'use strict'; a = 2; arguments[1] = 'b'; const e = []; try { arguments.callee; } catch (x) { e.push(x.constructor.name); } Object.freeze(arguments); try { arguments[0] = 9; } catch (x) { e.push(x.constructor.name); } return [arguments[0], arguments[1], arguments.length, e, Object.isFrozen(arguments)]; })(1, 'x');
+// attribute changes that keep the object's shape
+out.freeze = (() => {
+  const read = (o) => o.a, write = (o, v) => { o.a = v; return o.a; }, add = (o) => { o.z = 1; return o.z; };
+  const plain = { a: 1, b: 2 }, frozen = Object.freeze({ a: 1, b: 2 }), r = [];
+  r.push(read(plain), read(frozen), write(plain, 5), write(frozen, 5), add({ a: 1, b: 2 }), add(frozen), add({ a: 1, b: 2 }));
+  r.push(Object.isFrozen(frozen), Object.isSealed(frozen), Object.isFrozen(plain), delete frozen.a, frozen.a, Object.getOwnPropertyDescriptor(frozen, 'a'));
+  const sealed = Object.seal({ a: 1, get b() { return 2; } });
+  r.push(write(sealed, 9), delete sealed.a, Object.isSealed(sealed), Object.isFrozen(sealed), Object.getOwnPropertyDescriptor(sealed, 'a'));
+  r.push({ ...frozen }, Object.getOwnPropertyDescriptor({ ...frozen }, 'a').writable, Object.keys(frozen), JSON.stringify(frozen));
+  const acc = Object.freeze({ get g() { return 1; }, set g(v) { this.hit = v; } });
+  r.push(typeof Object.getOwnPropertyDescriptor(acc, 'g').set, Object.isFrozen(acc));
+  r.push(Object.isFrozen(Object.preventExtensions({})), Object.isFrozen(Object.preventExtensions({ x: 1 })), Object.isFrozen(Object.freeze({})), Object.isExtensible(Object.freeze({})));
+  return r;
+})();
+out.protoFreeze = (() => {
+  const proto = { x: 1 }, child = Object.create(proto), set = (o) => { o.x = 2; return [o.x, Object.keys(o)]; };
+  const r = [set(Object.create(proto))];
+  Object.freeze(proto);
+  r.push(set(child));
+  const p2 = { y: 1 }, read = (o) => o.y, c2 = Object.create(p2);
+  r.push(read(c2));
+  Object.defineProperty(p2, 'y', { get() { return 'getter'; } });
+  r.push(read(c2));
+  return r;
+})();
+out.redefine = (() => {
+  const o = { a: 1, b: 2, c: 3 }, read = (x) => x.b, r = [read(o)];
+  Object.defineProperty(o, 'b', { enumerable: false });
+  r.push(read(o), Object.keys(o), JSON.stringify(o), { ...o }, Object.getOwnPropertyDescriptor(o, 'b'));
+  Object.defineProperty(o, 'b', { get() { return 'g'; }, configurable: true });
+  r.push(read(o), Object.getOwnPropertyDescriptor(o, 'b').set === undefined, Object.keys(o));
+  Object.defineProperty(o, 'b', { value: 'd', writable: true, enumerable: true });
+  r.push(read(o), Object.keys(o), Object.entries(o));
+  o.d = 4; delete o.a; r.push(Object.keys(o));
+  const same1 = {}, same2 = {};
+  for (const s of [same1, same2]) { s.k = 1; Object.defineProperty(s, 'k', { writable: false }); s.m = 2; }
+  same1.k = 5; same2.m = 6;
+  r.push(same1, same2, Object.getOwnPropertyDescriptor(same2, 'k').writable);
+  const fn = function () {}; Object.defineProperty(fn, 'name', { value: 'n', configurable: false }); Object.defineProperty(fn, 'length', { writable: true });
+  fn.length = 9; r.push(fn.name, fn.length, Object.getOwnPropertyNames(fn).slice(0, 2));
+  const sym = Symbol('s'), so = { [sym]: 1, z: 2 }; Object.defineProperty(so, sym, { enumerable: false }); r.push(Reflect.ownKeys(so).length, Object.assign({}, so)[sym]);
+  return r;
+})();
+// property lookup in shapes with many keys
+out.bigShape = (() => {
+  const s1 = Symbol('a'), s2 = Symbol('b');
+  const mk = () => { const o = {}; for (let i = 0; i < 40; i++) o['key' + i] = i; o[s1] = 's1'; o['k' + 'ey7' + 'x'] = 'dyn'; return o; };
+  const o = mk();
+  return [o['key' + 39], o['key' + 40], o.key7, o.key7x, o[s1], o[s2], s2 in o, 'key0' in o, '' in o, ({ ...o }).key39, Object.keys(o).length];
+})();
+// a store site that cycles through many shapes (Vm-wide store cache)
+out.megaStore = (() => {
+  const set = (o, v) => { o.x = v; return o; }, seen = [];
+  class Base { constructor() { set(this, 'b'); } }
+  const classes = []; for (let i = 0; i < 12; i++) classes.push(class extends Base {});
+  for (let round = 0; round < 3; round++) for (const C of classes) seen.push(Object.keys(new C()).join());
+  const r = [seen.every((k) => k === 'x')];
+  // same shape as the cached append, each with a different say in adding x
+  const fresh = () => ({ m: 1 }); set(fresh(), 1); set(fresh(), 1);
+  const ne = Object.preventExtensions(fresh()); set(ne, 1); r.push(ne.x);
+  const fz = Object.freeze({ x: 1 }); set(fz, 2); r.push(fz.x);
+  const proto = fresh(), kid = Object.create(proto), read = (o) => o.x; r.push(read(kid)); set(proto, 'via proto'); r.push(read(kid));
+  class G { set x(v) { this.hit = v; } } const g = new G(); set(g, 3); r.push(g.hit, Object.keys(g));
+  class H {} const h1 = new H(), h2 = new H(); set(h1, 1); Object.defineProperty(H.prototype, 'x', { set(v) { this.viaSetter = v; }, configurable: true }); set(h2, 2); r.push(Object.keys(h1), Object.keys(h2));
+  class R {} const r1 = new R(), r2 = new R(); set(r1, 1); Object.defineProperty(R.prototype, 'x', { value: 'ro', writable: false }); set(r2, 2); r.push(r1.x, r2.x, Object.keys(r2));
+  const ow = { x: 0 }; set(ow, 1); set(ow, 2); r.push(ow.x); Object.defineProperty(ow, 'x', { writable: false }); set(ow, 3); r.push(ow.x);
+  const arr = []; set(arr, 1); r.push(arr.x, arr.length); const pr = new Proxy({}, { set(t, k, v) { t[k] = v + 1; return true; } }); set(pr, 1); r.push(pr.x);
+  const many = {}; for (let i = 0; i < 70; i++) many['k' + i] = i; set(many, 'dict'); r.push(many.x, Object.keys(many).length);
+  return r;
+})();
+// the "prototype" of a function is created when first read
+out.lazyProto = (() => {
+  const r = [], mk = () => function F() {};
+  const a = mk(), d = Object.getOwnPropertyDescriptor(a, 'prototype');
+  r.push(d.writable, d.enumerable, d.configurable, typeof d.value, d.value.constructor === a, Object.keys(d.value), Object.getOwnPropertyDescriptor(d.value, 'constructor').enumerable, a.prototype === d.value);
+  const b = mk(), read = (f) => f.prototype; r.push(read(mk()) !== read(mk()), read(b) === b.prototype, 'prototype' in b, b.hasOwnProperty('prototype'), Object.getOwnPropertyNames(b));
+  const c = mk(); c.prototype = { x: 1 }; r.push(new c().x, Object.getPrototypeOf(new c()) === c.prototype);
+  const e = mk(); const i1 = new e(); r.push(Object.getPrototypeOf(i1) === e.prototype, i1 instanceof e, i1.constructor === e);
+  const f = mk(); Object.defineProperty(f, 'prototype', { writable: false }); const fp = f.prototype; f.prototype = 1; r.push(f.prototype === fp, typeof fp);
+  const g = mk(); Object.freeze(g); r.push(typeof g.prototype, Object.isFrozen(g), g.prototype.constructor === g);
+  const h = mk(); Object.defineProperty(h, 'prototype', { value: 5 }); r.push(h.prototype, new h() instanceof Object);
+  const k = Object.create(mk()); const kp = k.prototype; r.push(typeof kp, kp === Object.getPrototypeOf(k).prototype);
+  const m = mk(); const o = Object.create(m); o.prototype = 3; r.push(o.prototype, typeof m.prototype, Object.keys(o));
+  const n = mk(); const bound = n.bind(); r.push(new bound() instanceof n, 'prototype' in bound);
+  class C extends mk() {} r.push(typeof C.prototype, Object.getPrototypeOf(C.prototype) === Object.getPrototypeOf(C).prototype);
+  r.push(Reflect.ownKeys(mk()), JSON.stringify(mk()), Object.entries(mk()).length, typeof (() => {}).prototype, typeof ({ m() {} }).m.prototype, typeof (async function () {}).prototype, typeof (function* () {}).prototype);
+  const p = mk(); delete p.prototype; r.push(delete p.prototype, typeof p.prototype);
+  const q = mk(); q.extra = 1; q.more = 2; q.prop3 = 3; r.push(Object.keys(q), typeof q.prototype);
+  const s = mk(); for (let i = 0; i < 40; i++) s['x' + i] = i; delete s.x0; r.push(typeof s.prototype, s.prototype.constructor === s);
+  return r;
+})();
+// new and super() of class constructors run in the caller's interpreter loop
+out.classFrames = (() => {
+  const log = [], msg = (f) => { try { return f(); } catch (e) { return e.constructor.name + ': ' + (e instanceof ReferenceError ? 'ref' : 'other'); } };
+  class A { x = log.push('A.x'); constructor(v) { log.push('A', new.target.name, v); this.v = v; } }
+  class B extends A { y = log.push('B.y'); constructor(v) { log.push('B before'); super(v + 1); log.push('B after', this.x, this.y); } }
+  class C extends B { z = log.push('C.z'); }
+  const c = new C(1); log.push(Object.keys(c), c instanceof A, Object.getPrototypeOf(c) === C.prototype);
+  class Twice extends A { constructor() { super(1); super(2); } }
+  class NoSuper extends A { constructor() { } }
+  class ThisFirst extends A { constructor() { this.a = 1; super(); } }
+  class RetObj extends A { constructor() { return { ret: 1 }; } }
+  class RetBad extends A { constructor() { super(); return 1; } }
+  class Thrower { constructor() { throw new RangeError('t'); } }
+  class Catches extends Thrower { constructor() { try { super(); } catch (e) { log.push('caught ' + e.name); } return { caught: true }; } }
+  class Uncaught extends Thrower { }
+  class ArrowSuper extends A { constructor() { const s = () => super(5); s(); log.push(this.v); const g = () => this.v; log.push(g()); } }
+  class EvalSuper extends A { constructor() { eval('super(6)'); log.push(this.v); } }
+  class SuperInArgs extends A { constructor() { super((() => 7)()); } }
+  class Field extends A { p = this.v * 2; constructor(a, ...rest) { super(a); this.rest = rest; } }
+  class Spread extends A { constructor(...a) { super(...a); } }
+  function Old(v) { this.old = v; return v === 'obj' ? { replaced: 1 } : 3; } Old.prototype.m = () => 'm';
+  class FromOld extends Old { }
+  class FromOldInit extends Old { f = 1; constructor(v) { super(v); this.after = this.f; } }
+  class Nullish extends null { constructor() { return Object.create(Nullish.prototype); } }
+  class NullishSuper extends null { constructor() { super(); } }
+  class Swap extends A { } Object.setPrototypeOf(Swap, class Other { constructor() { this.other = 1; } });
+  class ToArrow extends A { } Object.setPrototypeOf(ToArrow, () => {});
+  class ToBound extends A { } Object.setPrototypeOf(ToBound, A.bind(null, 'bound'));
+  class ToProxy extends A { } const trap = []; Object.setPrototypeOf(ToProxy, new Proxy(A, { construct(t, a, nt) { trap.push('construct'); return Reflect.construct(t, a, nt); } }));
+  class Getter { constructor() { this.hit = 1; } }
+  const nt = function () {}.bind(); Object.defineProperty(nt, 'prototype', { get() { log.push('proto read'); return Array.prototype; } });
+  class WithNt extends Getter { }
+  const r = [c.x, c.y, c.z];
+  r.push(msg(() => new Twice()), msg(() => new NoSuper()), msg(() => new ThisFirst()), msg(() => new RetObj()), msg(() => new RetBad()), msg(() => new Catches()), msg(() => new Uncaught()));
+  r.push(msg(() => new ArrowSuper().v), msg(() => new EvalSuper().v), new SuperInArgs().v, new Field(4, 5, 6), new Spread(8).v, msg(() => C()));
+  r.push(new FromOld(1).old, new FromOld(1).m(), new FromOld('obj'), new FromOldInit(2), msg(() => new Nullish() instanceof Nullish), msg(() => new NullishSuper()));
+  r.push(new Swap(), msg(() => new ToArrow()), new ToBound().v, new ToProxy(9).v, trap, Reflect.construct(WithNt, [], nt) instanceof Array, Reflect.construct(A, [1], Old) instanceof Old);
+  let depth = 0; class Deep extends A { constructor(n) { super(n); depth++; if (n > 0) new Deep(n - 1); } } new Deep(50); r.push(depth);
+  return [r, log.slice(0, 40)];
+})();
+// object literals with constant keys, cached per site
+out.literals = (() => {
+  const r = [], sym = Symbol('s');
+  for (let i = 0; i < 3; i++) {
+    const proto = { inherited: i };
+    const mk = [
+      { a: i, b: 2, c: 3 },
+      { a: 1, a: i, b: 2 },
+      { a: 1, b: 2, a: i },
+      { __proto__: proto, a: i },
+      { a: i, __proto__: proto, b: 2 },
+      { ...{ x: i, a: 7 }, a: i, y: 1 },
+      { a: i, ...(i % 2 ? { a: 'spread' } : null), b: 2 },
+      { get a() { return i; }, b: 2, set a(v) { } },
+      { a: 1, get a() { return i; } },
+      { get a() { return 1; }, a: i },
+      { [i % 2 ? 'a' : 'b']: i, a: 'k', b: 'l' },
+      { 1: i, b: 2, 0: 3 },
+      { '__proto__'() { return i; }, m() { return i; }, async n() { }, *o() { }, async *p() { } },
+      { m() { return super.toString === Object.prototype.toString; }, ['c' + 'k']() { } },
+      { [sym]: i, a: 1 },
+    ];
+    r.push(mk.map((o) => [Reflect.ownKeys(o).map(String), Object.getOwnPropertyDescriptor(o, 'a')?.value, Object.getPrototypeOf(o) === proto, o.inherited, Object.keys(o).length]));
+    const names = mk[12], ms = mk[13];
+    r.push(Object.keys(names), names.m.name, names.__proto__.name, names.__proto__(), Object.getOwnPropertyDescriptor(names, 'm').enumerable, Object.getOwnPropertyDescriptor(names, 'm').writable, names.m.hasOwnProperty('prototype'), ms.m(), ms.ck.name);
+    const big = { k0: 0, k1: 1, k2: 2, k3: 3, k4: 4, k5: 5, k6: 6, k7: 7, k8: 8, k9: 9, k10: 10, k11: 11, k12: 12 }; big.added = i; r.push(Object.keys(big).length, big.k12, big.added);
+  }
+  return r;
+})();
+// private elements
+out.privates = (() => {
+  class A { #x = 1; #m() { return 'm' + this.#x; } get #g() { return this.#x * 2; } set #g(v) { this.#x = v; } static has(o) { return #x in o; }
+    bump() { this.#g = this.#g + 1; return [this.#x, this.#m(), this.#g]; }
+    static read(o) { return o.#x; } static write(o, v) { o.#x = v; } static callm(o) { return o.#m(); } setm() { this.#m = 1; } }
+  class Ret { constructor(o) { return o; } }
+  class B extends Ret { #y = 'y'; #z = 'z'; #w = 'w'; #v = 'v'; #u = 'u'; static get(o) { return [o.#y, o.#z, o.#w, o.#v, o.#u]; } }
+  const msg = (f) => { try { return f(); } catch (e) { return e.constructor.name; } };
+  const a = new A(), plain = {}, r = [a.bump(), A.has(a), A.has(plain), msg(() => A.read(plain)), msg(() => A.write(plain, 1)), msg(() => A.callm(plain)), msg(() => a.setm()), msg(() => A.has(1))];
+  new B(plain); r.push(B.get(plain), msg(() => new B(plain)), msg(() => B.get({})));
+  r.push(Object.keys(plain), JSON.stringify(a));
+  const fr = Object.freeze(new A()); r.push(msg(() => { A.write(fr, 7); return A.read(fr); }));
+  return r;
+})();
+// with
+out.withScope = new Function(`
+  const log = [];
+  const o = { p: 1, q: 2, [Symbol.unscopables]: { q: true } };
+  var q = 'outer', r = 'outer';
+  with (o) { p = 5; log.push(p, q, r); var r2 = p; }
+  const px = new Proxy({ a: 1 }, { has(t, k) { log.push('has:' + String(k)); return k in t; }, get(t, k) { log.push('get:' + String(k)); return t[k]; } });
+  with (px) { log.push(a); }
+  const g = { get v() { log.push('getter'); return 'V'; }, m() { return this === g; } };
+  with (g) { log.push(v, m()); }
+  const c = Object.create({ inh: 'I' }); with (c) { log.push(inh); inh = 'J'; log.push(inh, Object.keys(c)); }
+  return [log, o.p, r2];
+`)();
+JSON.stringify(out);
+""";
+
+    private const string ObjectModelExpected = """
+{"sloppy":{"alias":[10,10,20,2],"extra":["x","y",2,["0","1","3"]],"missing":[null,1,false],"deleteRemap":[null,2,3,["0"]],"definedRO":[2,1],"definedValue":[7,8],"getter":[41,1,41],"frozen":[9,5,true],"sealed":[1,9,true],"desc":[{"value":3,"writable":true,"enumerable":true,"configurable":true},{"value":1,"writable":true,"enumerable":false,"configurable":true},"function"],"named":[[2,0,1],["0","1","length","callee","extra","Symbol(Symbol.iterator)"],1],"stringKey":["new","new",true],"inherited":[2,1,5,2,["0"]],"iter":["p",2,[2],["p",2]],"tostr":["[object Arguments]",true],"icShare":["L","plain",1,"live"],"manyArgs":[["z",15,30,45,60],70,"q"]},"strict":[1,"b",2,["TypeError","TypeError"],true],"freeze":[1,1,5,1,1,null,1,true,true,false,false,1,{"value":1,"writable":false,"enumerable":true,"configurable":false},9,false,true,false,{"value":9,"writable":true,"enumerable":true,"configurable":false},{"a":1,"b":2},true,["a","b"],"{\"a\":1,\"b\":2}","function",true,true,false,true,false],"protoFreeze":[[2,["x"]],[1,[]],1,"getter"],"redefine":[2,2,["a","c"],"{\"a\":1,\"c\":3}",{"a":1,"c":3},{"value":2,"writable":true,"enumerable":false,"configurable":true},"g",true,["a","c"],"d",["a","b","c"],[["a",1],["b","d"],["c",3]],["b","c","d"],{"k":1,"m":2},{"k":1,"m":6},false,"n",9,["length","name"],2,null],"bigShape":[39,null,7,"dyn","s1",null,false,true,false,39,41],"megaStore":[true,null,1,null,"via proto",3,["hit"],["x"],["viaSetter"],1,"ro",[],2,2,1,0,2,"dict",71],"lazyProto":[true,false,false,"object",true,[],false,true,true,true,true,true,["length","name","arguments","caller","prototype"],1,true,true,true,true,true,"object","object",true,true,5,true,"object",true,3,"object",["prototype"],true,false,"object",true,["length","name","arguments","caller","prototype"],null,0,"undefined","undefined","undefined","object",false,"object",["extra","more","prop3"],"object","object",true],"classFrames":[[2,6,10,"ReferenceError: ref","ReferenceError: ref","ReferenceError: ref",{"ret":1},"TypeError: other",{"caught":true},"RangeError: other",5,6,7,{"x":42,"v":4,"p":8,"rest":[5,6]},8,"TypeError: other",1,"m",{"replaced":1},{"old":2,"f":1,"after":1},true,"TypeError: other",{"other":1},"TypeError: other","bound",9,["construct"],true,true,51],["B before","A.x","A","C",2,"B.y","B after",2,6,"C.z",["x","v","y","z"],true,true,"A.x","A","Twice",1,"A.x","A","Twice",2,"A.x","A","RetBad",null,"caught RangeError","A.x","A","ArrowSuper",5,5,5,"A.x","A","EvalSuper",6,6,"A.x","A","SuperInArgs"]],"literals":[[[["a","b","c"],0,false,null,3],[["a","b"],0,false,null,2],[["a","b"],0,false,null,2],[["a"],0,true,0,1],[["a","b"],0,true,0,2],[["x","a","y"],0,false,null,3],[["a","b"],0,false,null,2],[["a","b"],null,false,null,2],[["a"],null,false,null,1],[["a"],0,false,null,1],[["b","a"],"k",false,null,2],[["0","1","b"],null,false,null,3],[["__proto__","m","n","o","p"],null,false,null,5],[["m","ck"],null,false,null,2],[["a","Symbol(s)"],1,false,null,1]],["__proto__","m","n","o","p"],"m","__proto__",0,true,true,false,true,"ck",14,12,0,[[["a","b","c"],1,false,null,3],[["a","b"],1,false,null,2],[["a","b"],1,false,null,2],[["a"],1,true,1,1],[["a","b"],1,true,1,2],[["x","a","y"],1,false,null,3],[["a","b"],"spread",false,null,2],[["a","b"],null,false,null,2],[["a"],null,false,null,1],[["a"],1,false,null,1],[["a","b"],"k",false,null,2],[["0","1","b"],null,false,null,3],[["__proto__","m","n","o","p"],null,false,null,5],[["m","ck"],null,false,null,2],[["a","Symbol(s)"],1,false,null,1]],["__proto__","m","n","o","p"],"m","__proto__",1,true,true,false,true,"ck",14,12,1,[[["a","b","c"],2,false,null,3],[["a","b"],2,false,null,2],[["a","b"],2,false,null,2],[["a"],2,true,2,1],[["a","b"],2,true,2,2],[["x","a","y"],2,false,null,3],[["a","b"],2,false,null,2],[["a","b"],null,false,null,2],[["a"],null,false,null,1],[["a"],2,false,null,1],[["b","a"],"k",false,null,2],[["0","1","b"],null,false,null,3],[["__proto__","m","n","o","p"],null,false,null,5],[["m","ck"],null,false,null,2],[["a","Symbol(s)"],1,false,null,1]],["__proto__","m","n","o","p"],"m","__proto__",2,true,true,false,true,"ck",14,12,2],"privates":[[3,"m3",6],true,false,"TypeError","TypeError","TypeError","TypeError","TypeError",["y","z","w","v","u"],"TypeError","TypeError",[],"{}",7],"withScope":[[5,"outer","outer","has:log","has:a","get:Symbol(Symbol.unscopables)","has:a","get:a",1,"getter","V",true,"I","J",["inh"]],5,5]}
+""";
+
+    [Fact]
+    public void RecursionThroughNewAndSuperHitsTheDepthLimit()
+    {
+        using var engine = new JsEngine();
+        Assert.Throws<JsLimitExceededException>(() => engine.Evaluate("class A { } class B extends A { constructor() { super(); new B(); } } new B();"));
+    }
+
+    [Fact]
+    public void ObjectLiteralsAreChargedToTheBudget()
+    {
+        using var engine = new JsEngine(new JsEngineOptions { Limits = new JsLimits { MaxTrackedBytes = 4 * 1024 * 1024 } });
+        Assert.Throws<JsLimitExceededException>(() => engine.Evaluate("const a = []; while (true) a.push({ p: 1, q: 2, r: 3, s() {} });"));
+    }
+
+    [Fact]
+    public void PrototypeCachesTellRealmsApart()
+    {
+        using var engine = new JsEngine();
+        engine.SetFunction("newRealm", static (ref JsCallContext c) => c.CreateRealm(), 0);
+        var r = engine.Evaluate("""
+            const g = newRealm();
+            g.Object.prototype.foo = 'other'; Object.prototype.foo = 'home';
+            g.Array.prototype.bar = 'other'; Array.prototype.bar = 'home';
+            function read(o) { return o.foo; }
+            function readBar(o) { return o.bar; }
+            function own(o) { return o.foo; }
+            const results = [];
+            for (let i = 0; i < 3; i++) {
+              results.push(read({}), read(new g.Object()), read(g.Object.create(g.Object.prototype)), read(g.eval('({})')));
+              results.push(readBar([]), readBar(new g.Array()), readBar(g.eval('[]')));
+            }
+            results.join();
+            """).AsString();
+        Assert.Equal(string.Join(",", Enumerable.Repeat("home,other,other,other,home,other,other", 3)), r);
+    }
+
+    [Fact]
+    public void AddTransitionCacheBumpsTheEpochOfAPrototype()
+    {
+        using var engine = new JsEngine();
+        // the store site caches the append on the shape of `{}`, which `p` has as well; `read` caches the absence of x on c
+        var r = engine.Evaluate("""
+            function set(o) { o.x = 1; }
+            set({}); set({});
+            var p = {}, c = Object.create(p), read = function (o) { return o.x; };
+            var before = read(c); read(c);
+            set(p);
+            String(before) + ',' + read(c);
+            """).AsString();
+        Assert.Equal("undefined,1", r);
+    }
+
+    [Fact]
+    public void JsonReviverContextReachesEveryReviverThatCanSeeIt()
+    {
+        using var engine = new JsEngine();
+        // the source text access proposal: V8 of the reference Node has no context, so this is not compared with it
+        var r = engine.Evaluate("""
+            const seen = [];
+            JSON.parse('[1.50]', function (k, v, c) { seen.push(c.source); return v; });
+            JSON.parse('[2.50]', function (k, v) { seen.push(arguments[2].source); return v; });
+            JSON.parse('[3.50]', function (k, v) { seen.push(eval('arguments[2].source')); return v; });
+            JSON.parse('[4.50]', (...a) => { seen.push(a[2].source); return a[1]; });
+            JSON.parse('[5.50]', function (k, v, { source }) { seen.push(source); return v; });
+            JSON.parse('[6.50]', function (k, v, c = 0) { seen.push(c.source); return v; });
+            JSON.parse('[7.50]', function (k, v) { return v; }.bind(null));
+            const two = JSON.parse('[8.50,{"a":"x"}]', (k, v) => k === 'a' ? v + '!' : v);
+            seen.join() + '|' + JSON.stringify(two) + '|' + JSON.parse('[1]', (k, v) => k === '0' ? undefined : v).length;
+            """).AsString();
+        Assert.Equal("""1.50,,2.50,,3.50,,4.50,,5.50,,6.50,|[8.5,{"a":"x!"}]|1""", r);
+    }
+
+    [Fact]
+    public void ObjectModelFastPathsMatchReferenceBehavior()
+    {
+        using var engine = new JsEngine();
+        var exp = System.Text.Json.JsonDocument.Parse(ObjectModelExpected).RootElement;
+        var got = System.Text.Json.JsonDocument.Parse(engine.Evaluate(ObjectModelScript).AsString()).RootElement;
+        foreach (var p in exp.EnumerateObject())
+        {
+            Assert.True(got.TryGetProperty(p.Name, out var g), $"missing case {p.Name}");
+            Assert.Equal(p.Value.GetRawText(), g.GetRawText());
+        }
+    }
+
     [Fact]
     public void StringDoublingStillTripsTheTrackedBytesBudget()
     {
@@ -193,5 +500,12 @@ JSON.stringify(out)
         var sw = System.Diagnostics.Stopwatch.StartNew();
         engine.Evaluate("const m = new Map([[1, 1]]); let n = 0; for (let i = 0; i < 200000; i++) n += m.keys().next().value; n");
         Assert.True(sw.ElapsedMilliseconds < 3000, $"took {sw.ElapsedMilliseconds} ms");
+    }
+
+    [Fact]
+    public void LazyClosurePrototypeCountsAgainstTheBudgetWhenCreated()
+    {
+        using var engine = new JsEngine(new JsEngineOptions { Limits = new JsLimits { MaxTrackedBytes = 4 * 1024 * 1024 } });
+        Assert.Throws<JsLimitExceededException>(() => engine.Evaluate("const a = []; while (true) { const f = function () {}; f.prototype; a.push(f); }"));
     }
 }

@@ -24,9 +24,6 @@ internal sealed partial class Vm
             case Op.Debugger:
             case Op.InitFields:
                 return pc + 1;
-            case Op.DefinePropK:
-                regs[bp + code[pc + 1]].AsObjectUnchecked.CreateDataPropertyOrThrow(new PropertyKey(k[code[pc + 2]].AsStringUnchecked), regs[bp + code[pc + 3]]);
-                return pc + 4;
             case Op.LoadNewTarget: regs[bp + code[pc + 1]] = f.NewTarget; return pc + 2;
             case Op.LoadCallee: regs[bp + code[pc + 1]] = JsValue.FromObject(f.Callee); return pc + 2;
             case Op.ThrowConstAssign:
@@ -189,22 +186,18 @@ internal sealed partial class Vm
                 regs[dst] = Construct(fv, new ReadOnlySpan<JsValue>(arr.Items, 0, (int)arr.Length));
                 return pc + 4;
             }
-            case Op.SuperCall:
-            {
-                int dst = bp + code[pc + 1];
-                var args = new ReadOnlySpan<JsValue>(regs, bp + code[pc + 2], code[pc + 3]);
-                f.Pc = pc + 4;
-                regs[dst] = SuperCall(f, args);
-                return pc + 4;
-            }
             case Op.SuperCallSpread:
             {
                 int dst = bp + code[pc + 1];
                 var arr = ((JsArray)regs[bp + code[pc + 2]].Ref!);
                 f.Pc = pc + 3;
-                regs[dst] = SuperCall(f, new ReadOnlySpan<JsValue>(arr.Items, 0, (int)arr.Length));
+                regs[dst] = SuperConstruct(f, new ReadOnlySpan<JsValue>(arr.Items, 0, (int)arr.Length));
                 return pc + 3;
             }
+            case Op.SuperBind:
+                f.Pc = pc + 2;
+                SuperBind(f, regs[bp + code[pc + 1]]);
+                return pc + 2;
 
             // ------------------------------------------------------------ classes and private names
             case Op.ClassCreate:
@@ -252,7 +245,7 @@ internal sealed partial class Vm
                 var ov = regs[bp + code[pc + 2]];
                 if (ov.IsNotObject) throw JsErrors.TypeError(realm, "Cannot use 'in' operator to search for a private field in a non-object");
                 var name = (JsPrivateName)regs[bp + code[pc + 3]].Ref!;
-                regs[bp + code[pc + 1]] = JsValue.FromBool(ov.AsObjectUnchecked.PrivateElements?.ContainsKey(name) == true);
+                regs[bp + code[pc + 1]] = JsValue.FromBool(ov.AsObjectUnchecked.FindPrivate(name) >= 0);
                 return pc + 4;
             }
 

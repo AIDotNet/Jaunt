@@ -542,10 +542,15 @@ internal sealed partial class Vm
     [MethodImpl(MethodImplOptions.NoInlining)]
     internal Frame PushNewFrame(JsClosure c, JsValue[] callerRegs, int argStart, int argc, JsObject obj, JsValue newTarget)
     {
+        return PushConstructFrame(c, callerRegs, argStart, argc, JsValue.FromObject(obj), newTarget);
+    }
+
+    private Frame PushConstructFrame(JsClosure c, JsValue[] callerRegs, int argStart, int argc, JsValue thisValue, JsValue newTarget)
+    {
         if (Depth + 1 > MaxDepth) StackOverflowFrame();
         var f = RentFrame();
         BindCallWindow(f, c.Template, callerRegs, argStart, argc);
-        SetupFrame(f, c, JsValue.FromObject(obj), newTarget, FrameFlags.Construct);
+        SetupFrame(f, c, thisValue, newTarget, FrameFlags.Construct);
         return f;
     }
 
@@ -849,8 +854,7 @@ internal sealed partial class Vm
         else
         {
             var proto = Operations.GetPrototypeFromConstructor(Realm, newTarget, Realm.ObjectPrototype);
-            var obj = new JsObject(Realm, proto);
-            thisValue = JsValue.FromObject(obj);
+            thisValue = JsValue.FromObject(NewInstance(newTarget, proto));
             if (c.FieldInit != null) c.FieldInit.Call(thisValue, ReadOnlySpan<JsValue>.Empty);
         }
         var f = PushFrame(c, thisValue, args, JsValue.FromObject(newTarget), FrameFlags.Construct);
@@ -925,7 +929,22 @@ internal sealed partial class Vm
             if (f.This.IsEmpty) { error = JsValue.FromObject(JsError.Create(CallerRealmOf(f), ErrorKind.ReferenceError, "Must call super constructor in derived class before accessing 'this' or returning from derived constructor")); return false; }
         }
         value = f.This;
+        // instances of this constructor will be about this big: spares them the growth from no slots, or empty slots
+        if (f.NewTarget.Ref is JsClosure nt && value.Ref is JsObject o)
+        {
+            int n = o.Shape.Count;
+            if (n > nt.Feedback.InstanceSlots && n <= MaxInstanceSlots) nt.Feedback.InstanceSlots = n;
+        }
         return true;
+    }
+
+    internal const int MaxInstanceSlots = 32;
+
+    /// <summary>The object a [[Construct]] of <paramref name="newTarget"/> starts with, slots sized by experience.</summary>
+    private JsObject NewInstance(JsObject newTarget, JsObject proto)
+    {
+        var realm = Realm;
+        return newTarget is JsClosure c ? new JsObject(realm, realm.RootShapeFor(proto), c.Feedback.InstanceSlots) : new JsObject(realm, proto);
     }
 
     // ------------------------------------------------------------------ closures
@@ -955,9 +974,7 @@ internal sealed partial class Vm
         }
         else if (t.IsConstructor && !t.IsClassConstructor && (t.Flags & FunctionFlags.NoPrototype) == 0)
         {
-            var p = new JsObject(realm, realm.ObjectPrototype);
-            p.AddOwnProperty("constructor", JsValue.FromObject(c), PropFlags.Hidden);
-            c.AddOwnProperty("prototype", JsValue.FromObject(p), PropFlags.Writable);
+            c.AddOwnProperty("prototype", LazyFunction.ClosurePrototypeSlot, PropFlags.Writable);
         }
         return c;
     }
