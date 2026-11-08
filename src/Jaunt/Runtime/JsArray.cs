@@ -13,61 +13,8 @@ internal sealed class JsArray : JsObject
 {
     internal JsValue[] Items;
     internal uint Length;
-    private bool _dense = true;
-    /// <summary>
-    /// Queue mode, entered by <c>shift</c> on a long array so that it need not move all elements: the elements start at
-    /// <c>Items[_queueHead]</c> (and <see cref="_dense"/> is false). Only shift and push understand it; everything else
-    /// reads <see cref="Dense"/>, which moves the elements back to the start of <see cref="Items"/>. That costs what the
-    /// one shift would have cost, so alternating shift with other operations is no slower than without queue mode.
-    /// </summary>
-    private int _queueHead;
-    private const uint MinQueueModeLength = 32;
-
-    /// <summary>
-    /// True when the elements live in <see cref="Items"/>; false once they moved to ordinary (sparse) storage.
-    /// </summary>
-    internal bool Dense
-    {
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        get => _dense || LeaveQueueMode();
-    }
-
-    /// <summary>Whether <see cref="Push"/> appends directly: <see cref="Dense"/> without leaving queue mode.</summary>
-    internal bool DenseOrQueue
-    {
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        get => _dense || _queueHead != 0;
-    }
-
-    [MethodImpl(MethodImplOptions.NoInlining)]
-    private bool LeaveQueueMode()
-    {
-        int h = _queueHead, n = (int)Length;
-        if (h == 0) return false;
-        Array.Copy(Items, h, Items, 0, n);
-        Items.AsSpan(n, h).Fill(JsValue.Empty);
-        _queueHead = 0;
-        _dense = true;
-        return true;
-    }
-
-    /// <summary><c>shift</c> without moving the remaining elements. False when the generic algorithm is needed, or a short array's plain element move is as good.</summary>
-    internal bool TryShiftQueue(out JsValue first)
-    {
-        int h = _queueHead;
-        if ((h != 0 || (_dense && Length >= MinQueueModeLength && Length <= (uint)Items.Length)) && LengthWritable && Extensible && !ProtoChainMayHaveIndices(Proto))
-        {
-            first = Items[h];
-            Items[h] = default;
-            if (first.IsEmpty) first = JsValue.Undefined;
-            _queueHead = h + 1;
-            _dense = false;
-            if (--Length == 0) LeaveQueueMode();
-            return true;
-        }
-        first = default;
-        return false;
-    }
+    /// <summary>False once elements moved to ordinary (sparse) storage.</summary>
+    internal bool Dense = true;
     internal bool LengthWritable = true;
 
     private const uint MaxDenseGap = 1024;
@@ -115,11 +62,6 @@ internal sealed class JsArray : JsObject
     /// <summary>Fast append used by array literals, push and builtins.</summary>
     internal void Push(JsValue v)
     {
-        if (_queueHead != 0 && LengthWritable && Extensible && _queueHead + (long)Length < Items.Length)
-        {
-            Items[_queueHead + Length++] = v;
-            return;
-        }
         if (!Dense || !LengthWritable || !Extensible || Length >= uint.MaxValue - 1)
         {
             SetIndex(Length, v, JsValue.FromObject(this));
@@ -162,7 +104,7 @@ internal sealed class JsArray : JsObject
     internal void ConvertToSparse()
     {
         if (!Dense) return;
-        _dense = false;
+        Dense = false;
         ConvertToDictionary();
         for (uint i = 0; i < Length && i < (uint)Items.Length; i++)
         {
