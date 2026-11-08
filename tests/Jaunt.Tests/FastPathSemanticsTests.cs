@@ -295,6 +295,26 @@ JSON.stringify(out);
     }
 
     [Fact]
+    public void JsonReviverContextReachesEveryReviverThatCanSeeIt()
+    {
+        using var engine = new JsEngine();
+        // the source text access proposal: V8 of the reference Node has no context, so this is not compared with it
+        var r = engine.Evaluate("""
+            const seen = [];
+            JSON.parse('[1.50]', function (k, v, c) { seen.push(c.source); return v; });
+            JSON.parse('[2.50]', function (k, v) { seen.push(arguments[2].source); return v; });
+            JSON.parse('[3.50]', function (k, v) { seen.push(eval('arguments[2].source')); return v; });
+            JSON.parse('[4.50]', (...a) => { seen.push(a[2].source); return a[1]; });
+            JSON.parse('[5.50]', function (k, v, { source }) { seen.push(source); return v; });
+            JSON.parse('[6.50]', function (k, v, c = 0) { seen.push(c.source); return v; });
+            JSON.parse('[7.50]', function (k, v) { return v; }.bind(null));
+            const two = JSON.parse('[8.50,{"a":"x"}]', (k, v) => k === 'a' ? v + '!' : v);
+            seen.join() + '|' + JSON.stringify(two) + '|' + JSON.parse('[1]', (k, v) => k === '0' ? undefined : v).length;
+            """).AsString();
+        Assert.Equal("""1.50,,2.50,,3.50,,4.50,,5.50,,6.50,|[8.5,{"a":"x!"}]|1""", r);
+    }
+
+    [Fact]
     public void ObjectModelFastPathsMatchReferenceBehavior()
     {
         using var engine = new JsEngine();
