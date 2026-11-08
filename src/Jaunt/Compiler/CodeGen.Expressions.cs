@@ -29,6 +29,12 @@ internal sealed partial class CodeGen
             if (op != null && be.Left is not PrivateIdentifier)
             {
                 int m = Mark;
+                if (ImmediateForm(be) is { } imm && TryInt32Literal(be.Right, out int k))
+                {
+                    _fb.JumpCmp(imm, Expr(be.Left), k, falseLabel);
+                    ResetTo(m);
+                    return;
+                }
                 var (a, b) = Operands(be.Left, be.Right);
                 _fb.JumpCmp(op.Value, a, b, falseLabel);
                 ResetTo(m);
@@ -66,6 +72,37 @@ internal sealed partial class CodeGen
         int r = Expr(test);
         _fb.JumpIf(Op.JmpFalse, r, falseLabel);
         ResetTo(mm);
+    }
+
+    /// <summary>
+    /// The instruction for <paramref name="be"/> with a literal int32 right operand, when there is one: a function's
+    /// <c>n - 1</c> and <c>n &lt; 2</c> would otherwise spend a dispatch and a register to materialize the literal. The right operand
+    /// has no effects to order against the left's, and the instruction's slow path sees the same two values.
+    /// </summary>
+    private static Op? ImmediateForm(BinaryExpression be)
+    {
+        if (be is LogicalExpression || !TryInt32Literal(be.Right, out _)) return null;
+        return be.Operator switch
+        {
+            Operator.Addition => Op.AddI,
+            Operator.Subtraction => Op.SubI,
+            Operator.LessThan => Op.LtIJmpFalse,
+            Operator.LessThanOrEqual => Op.LeIJmpFalse,
+            Operator.GreaterThan => Op.GtIJmpFalse,
+            Operator.GreaterThanOrEqual => Op.GeIJmpFalse,
+            _ => null,
+        };
+    }
+
+    /// <summary>A numeric literal an int32 holds exactly (not -0, which has no int32 form).</summary>
+    private static bool TryInt32Literal(Expression e, out int value)
+    {
+        value = 0;
+        if (e is not NumericLiteral n) return false;
+        double v = n.Value;
+        if (v != Math.Floor(v) || v < int.MinValue || v > int.MaxValue || (v == 0 && double.IsNegative(v))) return false;
+        value = (int)v;
+        return true;
     }
 
     /// <summary>Evaluates two operands left-to-right, protecting the left value from being clobbered by the right.</summary>
@@ -589,7 +626,15 @@ internal sealed partial class CodeGen
         }
         int m = Mark;
         var op = BinaryOp(be.Operator, be);
-        // constant folding of `x + k` for number constants
+        if (op is Op.Add or Op.Sub && TryInt32Literal(be.Right, out int k))
+        {
+            int l = Expr(be.Left);
+            int di = dst >= 0 ? dst : Temp();
+            if (dst < 0 && di != m) { ResetTo(m); di = Temp(); }
+            _fb.Emit(op == Op.Add ? Op.AddI : Op.SubI, di, l, k);
+            ResetTo(Math.Max(m, di + 1));
+            return di;
+        }
         var (a, b) = Operands(be.Left, be.Right);
         int d = dst >= 0 ? dst : Temp();
         if (dst < 0 && d != m) { ResetTo(m); d = Temp(); }

@@ -34,6 +34,10 @@ internal enum Op : int
     Eq, Ne, StrictEq, StrictNe, Lt, Le, Gt, Ge, InstanceOf, In,
     Neg, Plus, Not, BitNot, Typeof, ToNumeric, Inc, Dec, ToPropertyKey, ToStringOp,
     AddConst, LtJmpFalse, LeJmpFalse, GtJmpFalse, GeJmpFalse, StrictEqJmpFalse, StrictNeJmpFalse,
+    /// <summary>Add and Sub whose right operand is a literal int32 in the instruction: dst, a, imm.</summary>
+    AddI, SubI,
+    /// <summary>The compare-and-jump instructions with a literal int32 as the right operand: a, imm, target.</summary>
+    LtIJmpFalse, LeIJmpFalse, GtIJmpFalse, GeIJmpFalse,
     Jmp, JmpTrue, JmpFalse, JmpNullish, JmpNotNullish, JmpUndef, JmpNotUndef,
     SwitchInt,
     Ret, RetUndef,
@@ -107,6 +111,8 @@ internal static class OpInfo
             S(op, R, R);
         S(Op.AddConst, R, R, K);
         foreach (var op in new[] { Op.LtJmpFalse, Op.LeJmpFalse, Op.GtJmpFalse, Op.GeJmpFalse, Op.StrictEqJmpFalse, Op.StrictNeJmpFalse }) S(op, R, R, J);
+        S(Op.AddI, R, R, I); S(Op.SubI, R, R, I);
+        foreach (var op in new[] { Op.LtIJmpFalse, Op.LeIJmpFalse, Op.GtIJmpFalse, Op.GeIJmpFalse }) S(op, R, I, J);
         S(Op.Jmp, J); S(Op.JmpTrue, R, J); S(Op.JmpFalse, R, J); S(Op.JmpNullish, R, J); S(Op.JmpNotNullish, R, J);
         S(Op.JmpUndef, R, J); S(Op.JmpNotUndef, R, J);
         S(Op.SwitchInt, R, I); // followed by I jump targets (variable)

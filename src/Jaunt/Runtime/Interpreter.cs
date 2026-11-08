@@ -593,6 +593,58 @@ internal sealed partial class Vm
                         }
 
                         // ---------------------------------------------------------- fused compare-and-branch
+                        case Op.AddI:
+                        {
+                            ref var a = ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 2));
+                            if (a.IsNumber) { Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = new JsValue(a.Num + Unsafe.Add(ref ip, 3)); ip = ref Unsafe.Add(ref ip, 4); continue; }
+                            goto ArithImmOutOfLine;
+                        }
+                        case Op.SubI:
+                        {
+                            ref var a = ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 2));
+                            if (a.IsNumber) { Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = new JsValue(a.Num - Unsafe.Add(ref ip, 3)); ip = ref Unsafe.Add(ref ip, 4); continue; }
+                            goto ArithImmOutOfLine;
+                        }
+                        case Op.LtIJmpFalse:
+                        {
+                            ref var a = ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1));
+                            if (a.IsNumber)
+                            {
+                                if (a.Num < Unsafe.Add(ref ip, 2)) { ip = ref Unsafe.Add(ref ip, 4); continue; }
+                                goto JumpOperand3;
+                            }
+                            goto CompareImmJmpOutOfLine;
+                        }
+                        case Op.LeIJmpFalse:
+                        {
+                            ref var a = ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1));
+                            if (a.IsNumber)
+                            {
+                                if (a.Num <= Unsafe.Add(ref ip, 2)) { ip = ref Unsafe.Add(ref ip, 4); continue; }
+                                goto JumpOperand3;
+                            }
+                            goto CompareImmJmpOutOfLine;
+                        }
+                        case Op.GtIJmpFalse:
+                        {
+                            ref var a = ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1));
+                            if (a.IsNumber)
+                            {
+                                if (a.Num > Unsafe.Add(ref ip, 2)) { ip = ref Unsafe.Add(ref ip, 4); continue; }
+                                goto JumpOperand3;
+                            }
+                            goto CompareImmJmpOutOfLine;
+                        }
+                        case Op.GeIJmpFalse:
+                        {
+                            ref var a = ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1));
+                            if (a.IsNumber)
+                            {
+                                if (a.Num >= Unsafe.Add(ref ip, 2)) { ip = ref Unsafe.Add(ref ip, 4); continue; }
+                                goto JumpOperand3;
+                            }
+                            goto CompareImmJmpOutOfLine;
+                        }
                         case Op.LtJmpFalse:
                         {
                             ref var a = ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1));
@@ -845,6 +897,21 @@ internal sealed partial class Vm
         Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = ArithSlow((Op)ip, Unsafe.Add(ref r0, Unsafe.Add(ref ip, 2)), Unsafe.Add(ref r0, Unsafe.Add(ref ip, 3)));
         ip = ref Unsafe.Add(ref ip, 4);
         goto Dispatch;
+
+    ArithImmOutOfLine:
+        f.Pc = PcAt(ref code0, ref ip) + 1;
+        Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = ArithImmSlow((Op)ip, Unsafe.Add(ref r0, Unsafe.Add(ref ip, 2)), Unsafe.Add(ref ip, 3));
+        ip = ref Unsafe.Add(ref ip, 4);
+        goto Dispatch;
+
+    CompareImmJmpOutOfLine:
+        f.Pc = PcAt(ref code0, ref ip) + 1;
+        if (CompareImmSlow((Op)ip, Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)), Unsafe.Add(ref ip, 2)))
+        {
+            ip = ref Unsafe.Add(ref ip, 4);
+            goto Dispatch;
+        }
+        goto JumpOperand3;
 
     CompareOutOfLine:
         f.Pc = PcAt(ref code0, ref ip) + 1;
@@ -1436,6 +1503,22 @@ internal sealed partial class Vm
         JsTag.Object => v.Ref is JsHtmlDda ? TypeofUndefined : v.Ref is JsFunctionObject ? TypeofFunction : TypeofObject,
         _ => TypeofUndefined,
     };
+
+    /// <summary>AddI and SubI on a left operand that is not a number: the literal as a value, then the instructions' usual slow paths.</summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private JsValue ArithImmSlow(Op op, in JsValue a, int imm)
+    {
+        var b = new JsValue((double)imm);
+        return op == Op.AddI ? AddSlow(a, b) : ArithSlow(Op.Sub, a, b);
+    }
+
+    /// <summary>The compare-and-jump instructions with a literal on a left operand that is not a number.</summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private bool CompareImmSlow(Op op, in JsValue a, int imm)
+    {
+        var b = new JsValue((double)imm);
+        return CompareSlow(op == Op.LtIJmpFalse ? Op.Lt : op == Op.LeIJmpFalse ? Op.Le : op == Op.GtIJmpFalse ? Op.Gt : Op.Ge, a, b);
+    }
 
     [MethodImpl(MethodImplOptions.NoInlining)]
     private bool CompareSlow(Op op, in JsValue a, in JsValue b)
