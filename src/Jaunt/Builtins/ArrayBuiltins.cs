@@ -2,6 +2,7 @@ using System;
 using System.Runtime.CompilerServices;
 using System.Collections.Generic;
 using System.Text;
+using Jaunt.Compiler;
 
 namespace Jaunt.Runtime;
 
@@ -1008,7 +1009,9 @@ internal static class ArrayBuiltins
                 else if (vm.TryPrepareFastCalls(cmp, out var closure))
                 {
                     var c = new ClosureSortCmp(vm, closure, new JsValue[2]);
-                    StableSort(items, tmp, count, ref c);
+                    int numeric = MatchNumericComparator(closure.Template);
+                    if (numeric != 0) { var nc = new NumericSortCmp(c, vm, numeric < 0); StableSort(items, tmp, count, ref nc); }
+                    else StableSort(items, tmp, count, ref c);
                 }
                 else { var c = new GenericSortCmp(realm, cmp, new JsValue[2]); StableSort(items, tmp, count, ref c); }
             }
@@ -1064,6 +1067,39 @@ internal static class ArrayBuiltins
             if (UndefinedOrder(x, y, out int r)) return r;
             realm.Vm.Tick();
             return string.CompareOrdinal(Operations.ToString(realm, x), Operations.ToString(realm, y));
+        }
+    }
+
+    /// <summary>
+    /// Whether a comparator is exactly <c>(a, b) =&gt; a - b</c> (1) or <c>(a, b) =&gt; b - a</c> (-1), else 0: the bytecode is
+    /// <c>Sub dst, r0, r1; Ret dst</c> with the two parameters in r0 and r1 and nothing before it. Subtracting two numbers
+    /// runs no user code and observes nothing, so such a comparator need not be called while both operands are numbers
+    /// (SpiderMonkey's array sort recognizes the same two comparators).
+    /// </summary>
+    private static int MatchNumericComparator(FunctionTemplate t)
+    {
+        var code = t.Code;
+        if (t.ParamCount != 2 || (t.Flags & FunctionFlags.HasRest) != 0 || code.Length < 6 || t.Handlers.Length != 0) return 0;
+        if ((Op)code[0] != Op.Sub || (Op)code[4] != Op.Ret || code[5] != code[1]) return 0;
+        if (code[2] == 0 && code[3] == 1) return 1;
+        if (code[2] == 1 && code[3] == 0) return -1;
+        return 0;
+    }
+
+    /// <summary>A comparator matched by <see cref="MatchNumericComparator"/>; any operand but a number (a string, a BigInt, an object with valueOf) calls the closure.</summary>
+    private struct NumericSortCmp(ClosureSortCmp call, Vm vm, bool reversed) : ISortCmp<JsValue>
+    {
+        private ClosureSortCmp _call = call;
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public int Compare(in JsValue x, in JsValue y)
+        {
+            if (x.IsNumber && y.IsNumber)
+            {
+                vm.Tick();
+                return Sign(reversed ? y.Num - x.Num : x.Num - y.Num);
+            }
+            return _call.Compare(x, y);
         }
     }
 
