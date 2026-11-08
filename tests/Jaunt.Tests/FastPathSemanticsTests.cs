@@ -11,6 +11,80 @@ namespace Jaunt.Tests;
 /// </summary>
 public class FastPathSemanticsTests
 {
+    // Array builtins and sort; the expected values were produced by Node from the same script.
+    private const string ArrayScript = """
+const out = {};
+const shape = a => { const r = []; for (let i = 0; i < a.length; i++) r.push(i in a ? a[i] : 'hole'); return r; };
+const noisy = n => { const a = []; let x = 12345; for (let i = 0; i < n; i++) { x = (x * 1103515245 + 12345) & 0x7fffffff; a.push(x % 1000); } return a; };
+const hash = a => { let h = 7; for (const v of a) h = (h * 31 + (typeof v === 'number' ? v : String(v).length)) % 1000003; return h; };
+// fill
+out.fillHoles = [shape(new Array(5).fill(7, 1, 3)), shape(new Array(3).fill(1)), new Array(2000).fill(0).length, shape([1, , 3].fill(9, 1))];
+out.fillSetterOnProto = (() => { const log = []; Object.defineProperty(Array.prototype, '1', { set(v) { log.push(v); }, get() { return 'p'; }, configurable: true }); try { const a = new Array(3); a.fill(5); const r = [log.slice(), Object.keys(a)]; return r; } finally { delete Array.prototype[1]; } })();
+out.fillShrinkInArg = (() => { const a = [1, 2, 3, 4, 5]; a.fill(0, { valueOf() { a.length = 1; return 0; } }); return [a.length, shape(a)]; })();
+out.fillEndGrow = (() => { const a = new Array(4); a.fill('x', 0, { valueOf() { a.length = 2; return 4; } }); return shape(a); })();
+out.fillNonExtensible = (() => { const a = new Array(2); Object.preventExtensions(a); try { a.fill(1); return 'no'; } catch (e) { return e.constructor.name; } })();
+out.fillNonExtensibleDense = (() => { const a = [1, 2]; Object.preventExtensions(a); a.fill(3); return a; })();
+out.fillFrozen = (() => { const a = Object.freeze([1, 2]); try { a.fill(1); return 'no'; } catch (e) { return [e.constructor.name, a]; } })();
+out.fillLengthReadonly = (() => { const a = new Array(2); Object.defineProperty(a, 'length', { writable: false }); a.fill(1); return [a, a.length]; })();
+out.fillHugeLength = (() => { const a = new Array(4294967295).fill(1, 0, 3); return [a.length, a[0], a[2], a[3], 3 in a]; })();
+out.fillObjectValue = (() => { const o = {}, a = new Array(100).fill(o); return [a[0] === a[99], a[50] === o]; })();
+out.fillArrayLike = Array.prototype.fill.call({ length: 2 }, 1);
+out.declaredLength = (() => { const a = new Array(3000); a[2000] = 1; const b = new Array(3000); for (let i = 0; i < 3000; i++) b[i] = i; const c = new Array(2000); c[1999] = 1; c.length = 1; return [Object.keys(a), a.length, 1999 in a, 2001 in a, hash(b), shape(c)]; })();
+out.declaredLengthProto = (() => { const log = []; Object.defineProperty(Array.prototype, '1500', { set(v) { log.push(v); }, configurable: true }); try { const a = new Array(3000); a[1500] = 3; return [log, 1500 in a, Object.keys(a).length]; } finally { delete Array.prototype[1500]; } })();
+// sort: the comparators that need not be called
+out.numCmpMixed = [[3, '10', 2, '1'].sort((a, b) => a - b), [3, '10', 2, '1'].sort((a, b) => b - a), [5n, 1n, 3n].sort((a, b) => Number(a - b)).map(String), (() => { try { [5n, 1n, 3n].sort((a, b) => a - b); return 'no'; } catch (e) { return e.constructor.name; } })()];
+out.numCmpBigIntMixed = (() => { try { [1, 2n].sort((a, b) => a - b); return 'no'; } catch (e) { return e.constructor.name; } })();
+out.numCmpValueOf = (() => { let calls = 0; const o = { valueOf() { calls++; return 2; } }; const a = [3, o, 1].sort((a, b) => a - b); return [a[0], a[1] === o, a[2], calls > 0]; })();
+out.numCmpThrowingValueOf = (() => { const o = { valueOf() { throw new EvalError('v'); } }, a = [3, o, 1]; try { a.sort((a, b) => a - b); return 'no'; } catch (e) { return [e.constructor.name, a[0], a[2]]; } })();
+out.numCmpSpecials = (() => { const f = x => Object.is(x, -0) ? '-0' : String(x); return [[Infinity, 1, -Infinity, Infinity, 0].sort((a, b) => a - b).map(f), [Infinity, 1, -Infinity].sort((a, b) => b - a).map(f), [0, -0, 0, -0].sort((a, b) => a - b).map(f), [-0, 0, -0].sort((a, b) => b - a).map(f), [1, undefined, 0, , undefined, -1].sort((a, b) => a - b).map(f)]; })();
+out.numCmpNaNPermutation = (() => { const a = [3, NaN, 1, NaN, 2, 0, NaN, 5, 4]; a.sort((x, y) => x - y); return [a.length, a.filter(x => x !== x).length, a.filter(x => x === x).reduce((s, x) => s + x, 0)]; })();
+out.numCmpForms = (() => { const src = [3, 1, 2]; return [src.slice().sort(function (a, b) { return a - b; }), src.slice().sort(function (a, b) { return b - a; }), src.slice().sort((a, b) => { return a - b; }), src.slice().sort(function (p, q) { 'use strict'; return q - p; }), src.slice().sort((a, b) => a - a), src.slice().sort((a, b) => b - b), src.slice().sort((a, b = 0) => a - b), src.slice().sort((a, ...b) => a - b[0]), src.slice().sort(function (a, b) { return arguments[1] - arguments[0]; }), src.slice().sort(function (a, a2, c) { return a - a2; }), src.toSorted((a, b) => b - a)]; })();
+out.numCmpShadow = (() => { const a = [1, 2, 3], b = 100; return a.slice().sort((x, y) => y - b + x - x).length; })();
+out.numCmpSubclass = (() => { class A extends Array {} const a = A.from([3, 1, 2]); a.sort((x, y) => x - y); return [a instanceof A, Array.from(a)]; })();
+out.numCmpArrayLike = Array.prototype.sort.call({ length: 3, 0: 3, 1: 1, 2: 2 }, (a, b) => a - b);
+out.numCmpProtoHole = (() => { Array.prototype[1] = 0; try { const a = [5, , 3].sort((x, y) => x - y); return [shape(a), Object.keys(a)]; } finally { delete Array.prototype[1]; } })();
+// sort: run detection, insertion, merge
+out.sortShapes = (() => { const r = {}; const n = 3000; const up = Array.from({ length: n }, (_, i) => i), down = up.slice().reverse(); const saw = up.map(i => i % 64), two = up.map(i => i < n / 2 ? i : i - n / 2), eq = up.map(() => 1), nearly = up.slice(); nearly[10] = 2990; nearly[2990] = 10; const lens = [0, 1, 2, 3, 15, 16, 31, 32, 33, 63, 64, 65, 127, 128, 129, 1000, 4097]; for (const [k, a] of Object.entries({ up, down, saw, two, eq, nearly, noisy: noisy(n) })) { const s = a.map((v, i) => ({ v, i })).sort((x, y) => x.v - y.v); let ok = true; for (let i = 1; i < s.length; i++) if (s[i - 1].v > s[i].v || (s[i - 1].v === s[i].v && s[i - 1].i > s[i].i)) ok = false; r[k] = [ok, hash(s.map(e => e.v))]; } r.lens = lens.map(l => { const a = noisy(l), asc = a.map((v, i) => ({ v, i })).sort((x, y) => x.v - y.v || x.i - y.i).map(e => e.v), plain = a.slice().sort((x, y) => x - y), desc = a.slice().sort((x, y) => y - x); return [hash(plain), hash(asc) === hash(plain), hash(desc), plain[0] ?? null]; }); return r; })();
+out.sortDescendingStable = (() => { const a = []; for (let i = 0; i < 500; i++) a.push({ k: 500 - (i >> 2), i }); a.sort((p, q) => p.k - q.k); let ok = true; for (let i = 1; i < a.length; i++) if (a[i - 1].k > a[i].k || (a[i - 1].k === a[i].k && a[i - 1].i > a[i].i)) ok = false; return ok; })();
+out.sortInconsistentLarge = (() => { const r = []; for (const c of [() => 1, () => -1, () => 0, () => NaN, (a, b) => (a % 7) - (b % 3), (a, b) => a < b, () => Infinity, () => undefined, () => '-1']) { const a = noisy(2000), before = a.slice().sort((x, y) => x - y); a.sort(c); r.push(a.length === 2000 && a.slice().sort((x, y) => x - y).every((v, i) => v === before[i])); } return r; })();
+out.sortMutatingLarge = (() => { const a = noisy(500); let n = 0; a.sort((p, q) => { if (n++ === 100) { a.length = 3; a[1000] = 'x'; } return p - q; }); let ok = true; for (let i = 1; i < a.length; i++) if (a[i - 1] > a[i]) ok = false; return [a.length, ok]; })();
+out.sortThrowsLate = (() => { const a = noisy(500), b = a.slice(); let n = 0; try { a.sort((p, q) => { if (++n === 1000) throw new RangeError('late'); return p - q; }); return 'no'; } catch (e) { return [e.constructor.name, a.every((v, i) => v === b[i])]; } })();
+out.sortReentrantLarge = (() => { const a = noisy(300), b = noisy(300); a.sort((p, q) => { b.slice(0, 40).sort((x, y) => y - x); return p - q; }); return hash(a); })();
+out.sortFrozen = (() => { const r = []; for (const a of [Object.freeze([2, 1]), Object.freeze([]), Object.seal([2, , 1]), Object.preventExtensions([2, , 1])]) { try { a.sort(); r.push(['ok', a.length, Object.keys(a)]); } catch (e) { r.push([e.constructor.name, Object.keys(a)]); } } return r; })();
+// default sort: keys computed once
+out.defaultMixed = (() => { const a = [10, 9, 1, 'b', 'a', undefined, null, true, false, 1n, -1, '1', NaN, -0, 1e21, 0.5, Infinity, '', undefined, , 'B']; a.sort(); return a.map(x => typeof x === 'bigint' ? x + 'n' : Object.is(x, -0) ? '-0' : x === undefined ? 'undef' : x !== x ? 'nan' : x === null ? 'null' : typeof x === 'string' ? 's:' + x : x); })();
+out.defaultStable = (() => { const a = [1, '1', 1n, '1', 1, 'a', null, 'null', true, 'true']; return a.sort().map(x => typeof x); })();
+out.defaultHoles = (() => { const a = [3, , 1, undefined, , 2]; a.sort(); return [shape(a), Object.keys(a)]; })();
+out.defaultSymbol = (() => { try { [1, Symbol('x'), 2].sort(); return 'no'; } catch (e) { return e.constructor.name; } })();
+out.defaultSingleSymbol = (() => { const s = Symbol('x'), a = [s, undefined].sort(); return [a[0] === s, a[1]]; })();
+out.defaultObjects = (() => { let calls = 0; const o = { toString() { calls++; return '5'; } }; const a = [10, o, 1, 'z'].sort(); return [a[0], a[1], a[2] === o, a[3], calls > 0]; })();
+out.defaultObjectMutates = (() => { const a = [3, 1, { toString() { a.length = 0; return '2'; } }]; a.sort(); return [a.length, a[0], a[2]]; })();
+out.defaultStrings = (() => { let r = ''; for (let i = 0; i < 300; i++) r += 'x'; const a = [r + 'b', r + 'a', '😀', '￿', 'é', 'e', 'E', 'z', 'a\0', 'a']; return a.sort().map(s => s.length + ':' + s.charCodeAt(s.length - 1)); })();
+out.defaultLarge = (() => { const a = noisy(5000); a.sort(); let ok = true; for (let i = 1; i < a.length; i++) if (String(a[i - 1]) > String(a[i])) ok = false; const s = noisy(2000).map(v => 'k' + v).sort(); return [ok, hash(a), s[0], s[1999], [10, 9, 1].toSorted(), [1, 2, 10, 20].sort()]; })();
+out.defaultBudgetNotUserVisible = [undefined, undefined].sort();
+JSON.stringify(out)
+""";
+
+    private const string ArrayExpected = """
+{"fillHoles":[["hole",7,7,"hole","hole"],[1,1,1],2000,[1,9,9]],"fillSetterOnProto":[[5],["0","2"]],"fillShrinkInArg":[5,[0,0,0,0,0]],"fillEndGrow":["x","x","x","x"],"fillNonExtensible":"TypeError","fillNonExtensibleDense":[3,3],"fillFrozen":["TypeError",[1,2]],"fillLengthReadonly":[[1,1],2],"fillHugeLength":[4294967295,1,1,null,false],"fillObjectValue":[true,true],"fillArrayLike":{"0":1,"1":1,"length":2},"declaredLength":[["2000"],3000,false,false,809166,["hole"]],"declaredLengthProto":[[3],true,0],"numCmpMixed":[["1",2,3,"10"],["10",3,2,"1"],["1","3","5"],"TypeError"],"numCmpBigIntMixed":"TypeError","numCmpValueOf":[1,true,3,true],"numCmpThrowingValueOf":["EvalError",3,1],"numCmpSpecials":[["-Infinity","0","1","Infinity","Infinity"],["Infinity","1","-Infinity"],["0","-0","0","-0"],["-0","0","-0"],["-1","0","1","undefined","undefined",null]],"numCmpNaNPermutation":[9,3,15],"numCmpForms":[[1,2,3],[3,2,1],[1,2,3],[3,2,1],[3,1,2],[3,1,2],[1,2,3],[1,2,3],[3,2,1],[1,2,3],[3,2,1]],"numCmpShadow":3,"numCmpSubclass":[true,[1,2,3]],"numCmpArrayLike":{"0":1,"1":2,"2":3,"length":3},"numCmpProtoHole":[[0,3,5],["0","1","2"]],"sortShapes":{"up":[true,809166],"down":[true,809166],"saw":[true,884250],"two":[true,1633],"eq":[true,210386],"nearly":[true,809166],"noisy":[true,901975],"lens":[[7,true,7,null],[823,true,823,606],[26321,true,32381,606],[816887,true,133684,606],[670689,true,801180,0],[890100,true,952076,0],[177361,true,438682,0],[946387,true,343909,0],[763725,true,625049,0],[266579,true,266724,0],[86206,true,696747,0],[192564,true,845358,0],[434038,true,871766,0],[187117,true,443515,0],[190556,true,875990,0],[76719,true,47395,0],[30276,true,933330,0]]},"sortDescendingStable":true,"sortInconsistentLarge":[true,true,true,true,true,true,true,true,true],"sortMutatingLarge":[1001,true],"sortThrowsLate":["RangeError",true],"sortReentrantLarge":929417,"sortFrozen":[["TypeError",["0","1"]],["ok",0,[]],["TypeError",["0","2"]],["TypeError",["0","2"]]],"defaultMixed":["s:",-1,"-0",0.5,1,"1n","s:1",10,1e+21,9,"s:B",null,"nan","s:a","s:b",false,"null",true,"undef","undef",null],"defaultStable":["number","string","bigint","string","number","string","object","string","boolean","string"],"defaultHoles":[[1,2,3,null,"hole","hole"],["0","1","2","3"]],"defaultSymbol":"TypeError","defaultSingleSymbol":[true,null],"defaultObjects":[1,10,true,"z",true],"defaultObjectMutates":[3,1,3],"defaultStrings":["1:69","1:97","2:0","1:101","301:97","301:98","1:122","1:233","2:56832","1:65535"],"defaultLarge":[true,779376,"k0","k992",[1,10,9],[1,10,2,20]],"defaultBudgetNotUserVisible":[null,null]}
+""";
+
+    [Fact]
+    public void ArrayFastPathsMatchReferenceBehavior()
+    {
+        using var engine = new JsEngine();
+        var exp = System.Text.Json.JsonDocument.Parse(ArrayExpected).RootElement;
+        var got = System.Text.Json.JsonDocument.Parse(engine.Evaluate(ArrayScript).AsString()).RootElement;
+        foreach (var p in exp.EnumerateObject())
+        {
+            Assert.True(got.TryGetProperty(p.Name, out var g), $"missing case {p.Name}");
+            Assert.True(p.Value.GetRawText() == g.GetRawText(), $"{p.Name}: expected {p.Value.GetRawText()} but got {g.GetRawText()}");
+        }
+        Assert.Equal(exp.EnumerateObject().Count(), got.EnumerateObject().Count());
+    }
+
+
+
     private const string Script = """
 const out = {};
 // ropes

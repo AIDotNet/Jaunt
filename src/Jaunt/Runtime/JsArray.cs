@@ -18,6 +18,7 @@ internal sealed class JsArray : JsObject
     internal bool LengthWritable = true;
 
     private const uint MaxDenseGap = 1024;
+    private const uint MaxPresizeOnWrite = 1 << 20;
 
     public JsArray(Realm realm, int capacity = 0, JsObject? proto = null)
         : base(realm, proto ?? realm.ArrayPrototype, exotic: true, uniqueShape: false)
@@ -26,7 +27,7 @@ internal sealed class JsArray : JsObject
         else
         {
             Items = new JsValue[capacity];
-            Items.AsSpan().Fill(JsValue.Empty); // slots beyond Length are holes
+            MarkHoles(Items, 0); // slots beyond Length are holes
             realm.ChargeBytes(capacity * 24L);
         }
     }
@@ -55,8 +56,18 @@ internal sealed class JsArray : JsObject
         Realm.ChargeBytes((newCap - Items.Length) * 24L);
         var n = new JsValue[newCap];
         Items.AsSpan().CopyTo(n);
-        n.AsSpan(Items.Length).Fill(JsValue.Empty);
+        MarkHoles(n, Items.Length);
         Items = n;
+    }
+
+    /// <summary>
+    /// Turns the freshly allocated (all zero) slots from <paramref name="start"/> on into holes. A hole differs from a
+    /// zeroed slot only in its non-reference half, so this writes that half alone: a per-element <c>Fill</c> runs a GC
+    /// write barrier for every null reference.
+    /// </summary>
+    private static void MarkHoles(JsValue[] items, int start)
+    {
+        for (int i = start; i < items.Length; i++) Unsafe.AsRef(in items[i].Bits) = JsValue.EmptyBits;
     }
 
     /// <summary>Fast append used by array literals, push and builtins.</summary>
@@ -310,7 +321,8 @@ internal sealed class JsArray : JsObject
                     return OrdinarySet(PropertyKey.FromIndex(index), value, receiver) && FixLength(index);
                 }
                 if (index == uint.MaxValue) return OrdinarySet(PropertyKey.FromIndex(index), value, receiver);
-                EnsureCapacity(index + 1);
+                // filling an array whose length was declared up front (new Array(n)): the length is the size it needs
+                if (index >= (uint)Items.Length) EnsureCapacity(index < Length && Length <= MaxPresizeOnWrite ? Length : index + 1);
                 Items[index] = value;
                 if (index >= Length) Length = index + 1;
                 return true;

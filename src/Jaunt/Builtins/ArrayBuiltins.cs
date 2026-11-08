@@ -481,7 +481,16 @@ internal static class ArrayBuiltins
             long len = Operations.LengthOfArrayLike(realm, o);
             long k = Operations.RelativeIndex(realm, a[1], len, 0);
             long end = Operations.RelativeIndex(realm, a[2], len, len);
-            for (long i = k; i < end; i++) { SetAt(o, i, a[0], JsValue.FromObject(o)); realm.Vm.Tick(); }
+            // every target is an own data element or a hole that no prototype can intercept (rechecked here: converting
+            // the arguments ran user code); one exactly sized store instead of growing element by element
+            if (end > k && o is JsArray fa && fa.Dense && end <= fa.Length && end <= realm.MaxArrayLength && fa.Extensible && !JsArray.ProtoChainMayHaveIndices(fa.Proto))
+            {
+                fa.EnsureCapacity((uint)end);
+                fa.Items.AsSpan((int)k, (int)(end - k)).Fill(a[0]);
+                realm.Vm.Tick((int)Math.Min((end - k) / 64, 1000));
+                return JsValue.FromObject(o);
+            }
+            for (long i = k; i < end; i++) { SetAtOrThrow(realm, o, i, a[0]); realm.Vm.Tick(); }
             return JsValue.FromObject(o);
         });
         r.Method(proto, "copyWithin", 2, static (in NativeArgs a) =>
@@ -793,7 +802,13 @@ internal static class ArrayBuiltins
 
     private static JsValue GetAt(JsObject o, long i, JsValue receiver) => i < uint.MaxValue ? o.GetIndex((uint)i, receiver) : o.Get(Key(i), receiver);
 
-    private static bool SetAt(JsObject o, long i, JsValue v, JsValue receiver) => i < uint.MaxValue ? o.SetIndex((uint)i, v, receiver) : o.Set(Key(i), v, receiver);
+    /// <summary>Set(O, i, v, true).</summary>
+    private static void SetAtOrThrow(Realm realm, JsObject o, long i, JsValue v)
+    {
+        var self = JsValue.FromObject(o);
+        if (!(i < uint.MaxValue ? o.SetIndex((uint)i, v, self) : o.Set(Key(i), v, self)))
+            throw JsErrors.TypeError(realm, $"Cannot assign to element {i} of {o.ClassName}");
+    }
 
     public static bool IsArray(Realm realm, in JsValue v)
     {
@@ -992,8 +1007,8 @@ internal static class ArrayBuiltins
             }
             finally { vm.ReturnScratch(tmp, count); }
         }
-        for (int i = 0; i < count; i++) { SetAt(o, i, items[i], JsValue.FromObject(o)); vm.Tick(); }
-        for (long i = count; i < len; i++) { o.Delete(Key(i)); vm.Tick(); }
+        for (int i = 0; i < count; i++) { SetAtOrThrow(realm, o, i, items[i]); vm.Tick(); }
+        for (long i = count; i < len; i++) { DeleteOrThrow(realm, o, Key(i)); vm.Tick(); }
     }
 
     private interface ISortCmp { int Compare(in JsValue x, in JsValue y); }
