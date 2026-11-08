@@ -35,6 +35,107 @@ internal sealed class JsArray : JsObject
         public int Head;
         /// <summary>Reads and writes served from the queue since the last front operation; many of them means it is not used as a queue.</summary>
         public int Accesses;
+        /// <summary>Page mode (see <see cref="PageSize"/>) when not null: <see cref="Store"/> is empty and the elements are here.</summary>
+        public JsValue[][]? Pages;
+    }
+
+    /// <summary>
+    /// Page mode, a variant of queue mode with the same contract: <see cref="Items"/> is empty and Dense is true. A long
+    /// result (filter, flat, flatMap) keeps its elements in pages of <see cref="PageSize"/> elements until something needs
+    /// them contiguous. One array of more than about 5300 elements would be a large object. Those are not moved or collected
+    /// by gen0 and gen1: every 3 MB of them triggers a blocking gen2 collection, and until then a dead one keeps whatever
+    /// its elements refer to alive through the young collections. Builtins read pages directly (<see cref="TryGetElement"/>);
+    /// the interpreter's slow path serves a limited number of accesses from them, and anything else leaves page mode, which
+    /// is the copy the result would have made anyway. Every slot below Length is a value or a hole; a page may be shorter
+    /// than <see cref="PageSize"/> (the last one).
+    /// </summary>
+    internal const int PageShift = 12;
+    internal const int PageSize = 1 << PageShift;
+    private const int PageMask = PageSize - 1;
+    /// <summary>The longest element store that is not a large object (85,000 bytes including the array header).</summary>
+    internal const int MaxSmallStore = (85_000 - 32) / 16;
+
+    /// <summary>
+    /// How long an array growing by push stays in page mode. It stays contiguous above this: the interpreter's element
+    /// access misses on a paged array, and an array this long is more likely to live long and be indexed than to be temporary.
+    /// </summary>
+    private const uint MaxPushedPaged = 1 << 16;
+
+    /// <summary>The elements as one span, for internal arrays built by Push (spread call arguments).</summary>
+    internal ReadOnlySpan<JsValue> ContiguousElements()
+    {
+        LeaveQueueMode();
+        return new ReadOnlySpan<JsValue>(Items, 0, (int)Length);
+    }
+
+    /// <summary>Gives this new, empty array <paramref name="length"/> elements stored in <paramref name="pages"/>.</summary>
+    internal void AdoptPages(JsValue[][] pages, uint length)
+    {
+        _queue = new QueueState(Array.Empty<JsValue>()) { Pages = pages };
+        Items = Array.Empty<JsValue>();
+        Length = length;
+    }
+
+    /// <summary>Moves a full element store of one to about 1.3 pages (not a large object) to page mode.</summary>
+    private void EnterPageMode()
+    {
+        var items = Items;
+        var pages = new JsValue[4][];
+        pages[0] = items.Length == PageSize ? items : items.AsSpan(0, PageSize).ToArray();
+        if (items.Length > PageSize) pages[1] = items.AsSpan(PageSize).ToArray();
+        _queue = new QueueState(Array.Empty<JsValue>()) { Pages = pages };
+        Items = Array.Empty<JsValue>();
+    }
+
+    private void PagedPush(QueueState q, in JsValue v)
+    {
+        if (Length >= MaxPushedPaged)
+        {
+            LeaveQueueMode();
+            EnsureCapacity(Length + 1);
+            JsValue.Store(ref Items[Length++], v);
+            return;
+        }
+        uint p = Length >> PageShift, at = Length & PageMask;
+        var pages = q.Pages!;
+        if (p >= (uint)pages.Length)
+        {
+            Array.Resize(ref pages, pages.Length * 2);
+            q.Pages = pages;
+        }
+        var page = pages[p];
+        if (page == null || at >= (uint)page.Length)
+        {
+            Realm.ChargeBytes((PageSize - (page?.Length ?? 0)) * 24L);
+            Array.Resize(ref page, PageSize);
+            pages[p] = page;
+        }
+        JsValue.Store(ref page[at], v);
+        Length++;
+    }
+
+    /// <summary>Makes room for one more element past the end of the store, without a store that would be a large object while the array is short.</summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private void GrowForPush()
+    {
+        uint cap = (uint)Items.Length;
+        if (Length == cap && cap >= PageSize && cap <= MaxSmallStore) EnterPageMode();
+        else if (Length == cap && cap > PageSize / 2 && cap < PageSize) EnsureCapacity(PageSize);
+        else EnsureCapacity(Length + 1);
+    }
+
+    private void LeavePageMode(JsValue[][] pages)
+    {
+        _queue = null;
+        int n = (int)Length;
+        var items = new JsValue[n];
+        for (int p = 0, at = 0; at < n; p++)
+        {
+            int c = Math.Min(pages[p].Length, n - at);
+            Array.Copy(pages[p], 0, items, at, c);
+            at += c;
+        }
+        Items = items;
     }
 
     private QueueState? _queue;
@@ -46,6 +147,7 @@ internal sealed class JsArray : JsObject
     {
         var q = _queue;
         if (q == null) return;
+        if (q.Pages != null) { LeavePageMode(q.Pages); return; }
         _queue = null;
         var s = q.Store;
         int h = q.Head, n = (int)Length;
@@ -68,6 +170,7 @@ internal sealed class JsArray : JsObject
     /// <summary>Removes the first element, which may be a hole (Empty). False when the array is too short for queue mode: the caller moves the elements. The caller has checked Dense, the prototypes, and that Length &gt; 0.</summary>
     internal bool TryQueueShift(out JsValue first)
     {
+        if (_queue?.Pages != null) LeaveQueueMode();
         if (_queue == null && !TryEnterQueueMode()) { first = default; return false; }
         var q = _queue!;
         ref var slot = ref q.Store[q.Head];
@@ -96,7 +199,7 @@ internal sealed class JsArray : JsObject
     internal bool TryQueuePop(out JsValue last)
     {
         var q = _queue;
-        if (q == null) { last = default; return false; }
+        if (q == null || q.Pages != null) { last = default; LeaveQueueMode(); return false; }
         ref var slot = ref q.Store[q.Head + (int)Length - 1];
         last = slot;
         if (last.IsEmpty) return false;
@@ -109,6 +212,7 @@ internal sealed class JsArray : JsObject
     private void QueuePush(JsValue v)
     {
         var q = _queue!;
+        if (q.Pages != null) { PagedPush(q, v); return; }
         var s = q.Store;
         int n = (int)Length, end = q.Head + n;
         if (end == s.Length)
@@ -136,20 +240,26 @@ internal sealed class JsArray : JsObject
         Length++;
     }
 
+    /// <summary>
+    /// How many accesses by index a queue or page mode array serves before it leaves that mode. Page mode allows more: the
+    /// move out of it allocates a large object, which costs about as much as these accesses over the fast path.
+    /// </summary>
+    private uint AccessLimit(QueueState q) => q.Pages != null ? Length / 4 + 64 : Length / 8 + 8;
+
     private bool TryQueueGet(uint index, out JsValue value)
     {
         var q = _queue!;
         value = default;
-        if (index >= Length || ++q.Accesses > Length / 8 + 8) return false;
-        value = q.Store[q.Head + (int)index];
+        if (index >= Length || ++q.Accesses > AccessLimit(q)) return false;
+        value = q.Pages != null ? q.Pages[index >> PageShift][index & PageMask] : q.Store[q.Head + (int)index];
         return value.IsNotEmpty;
     }
 
     private bool TryQueueSet(uint index, in JsValue value)
     {
         var q = _queue!;
-        if (index >= Length || ++q.Accesses > Length / 8 + 8) return false;
-        ref var slot = ref q.Store[q.Head + (int)index];
+        if (index >= Length || ++q.Accesses > AccessLimit(q)) return false;
+        ref var slot = ref q.Pages != null ? ref q.Pages[index >> PageShift][index & PageMask] : ref q.Store[q.Head + (int)index];
         if (slot.IsEmpty) return false;
         slot = value;
         return true;
@@ -161,6 +271,7 @@ internal sealed class JsArray : JsObject
     /// </summary>
     internal void SpliceDense(int start, int deleteCount, ReadOnlySpan<JsValue> insert, JsArray removed)
     {
+        if (_queue?.Pages != null) LeaveQueueMode();
         var q = _queue;
         var s = q != null ? q.Store : Items;
         int h = q != null ? q.Head : 0, n = (int)Length, delta = insert.Length - deleteCount, tail = n - start - deleteCount;
@@ -226,6 +337,26 @@ internal sealed class JsArray : JsObject
         return false;
     }
 
+    /// <summary>
+    /// <see cref="TryGetDense"/> that also reads page mode, for a builtin going through the elements: it does not count as
+    /// use of the array by index (see <see cref="TryQueueGet"/>), so a chain of builtins never needs the contiguous store.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal bool TryGetElement(uint index, out JsValue value)
+    {
+        if (TryGetDense(index, out value)) return true;
+        return _queue != null && TryGetPaged(index, out value);
+    }
+
+    private bool TryGetPaged(uint index, out JsValue value)
+    {
+        value = default;
+        var pages = _queue!.Pages;
+        if (pages == null || !Dense || index >= Length) return false;
+        value = pages[index >> PageShift][index & PageMask];
+        return value.IsNotEmpty;
+    }
+
     internal void EnsureCapacity(uint needed)
     {
         if (needed <= (uint)Items.Length) return;
@@ -260,8 +391,8 @@ internal sealed class JsArray : JsObject
         }
         if (Length >= (uint)Items.Length)
         {
+            if (_queue == null) GrowForPush();
             if (_queue != null) { QueuePush(v); return; }
-            EnsureCapacity(Length + 1);
         }
         JsValue.Store(ref Items[Length++], v);
     }

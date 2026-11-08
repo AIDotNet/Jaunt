@@ -74,7 +74,7 @@ internal sealed class IteratorRecord
             var a = _array;
             if (_index < a.Length)
             {
-                if (!a.TryGetDense(_index, out value)) value = a.GetIndex(_index, JsValue.FromObject(a));
+                if (!a.TryGetElement(_index, out value)) value = a.GetIndex(_index, JsValue.FromObject(a));
                 _index++;
                 return true;
             }

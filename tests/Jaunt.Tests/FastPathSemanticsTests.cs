@@ -507,6 +507,150 @@ JSON.stringify(out);
 {"sloppy":{"alias":[10,10,20,2],"extra":["x","y",2,["0","1","3"]],"missing":[null,1,false],"deleteRemap":[null,2,3,["0"]],"definedRO":[2,1],"definedValue":[7,8],"getter":[41,1,41],"frozen":[9,5,true],"sealed":[1,9,true],"desc":[{"value":3,"writable":true,"enumerable":true,"configurable":true},{"value":1,"writable":true,"enumerable":false,"configurable":true},"function"],"named":[[2,0,1],["0","1","length","callee","extra","Symbol(Symbol.iterator)"],1],"stringKey":["new","new",true],"inherited":[2,1,5,2,["0"]],"iter":["p",2,[2],["p",2]],"tostr":["[object Arguments]",true],"icShare":["L","plain",1,"live"],"manyArgs":[["z",15,30,45,60],70,"q"]},"strict":[1,"b",2,["TypeError","TypeError"],true],"freeze":[1,1,5,1,1,null,1,true,true,false,false,1,{"value":1,"writable":false,"enumerable":true,"configurable":false},9,false,true,false,{"value":9,"writable":true,"enumerable":true,"configurable":false},{"a":1,"b":2},true,["a","b"],"{\"a\":1,\"b\":2}","function",true,true,false,true,false],"protoFreeze":[[2,["x"]],[1,[]],1,"getter"],"redefine":[2,2,["a","c"],"{\"a\":1,\"c\":3}",{"a":1,"c":3},{"value":2,"writable":true,"enumerable":false,"configurable":true},"g",true,["a","c"],"d",["a","b","c"],[["a",1],["b","d"],["c",3]],["b","c","d"],{"k":1,"m":2},{"k":1,"m":6},false,"n",9,["length","name"],2,null],"bigShape":[39,null,7,"dyn","s1",null,false,true,false,39,41],"megaStore":[true,null,1,null,"via proto",3,["hit"],["x"],["viaSetter"],1,"ro",[],2,2,1,0,2,"dict",71],"lazyProto":[true,false,false,"object",true,[],false,true,true,true,true,true,["length","name","arguments","caller","prototype"],1,true,true,true,true,true,"object","object",true,true,5,true,"object",true,3,"object",["prototype"],true,false,"object",true,["length","name","arguments","caller","prototype"],null,0,"undefined","undefined","undefined","object",false,"object",["extra","more","prop3"],"object","object",true],"classFrames":[[2,6,10,"ReferenceError: ref","ReferenceError: ref","ReferenceError: ref",{"ret":1},"TypeError: other",{"caught":true},"RangeError: other",5,6,7,{"x":42,"v":4,"p":8,"rest":[5,6]},8,"TypeError: other",1,"m",{"replaced":1},{"old":2,"f":1,"after":1},true,"TypeError: other",{"other":1},"TypeError: other","bound",9,["construct"],true,true,51],["B before","A.x","A","C",2,"B.y","B after",2,6,"C.z",["x","v","y","z"],true,true,"A.x","A","Twice",1,"A.x","A","Twice",2,"A.x","A","RetBad",null,"caught RangeError","A.x","A","ArrowSuper",5,5,5,"A.x","A","EvalSuper",6,6,"A.x","A","SuperInArgs"]],"literals":[[[["a","b","c"],0,false,null,3],[["a","b"],0,false,null,2],[["a","b"],0,false,null,2],[["a"],0,true,0,1],[["a","b"],0,true,0,2],[["x","a","y"],0,false,null,3],[["a","b"],0,false,null,2],[["a","b"],null,false,null,2],[["a"],null,false,null,1],[["a"],0,false,null,1],[["b","a"],"k",false,null,2],[["0","1","b"],null,false,null,3],[["__proto__","m","n","o","p"],null,false,null,5],[["m","ck"],null,false,null,2],[["a","Symbol(s)"],1,false,null,1]],["__proto__","m","n","o","p"],"m","__proto__",0,true,true,false,true,"ck",14,12,0,[[["a","b","c"],1,false,null,3],[["a","b"],1,false,null,2],[["a","b"],1,false,null,2],[["a"],1,true,1,1],[["a","b"],1,true,1,2],[["x","a","y"],1,false,null,3],[["a","b"],"spread",false,null,2],[["a","b"],null,false,null,2],[["a"],null,false,null,1],[["a"],1,false,null,1],[["a","b"],"k",false,null,2],[["0","1","b"],null,false,null,3],[["__proto__","m","n","o","p"],null,false,null,5],[["m","ck"],null,false,null,2],[["a","Symbol(s)"],1,false,null,1]],["__proto__","m","n","o","p"],"m","__proto__",1,true,true,false,true,"ck",14,12,1,[[["a","b","c"],2,false,null,3],[["a","b"],2,false,null,2],[["a","b"],2,false,null,2],[["a"],2,true,2,1],[["a","b"],2,true,2,2],[["x","a","y"],2,false,null,3],[["a","b"],2,false,null,2],[["a","b"],null,false,null,2],[["a"],null,false,null,1],[["a"],2,false,null,1],[["b","a"],"k",false,null,2],[["0","1","b"],null,false,null,3],[["__proto__","m","n","o","p"],null,false,null,5],[["m","ck"],null,false,null,2],[["a","Symbol(s)"],1,false,null,1]],["__proto__","m","n","o","p"],"m","__proto__",2,true,true,false,true,"ck",14,12,2],"privates":[[3,"m3",6],true,false,"TypeError","TypeError","TypeError","TypeError","TypeError",["y","z","w","v","u"],"TypeError","TypeError",[],"{}",7],"withScope":[[5,"outer","outer","has:log","has:a","get:Symbol(Symbol.unscopables)","has:a","get:a",1,"getter","V",true,"I","J",["inh"]],5,5]}
 """;
 
+    // Long arrays in page mode (filter, flat, flatMap, Array.from and push past one page of elements) and Map/Set tables
+    // across their page boundaries: every way of reading and changing them. The expected values were produced by Node.
+    private const string PagedScript = """
+const out = {};
+const N = 9000;
+const hash = a => { let h = 7; for (let i = 0; i < a.length; i++) { const v = a[i]; h = (h * 31 + (typeof v === 'number' ? v : v === undefined ? 3 : String(v).length)) % 1000003; } return h; };
+const src = Array.from({ length: N }, (_, i) => i);
+const long = () => src.filter(x => x % 10 !== 9);   // 8100 elements
+const longFlat = () => src.flatMap(x => x % 3 ? [x] : [x, x + 1]);
+const longFrom = () => Array.from({ length: N }, (_, i) => i * 2);
+const longIter = () => Array.from(new Set(src));
+const report = a => [a.length, a[0], a[1], a[4095], a[4096], a[a.length - 1], a[a.length], hash(a)];
+// each way of making a long result, read every way
+out.makers = [long, longFlat, longFrom, longIter, () => src.flat(), () => [src.slice(0, 5000), src.slice(5000)].flat(), () => src.filter(() => true), () => [[src], [src]].flat(2)].map(f => report(f()));
+out.sizesAroundPage = [4095, 4096, 4097, 5311, 5312, 5313, 8191, 8192, 8193, 12288, 12289].map(n => { const a = Array.from({ length: n }, (_, i) => i), f = a.filter(() => true), g = a.flatMap(x => [x]); return [f.length, hash(f), f[n - 1], f[n], g.length, hash(g), g[n - 1], g[n]]; });
+out.builtinChain = (() => { const a = long(); return [a.map(x => x + 1).length, a.filter(x => x & 1).length, a.reduce((s, x) => s + x, 0), a.reduceRight((s, x) => s * 2 % 1009 + x, 0), a.some(x => x === 8998), a.every(x => x >= 0), a.find(x => x > 5000), a.findLast(x => x < 5000), a.findIndex(x => x > 5000), a.findLastIndex(x => x < 5000)]; })();
+out.forEachArgs = (() => { const a = long(); let ok = true, n = 0; a.forEach(function (v, i, self) { if (self !== a || this !== 7 && Number(this) !== 7 || a[i] !== v) ok = false; n++; }, 7); return [ok, n]; })();
+out.ops = (() => { const r = {};
+  r.forOf = (() => { let s = 0, n = 0; for (const x of long()) { s += x; n++; } return [s, n]; })();
+  r.spread = (() => { const c = [...long()]; return [c.length, hash(c)]; })();
+  r.spreadCall = Math.max(...long());
+  r.entries = (() => { let s = 0; for (const [i, v] of long().entries()) s += i ^ v; return s; })();
+  r.keys = Array.from(long().keys()).length;
+  r.objectKeys = Object.keys(long()).length;
+  r.has = (() => { const a = long(); return [0 in a, 8099 in a, 8100 in a, a.hasOwnProperty(5000), Object.getOwnPropertyDescriptor(a, '4096')]; })();
+  r.join = long().join('').length;
+  r.json = JSON.stringify(long()).length;
+  r.json2 = JSON.stringify({ a: longFlat() }).length;
+  r.slice = (() => { const a = long(); const b = a.slice(4090, 4100); return [b, a.length]; })();
+  r.concat = (() => { const a = long(), b = a.concat(a, [1]); return [b.length, hash(b)]; })();
+  r.concat2 = (() => { const b = [1].concat(long()); return [b.length, hash(b)]; })();
+  r.indexOf = (() => { const a = long(); return [a.indexOf(5000), a.lastIndexOf(5000), a.includes(8999), a.at(-1), a.at(4096)]; })();
+  r.sort = (() => { const a = long(); a.sort((x, y) => y - x); return [a[0], a[8099], hash(a)]; })();
+  r.sortDefault = (() => { const a = long(); a.sort(); return [a[0], a[1], a[8099], hash(a)]; })();
+  r.toSorted = (() => { const a = long(), b = a.toSorted((x, y) => y - x); return [a[0], b[0], b.length]; })();
+  r.reverse = (() => { const a = long(); a.reverse(); return [a[0], a[8099], hash(a)]; })();
+  r.fill = (() => { const a = long(); a.fill(5, 4000, 4200); return hash(a); })();
+  r.copyWithin = (() => { const a = long(); a.copyWithin(0, 4000, 4200); return hash(a); })();
+  r.with = (() => { const a = long(), b = a.with(4096, 'x'); return [a[4096], b[4096], b.length]; })();
+  r.apply = Math.max.apply(null, long());
+  r.reflectApply = Reflect.apply((...x) => x.length, null, long());
+  r.ownKeys = Reflect.ownKeys(long()).length;
+  r.typed = new Float64Array(long()).reduce((s, x) => s + x, 0);
+  r.destructure = (() => { const [p, q, ...rest] = long(); return [p, q, rest.length, hash(rest)]; })();
+  r.setFrom = new Set(long()).size;
+  r.objectAssign = Object.keys(Object.assign({}, longFlat())).length;
+  r.objectEntries = Object.entries(long()).length;
+  r.stringFromCodes = String.fromCharCode.apply(null, long().slice(0, 100)).length;
+  return r; })();
+out.indexed = (() => { const a = long(); let s = 0; for (let i = 0; i < a.length; i++) s += a[i]; for (let i = 0; i < a.length; i++) a[i] = a[i] + 1; return [s, hash(a), a[8099]]; })();
+out.fewIndexed = (() => { const a = long(); a[5000] = 'w'; a[4096] = 'v'; return [a[5000], a[4096], a[4095], a.length, hash(a)]; })();
+out.writeHole = (() => { const a = long(); delete a[4100]; return [4100 in a, a[4100], a.length, hash(a), a.filter(() => true).length, a.reduce((n) => n + 1, 0)]; })();
+out.holeProto = (() => { const a = long(); delete a[4100]; Array.prototype[4100] = 'p'; try { let seen = 0; a.forEach(v => { if (v === 'p') seen++; }); return [a[4100], seen, 4100 in a]; } finally { delete Array.prototype[4100]; } })();
+out.protoIndexOnLong = (() => { Array.prototype[9000] = 'q'; try { const a = long(); return [a[9000], a.length, a[8099], a[8100]]; } finally { delete Array.prototype[9000]; } })();
+out.mutators = (() => { const r = {};
+  r.push = (() => { const a = long(); a.push(1, 2); return [a.length, a[8100], a[8101], hash(a)]; })();
+  r.pop = (() => { const a = long(); return [a.pop(), a.pop(), a.length, hash(a)]; })();
+  r.shift = (() => { const a = long(); return [a.shift(), a.shift(), a.length, a[0], hash(a)]; })();
+  r.unshift = (() => { const a = long(); a.unshift(5, 6); return [a.length, a[0], a[2], hash(a)]; })();
+  r.unshift0 = (() => { const a = long(); return [a.unshift(), a.length, hash(a)]; })();
+  r.splice = (() => { const a = long(); const d = a.splice(4090, 10, 'x'); return [d, a.length, a[4090], a[4091], hash(a)]; })();
+  r.spliceFront = (() => { const a = long(); const d = a.splice(1, 2); return [d, a.length, a[1], hash(a)]; })();
+  r.lengthDown = (() => { const a = long(); a.length = 4097; return [a.length, a[4096], a[4097], hash(a)]; })();
+  r.lengthUp = (() => { const a = long(); a.length = 8200; return [a.length, a[8099], 8100 in a, a[8150]]; })();
+  r.lengthZero = (() => { const a = long(); a.length = 0; a.push(1); return [a.length, a[0]]; })();
+  r.writeEnd = (() => { const a = long(); a[a.length] = 1; a[a.length + 2] = 2; return [a.length, a[8100], 8101 in a, a[8102]]; })();
+  r.writeFar = (() => { const a = long(); a[5000000] = 1; return [a.length, a[8099], a[5000000], Object.keys(a).length]; })();
+  r.defineAccessor = (() => { const a = long(); let g = 0; Object.defineProperty(a, 4096, { get() { g++; return 'g'; } }); return [a[4096], g, a.filter(x => x === 'g').length, a[4095]]; })();
+  r.defineRO = (() => { 'use strict'; const a = long(); Object.defineProperty(a, 3, { value: 'ro', writable: false }); try { a[3] = 1; return 'no'; } catch (e) { return [e.constructor.name, a[3]]; } })();
+  r.named = (() => { const a = long(); a.x = 1; a.y = 2; return [a.x, a.y, a.length, Object.keys(a).length, a[8099]]; })();
+  r.freeze = (() => { 'use strict'; const a = Object.freeze(long()); const o = []; for (const f of [() => { a[0] = 1; }, () => a.push(1), () => a.pop(), () => { a.length = 0; }]) { try { f(); o.push('no'); } catch (e) { o.push(e.constructor.name); } } return [o, Object.isFrozen(a), a[4096], a.length, a.filter(() => true).length]; })();
+  r.seal = (() => { 'use strict'; const a = Object.seal(long()); a[1] = 'w'; let e1 = 'no'; try { a.push(1); } catch (e) { e1 = e.constructor.name; } return [e1, a[1], a.length]; })();
+  r.preventExtensions = (() => { 'use strict'; const a = Object.preventExtensions(long()); a[4096] = 'w'; let e1 = 'no'; try { a.push(1); } catch (e) { e1 = e.constructor.name; } return [e1, a[4096], a.length, a.pop(), a.length]; })();
+  r.lengthReadonly = (() => { 'use strict'; const a = long(); Object.defineProperty(a, 'length', { writable: false }); let e1 = 'no'; try { a.push(1); } catch (e) { e1 = e.constructor.name; } a[0] = 'w'; return [e1, a[0], a.length]; })();
+  return r; })();
+// callbacks that change the array they run over
+out.callbackMutates = (() => { const r = {};
+  r.grow = (() => { const a = long(); let n = 0; a.forEach((v, i) => { n++; if (i === 10) a.push(1); }); return [n, a.length]; })();
+  r.shrink = (() => { const a = long(); let n = 0; a.forEach((v, i) => { n++; if (i === 4200) a.length = 4300; }); return [n, a.length]; })();
+  r.shrinkMap = (() => { const a = long(); const m = a.map((v, i) => { if (i === 4200) a.length = 4300; return v + 1; }); return [m.length, 4299 in m, 4300 in m, m[4299], m[4300]]; })();
+  r.deleteAhead = (() => { const a = long(); const seen = []; a.forEach((v, i) => { if (i === 4096) delete a[4097]; if (i > 4095 && i < 4100) seen.push(i); }); return seen; })();
+  r.shiftDuring = (() => { const a = long(); let s = 0, n = 0; a.forEach((v, i) => { n++; s += v; if (i === 4095) a.shift(); }); return [s, n, a.length]; })();
+  r.writeAhead = (() => { const a = long(); let saw; a.filter((v, i) => { if (i === 0) a[5000] = 'w'; if (i === 5000) saw = v; return false; }); return saw; })();
+  r.reduceShrink = (() => { const a = long(); return a.reduce((s, v, i) => { if (i === 5000) a.length = 5001; return s + 1; }, 0); })();
+  r.reduceThrow = (() => { const a = long(); try { a.reduce((s, v, i) => { if (i === 5000) throw new RangeError('x'); return s; }, 0); return 'no'; } catch (e) { return [e.constructor.name, a.length, a[5000]]; } })();
+  r.filterThrow = (() => { try { src.filter((v, i) => { if (i === 8000) throw new EvalError('x'); return true; }); return 'no'; } catch (e) { return [e.constructor.name, src.filter(x => x < 3)]; } })();
+  r.fromThrow = (() => { try { Array.from({ length: 9000 }, (v, i) => { if (i === 8000) throw new EvalError('x'); return i; }); return 'no'; } catch (e) { return e.constructor.name; } })();
+  r.fromIterThrow = (() => { let closed = 0; const it = { [Symbol.iterator]() { let i = 0; return { next() { return { value: i++, done: i > 9000 }; }, return() { closed++; return {}; } }; } }; try { Array.from(it, v => { if (v === 8000) throw new EvalError('x'); return v; }); return 'no'; } catch (e) { return [e.constructor.name, closed]; } })();
+  r.nested = (() => { const out2 = src.filter(x => { if (x !== 4500) return x % 2 === 0; const inner = src.filter(y => y % 2 === 1); return inner.length === 4500; }); return [out2.length, hash(out2)]; })();
+  r.nestedFlat = (() => { const o2 = src.flatMap(x => x === 6000 ? src.filter(y => y < 7000) : [x]); return [o2.length, hash(o2)]; })();
+  r.generatorCallback = (() => { function* g() { const a = long().filter(x => x > 8000); yield a.length; yield a[0]; yield long().map(x => x * 2).length; } return [...g()]; })();
+  r.iteratorDuringMutation = (() => { const a = long(); const it = a[Symbol.iterator](); const x = [it.next().value]; a.shift(); x.push(it.next().value); a.length = 2; x.push(it.next().done, it.next().done); a.push(9, 9, 9); x.push(it.next().done); return x; })();
+  return r; })();
+// species and subclasses never get pages from the sink; proxies read through traps
+out.species = (() => { const r = {}; class A extends Array {} const a = A.from(src); const f = a.filter(x => x > 10); r.sub = [f instanceof A, f.length, hash(f)]; const g = a.flatMap(x => [x]); r.subFlat = [g instanceof A, g.length]; r.fromSub = [A.from({ length: 6000 }, (_, i) => i) instanceof A, A.from({ length: 6000 }, (_, i) => i).length]; class B extends Array { static get [Symbol.species]() { return Array; } } const h = B.from(src).filter(() => true); r.speciesArray = [h instanceof B, Array.isArray(h), h.length, h[8999]]; let touched = 0; class C extends Array { constructor(n) { super(n); touched++; } } r.ctor = [C.from(src).filter(() => true).length > 0, touched]; const p = new Proxy(src, {}); r.proxy = [p.filter(() => true).length, Array.prototype.filter.call(p, x => x > 8990).length, Array.isArray(Array.prototype.filter.call(p, () => true))]; const log = []; const q = new Proxy(long(), { get(t, k, rc) { if (k === 4096 || k === '4096') log.push('get'); return Reflect.get(t, k, rc); }, has(t, k) { if (k === '4096') log.push('has'); return Reflect.has(t, k); } }); q.forEach(() => {}); r.proxyTrap = log; r.arrayLike = Array.prototype.filter.call({ length: 7000, 6000: 'a', 3: 'b' }, () => true); return r; })();
+// arrays built by push across the page size
+out.pushBuilt = (() => { const r = {}; const mk = n => { const a = []; for (let i = 0; i < n; i++) a.push(i); return a; }; r.lens = [4095, 4096, 4097, 5312, 5313, 8192, 8193, 20000].map(n => { const a = mk(n); return [a.length, a[0], a[n - 1], a[n], hash(a), a.reduce((s, x) => s + x, 0)]; }); r.popAll = (() => { const a = mk(6000); let s = 0; while (a.length) s += a.pop(); return [s, a.length]; })(); r.pushPop = (() => { const a = mk(6000); for (let i = 0; i < 5000; i++) { a.push(i); a.pop(); a.pop(); } return [a.length, hash(a)]; })(); r.shiftAll = (() => { const a = mk(6000); let s = 0; while (a.length > 10) s += a.shift(); return [s, a.length, a[0]]; })(); r.literal = (() => { const a = [...mk(6000), 1, ...mk(10)]; return [a.length, hash(a)]; })(); r.fromSet = (() => { const a = [...new Set(mk(7000))]; return [a.length, hash(a)]; })(); r.holeThenPush = (() => { const a = []; a[4095] = 1; a.push(2); a.push(3); return [a.length, 0 in a, a[4095], a[4096], a[4097], a.indexOf(3), a.filter(() => true)]; })(); r.lengthThenPush = (() => { const a = []; a.length = 6000; a.push(1); return [a.length, a[6000], 5 in a]; })(); r.newArrayPush = (() => { const a = new Array(4096); a.push(1); return [a.length, a[4096], 0 in a]; })(); r.fullLiteralPush = (() => { const a = Array.from({ length: 4096 }, () => 1); a.push(2); a.push(3); return [a.length, a[4097], hash(a)]; })(); r.pushMany = (() => { const a = mk(4090); a.push(...mk(20)); return [a.length, a[4100], hash(a)]; })(); r.indexAfterPush = (() => { const a = []; let s = 0; for (let i = 0; i < 10000; i++) { a.push(i); s += a[i >> 1]; } return [s, a.length]; })(); r.setAfterPush = (() => { const a = mk(10000); for (let i = 0; i < 10000; i += 3) a[i] = -i; return hash(a); })(); r.applyPushed = Math.max.apply(null, mk(6000)); r.spreadPushed = Math.max(...mk(6000)); r.mapPushed = mk(6000).map(x => x + 1)[5999]; r.jsonPushed = JSON.stringify(mk(6000)).length; r.sortPushed = mk(6000).sort((x, y) => y - x)[0]; return r; })();
+// Map and Set across page boundaries
+out.tables = (() => { const r = {}; const N2 = 13000;
+  const m = new Map(); for (let i = 0; i < N2; i++) m.set(i * 7, i); r.size = [m.size, m.get(0), m.get(7 * 4096), m.get(7 * 12999), m.get(1), m.has(7 * 8192)];
+  r.order = (() => { let h = 0, n = 0; for (const [k, v] of m) { h = (h * 31 + k + v) % 1000003; n++; } return [h, n]; })();
+  r.update = (() => { const a = new Map(m); a.set(7 * 4096, 'x'); return [a.get(7 * 4096), a.size, [...a.keys()][4096], [...a.values()][4096]]; })();
+  r.deleteRecompact = (() => { const a = new Map(m); for (let i = 0; i < N2; i++) if (i % 3) a.delete(i * 7); for (let i = 0; i < 9000; i++) a.set('n' + i, i); const ks = [...a.keys()]; return [a.size, ks[0], ks[1], ks[4333], ks[4334], ks[a.size - 1], a.get('n8999'), a.get(7 * 3), a.get(7)]; })();
+  r.deleteDuringIter = (() => { const a = new Map(m), seen = []; let n = 0; for (const [k] of a) { if (n === 4095) { a.delete(7 * 4096); a.delete(7 * 4097); } if (n >= 4094 && n < 4098) seen.push(k); n++; } return [seen, n, a.size]; })();
+  r.addDuringIter = (() => { const s = new Set([1, 2, 3]); let n = 0; for (const v of s) { if (n < 9000) s.add(v + 3); n++; } return [n, s.size]; })();
+  r.compactDuringIter = (() => { const s = new Set(); for (let i = 0; i < 9000; i++) s.add(i); const it = s.values(); for (let i = 0; i < 5000; i++) it.next(); for (let i = 0; i < 8990; i++) s.delete(i); for (let i = 0; i < 9000; i++) s.add('x' + i); const a = []; for (let i = 0; i < 3; i++) a.push(it.next().value); return [a, s.size]; })();
+  r.clearDuringIter = (() => { const s = new Set(); for (let i = 0; i < 9000; i++) s.add(i); const it = s.values(); for (let i = 0; i < 5000; i++) it.next(); s.clear(); s.add('a'); s.add('b'); return [it.next().value, it.next().value, it.next().done, s.size, s.has(1), [...s]]; })();
+  r.clearRefill = (() => { const a = new Map(m); a.clear(); for (let i = 0; i < 9000; i++) a.set(i, -i); return [a.size, a.get(8999), a.get(4096), [...a.keys()][8999]]; })();
+  r.sameValueZero = (() => { const a = new Map(); for (let i = 0; i < 5000; i++) a.set(i + 0.5, i); a.set(NaN, 'nan'); a.set(0, 'zero'); a.set(-0, 'mz'); a.set('0', 'str'); a.set(0n, 'big'); const o = {}; a.set(o, 'o'); a.set(null, 'n'); a.set(undefined, 'u'); a.set(true, 't'); const ks = [...a.keys()]; return [a.get(NaN), a.get(0), a.get(-0), Object.is(ks[5001], 0), a.get('0'), a.get(0n), a.get(o), a.get({}), a.get(null), a.get(undefined), a.get(true), a.size]; })();
+  r.setKeysAreValues = (() => { const s = new Set(); for (let i = 0; i < 5000; i++) s.add(i); const e = [...s.entries()][4500]; let f = 0; s.forEach((v, k, self) => { if (v === k && self === s) f++; }); return [e, f, [...s.values()][4099], s.delete(4099), s.has(4099), s.size]; })();
+  r.forEachMutate = (() => { const a = new Map(); for (let i = 0; i < 5000; i++) a.set(i, i); let n = 0; a.forEach((v, k) => { n++; if (k === 4095) a.delete(4096); if (k === 4999) a.set(5000, 0); }); return [n, a.size]; })();
+  r.setOps = (() => { const s = new Set(); for (let i = 0; i < 6000; i++) s.add(i); const t = new Set(); for (let i = 3000; i < 9000; i++) t.add(i); return [s.union(t).size, s.intersection(t).size, s.difference(t).size, s.symmetricDifference(t).size, s.isSubsetOf(t), [...s.intersection(t)][4095]]; })();
+  r.groupBy = (() => { const g = Map.groupBy(src, x => x % 5000); return [g.size, g.get(4095), g.get(1)]; })();
+  return r; })();
+JSON.stringify(out)
+""";
+
+    private const string PagedExpected = """
+{"makers":[[8100,0,1,4550,4551,8998,null,865477],[12000,0,1,3071,3072,8999,null,153421],[9000,0,2,8190,8192,17998,null,815636],[9000,0,1,4095,4096,8999,null,424977],[9000,0,1,4095,4096,8999,null,424977],[9000,0,1,4095,4096,8999,null,424977],[9000,0,1,4095,4096,8999,null,424977],[18000,0,1,4095,4096,8999,null,864508]],"sizesAroundPage":[[4095,643196,4094,null,4095,643196,4094,null],[4096,943114,4095,null,4096,943114,4095,null],[4097,240543,4096,null,4097,240543,4096,null],[5311,237067,5310,null,5311,237067,5310,null],[5312,354367,5311,null,5312,354367,5311,null],[5313,990659,5312,null,5313,990659,5312,null],[8191,512747,8190,null,8191,512747,8190,null],[8192,903303,8191,null,8192,903303,8191,null],[8193,10501,8192,null,8193,10501,8192,null],[12288,968925,12287,null,12288,968925,12287,null],[12289,48873,12288,null,12289,48873,12288,null]],"builtinChain":[8100,3600,36441900,994,true,true,5001,4998,4501,4499],"forEachArgs":[true,8100],"ops":{"forOf":[36441900,8100],"spread":[8100,865477],"spreadCall":8998,"entries":22713726,"keys":8100,"objectKeys":8100,"has":[true,true,false,true,{"value":4551,"writable":true,"enumerable":true,"configurable":true}],"join":31401,"json":39502,"json2":58528,"slice":[[4544,4545,4546,4547,4548,4550,4551,4552,4553,4554],8100],"concat":[16201,167447],"concat2":[8101,210765],"indexOf":[4500,4500,false,8998,4551],"sort":[8998,0,796462],"sortDefault":[0,1,998,672576],"toSorted":[0,8998,8100],"reverse":[8998,0,796462],"fill":133362,"copyWithin":425017,"with":[4551,"x",8100],"apply":8998,"reflectApply":8100,"ownKeys":8101,"typed":36441900,"destructure":[0,1,8098,557761],"setFrom":8100,"objectAssign":12000,"objectEntries":8100,"stringFromCodes":100},"indexed":[36441900,876590,8999],"fewIndexed":["w","v",4550,8100,641596],"writeHole":[false,null,8100,193602,8099,8099],"holeProto":["p",1,true],"protoIndexOnLong":["q",8100,8998,null],"mutators":{"push":[8102,1,2,720937],"pop":[8998,8997,8098,133796],"shift":[0,1,8098,2,557761],"unshift":[8102,5,0,922066],"unshift0":[8100,8100,865477],"splice":[[4544,4545,4546,4547,4548,4550,4551,4552,4553,4554],8091,"x",4555,200905],"spliceFront":[[1,2],8098,3,837052],"lengthDown":[4097,4551,null,443120],"lengthUp":[8200,8998,false,null],"lengthZero":[1,1],"writeEnd":[8104,1,false,null],"writeFar":[5000001,8998,1,8101],"defineAccessor":["g",1,1,4550],"defineRO":["TypeError","ro"],"named":[1,2,8100,8102,8998],"freeze":[["TypeError","TypeError","TypeError","TypeError"],true,4551,8100,8100],"seal":["TypeError","w",8100],"preventExtensions":["TypeError","w",8100,8998,8099],"lengthReadonly":["TypeError","w",8100]},"callbackMutates":{"grow":[8100,8101],"shrink":[4300,4300],"shrinkMap":[8100,true,false,4777,null],"deleteAhead":[4096,4098,4099],"shiftDuring":[36437349,8099,8099],"writeAhead":"w","reduceShrink":5001,"reduceThrow":["RangeError",8100,5555],"filterThrow":["EvalError",[0,1,2]],"fromThrow":"EvalError","fromIterThrow":["EvalError",1],"nested":[4500,815017],"nestedFlat":[15999,607996],"generatorCallback":[899,8001,8100],"iteratorDuringMutation":[0,2,true,true,true]},"species":{"sub":[true,8989,521012],"subFlat":[true,9000],"fromSub":[true,6000],"speciesArray":[false,true,9000,8999],"ctor":[true,2],"proxy":[9000,9,true],"proxyTrap":["has","get"],"arrayLike":["b","a"]},"pushBuilt":{"lens":[[4095,0,4094,null,643196,8382465],[4096,0,4095,null,943114,8386560],[4097,0,4096,null,240543,8390656],[5312,0,5311,null,354367,14106016],[5313,0,5312,null,990659,14111328],[8192,0,8191,null,903303,33550336],[8193,0,8192,null,10501,33558528],[20000,0,19999,null,928452,199990000]],"popAll":[17997000,0],"pushPop":[1000,781287],"shiftAll":[17937055,10,5990],"literal":[6011,77201],"fromSet":[7000,687131],"holeThenPush":[4098,false,1,2,3,4097,[1,2,3]],"lengthThenPush":[6001,1,false],"newArrayPush":[4097,1,false],"fullLiteralPush":[4098,3,815844],"pushMany":[4110,10,146522],"indexAfterPush":[24995000,10000],"setAfterPush":726342,"applyPushed":5999,"spreadPushed":5999,"mapPushed":6000,"jsonPushed":28891,"sortPushed":5999},"tables":{"size":[13000,0,4096,12999,null,true],"order":[874438,13000],"update":["x",13000,28672,"x"],"deleteRecompact":[13334,0,21,90993,"n0","n8999",8999,3,null],"deleteDuringIter":[[28658,28665,28686,28693],12998,12998],"addDuringIter":[9003,9003],"compactDuringIter":[[8990,8991,8992],9010],"clearDuringIter":["a","b",true,2,false,["a","b"]],"clearRefill":[9000,-8999,-4096,8999],"sameValueZero":["nan","mz","mz",true,"str","big","o",null,"n","u","t",5008],"setKeysAreValues":[[4500,4500],5000,4099,true,false,4999],"forEachMutate":[5000,5000],"setOps":[9000,3000,3000,6000,false,null],"groupBy":[5000,[4095],[1,5001]]}}
+""";
+
+    [Fact]
+    public void PagedArraysAndTablesMatchReferenceBehavior()
+    {
+        using var engine = new JsEngine();
+        var exp = System.Text.Json.JsonDocument.Parse(PagedExpected).RootElement;
+        var got = System.Text.Json.JsonDocument.Parse(engine.Evaluate(PagedScript).AsString()).RootElement;
+        foreach (var p in exp.EnumerateObject())
+        {
+            Assert.True(got.TryGetProperty(p.Name, out var g), $"missing case {p.Name}");
+            Assert.True(p.Value.GetRawText() == g.GetRawText(), $"{p.Name}: expected {p.Value.GetRawText()} but got {g.GetRawText()}");
+        }
+        Assert.Equal(exp.EnumerateObject().Count(), got.EnumerateObject().Count());
+    }
+
+    [Fact]
+    public void PagedResultsAreChargedToTheBudgetWhileTheyGrow()
+    {
+        using var engine = new JsEngine(new JsEngineOptions { Limits = new JsLimits { MaxTrackedBytes = 4 * 1024 * 1024 } });
+        Assert.Throws<JsLimitExceededException>(() => engine.Evaluate("Array.from({ length: 1e9 }, () => 1).length"));
+        using var engine2 = new JsEngine(new JsEngineOptions { Limits = new JsLimits { MaxTrackedBytes = 4 * 1024 * 1024 } });
+        Assert.Throws<JsLimitExceededException>(() => engine2.Evaluate("const a = []; while (true) a.push(1);"));
+    }
+
     [Fact]
     public void RecursionThroughNewAndSuperHitsTheDepthLimit()
     {

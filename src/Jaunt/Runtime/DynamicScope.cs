@@ -465,7 +465,7 @@ internal sealed partial class Vm
                 int tr = code[pc + 3];
                 var arr = (JsArray)regs[bp + code[pc + 4]].Ref!;
                 int flags = code[pc + 5];
-                var args = new ReadOnlySpan<JsValue>(arr.Items, 0, (int)arr.Length);
+                var args = arr.ContiguousElements();
                 JsValue result;
                 if (fv.IsObject && ReferenceEquals(fv.Ref, Realm.EvalFunction))
                     result = args.Length == 0 ? JsValue.Undefined : PerformEval(args[0], f, (flags & 1) != 0, (flags & 2) != 0, flags);
