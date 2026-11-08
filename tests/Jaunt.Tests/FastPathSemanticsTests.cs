@@ -265,6 +265,46 @@ out.lazyProto = (() => {
   const s = mk(); for (let i = 0; i < 40; i++) s['x' + i] = i; delete s.x0; r.push(typeof s.prototype, s.prototype.constructor === s);
   return r;
 })();
+// new and super() of class constructors run in the caller's interpreter loop
+out.classFrames = (() => {
+  const log = [], msg = (f) => { try { return f(); } catch (e) { return e.constructor.name + ': ' + (e instanceof ReferenceError ? 'ref' : 'other'); } };
+  class A { x = log.push('A.x'); constructor(v) { log.push('A', new.target.name, v); this.v = v; } }
+  class B extends A { y = log.push('B.y'); constructor(v) { log.push('B before'); super(v + 1); log.push('B after', this.x, this.y); } }
+  class C extends B { z = log.push('C.z'); }
+  const c = new C(1); log.push(Object.keys(c), c instanceof A, Object.getPrototypeOf(c) === C.prototype);
+  class Twice extends A { constructor() { super(1); super(2); } }
+  class NoSuper extends A { constructor() { } }
+  class ThisFirst extends A { constructor() { this.a = 1; super(); } }
+  class RetObj extends A { constructor() { return { ret: 1 }; } }
+  class RetBad extends A { constructor() { super(); return 1; } }
+  class Thrower { constructor() { throw new RangeError('t'); } }
+  class Catches extends Thrower { constructor() { try { super(); } catch (e) { log.push('caught ' + e.name); } return { caught: true }; } }
+  class Uncaught extends Thrower { }
+  class ArrowSuper extends A { constructor() { const s = () => super(5); s(); log.push(this.v); const g = () => this.v; log.push(g()); } }
+  class EvalSuper extends A { constructor() { eval('super(6)'); log.push(this.v); } }
+  class SuperInArgs extends A { constructor() { super((() => 7)()); } }
+  class Field extends A { p = this.v * 2; constructor(a, ...rest) { super(a); this.rest = rest; } }
+  class Spread extends A { constructor(...a) { super(...a); } }
+  function Old(v) { this.old = v; return v === 'obj' ? { replaced: 1 } : 3; } Old.prototype.m = () => 'm';
+  class FromOld extends Old { }
+  class FromOldInit extends Old { f = 1; constructor(v) { super(v); this.after = this.f; } }
+  class Nullish extends null { constructor() { return Object.create(Nullish.prototype); } }
+  class NullishSuper extends null { constructor() { super(); } }
+  class Swap extends A { } Object.setPrototypeOf(Swap, class Other { constructor() { this.other = 1; } });
+  class ToArrow extends A { } Object.setPrototypeOf(ToArrow, () => {});
+  class ToBound extends A { } Object.setPrototypeOf(ToBound, A.bind(null, 'bound'));
+  class ToProxy extends A { } const trap = []; Object.setPrototypeOf(ToProxy, new Proxy(A, { construct(t, a, nt) { trap.push('construct'); return Reflect.construct(t, a, nt); } }));
+  class Getter { constructor() { this.hit = 1; } }
+  const nt = function () {}.bind(); Object.defineProperty(nt, 'prototype', { get() { log.push('proto read'); return Array.prototype; } });
+  class WithNt extends Getter { }
+  const r = [c.x, c.y, c.z];
+  r.push(msg(() => new Twice()), msg(() => new NoSuper()), msg(() => new ThisFirst()), msg(() => new RetObj()), msg(() => new RetBad()), msg(() => new Catches()), msg(() => new Uncaught()));
+  r.push(msg(() => new ArrowSuper().v), msg(() => new EvalSuper().v), new SuperInArgs().v, new Field(4, 5, 6), new Spread(8).v, msg(() => C()));
+  r.push(new FromOld(1).old, new FromOld(1).m(), new FromOld('obj'), new FromOldInit(2), msg(() => new Nullish() instanceof Nullish), msg(() => new NullishSuper()));
+  r.push(new Swap(), msg(() => new ToArrow()), new ToBound().v, new ToProxy(9).v, trap, Reflect.construct(WithNt, [], nt) instanceof Array, Reflect.construct(A, [1], Old) instanceof Old);
+  let depth = 0; class Deep extends A { constructor(n) { super(n); depth++; if (n > 0) new Deep(n - 1); } } new Deep(50); r.push(depth);
+  return [r, log.slice(0, 40)];
+})();
 // private elements
 out.privates = (() => {
   class A { #x = 1; #m() { return 'm' + this.#x; } get #g() { return this.#x * 2; } set #g(v) { this.#x = v; } static has(o) { return #x in o; }
@@ -296,8 +336,15 @@ JSON.stringify(out);
 """;
 
     private const string ObjectModelExpected = """
-{"sloppy":{"alias":[10,10,20,2],"extra":["x","y",2,["0","1","3"]],"missing":[null,1,false],"deleteRemap":[null,2,3,["0"]],"definedRO":[2,1],"definedValue":[7,8],"getter":[41,1,41],"frozen":[9,5,true],"sealed":[1,9,true],"desc":[{"value":3,"writable":true,"enumerable":true,"configurable":true},{"value":1,"writable":true,"enumerable":false,"configurable":true},"function"],"named":[[2,0,1],["0","1","length","callee","extra","Symbol(Symbol.iterator)"],1],"stringKey":["new","new",true],"inherited":[2,1,5,2,["0"]],"iter":["p",2,[2],["p",2]],"tostr":["[object Arguments]",true],"icShare":["L","plain",1,"live"],"manyArgs":[["z",15,30,45,60],70,"q"]},"strict":[1,"b",2,["TypeError","TypeError"],true],"freeze":[1,1,5,1,1,null,1,true,true,false,false,1,{"value":1,"writable":false,"enumerable":true,"configurable":false},9,false,true,false,{"value":9,"writable":true,"enumerable":true,"configurable":false},{"a":1,"b":2},true,["a","b"],"{\"a\":1,\"b\":2}","function",true,true,false,true,false],"protoFreeze":[[2,["x"]],[1,[]],1,"getter"],"redefine":[2,2,["a","c"],"{\"a\":1,\"c\":3}",{"a":1,"c":3},{"value":2,"writable":true,"enumerable":false,"configurable":true},"g",true,["a","c"],"d",["a","b","c"],[["a",1],["b","d"],["c",3]],["b","c","d"],{"k":1,"m":2},{"k":1,"m":6},false,"n",9,["length","name"],2,null],"bigShape":[39,null,7,"dyn","s1",null,false,true,false,39,41],"megaStore":[true,null,1,null,"via proto",3,["hit"],["x"],["viaSetter"],1,"ro",[],2,2,1,0,2,"dict",71],"lazyProto":[true,false,false,"object",true,[],false,true,true,true,true,true,["length","name","arguments","caller","prototype"],1,true,true,true,true,true,"object","object",true,true,5,true,"object",true,3,"object",["prototype"],true,false,"object",true,["length","name","arguments","caller","prototype"],null,0,"undefined","undefined","undefined","object",false,"object",["extra","more","prop3"],"object","object",true],"privates":[[3,"m3",6],true,false,"TypeError","TypeError","TypeError","TypeError","TypeError",["y","z","w","v","u"],"TypeError","TypeError",[],"{}",7],"withScope":[[5,"outer","outer","has:log","has:a","get:Symbol(Symbol.unscopables)","has:a","get:a",1,"getter","V",true,"I","J",["inh"]],5,5]}
+{"sloppy":{"alias":[10,10,20,2],"extra":["x","y",2,["0","1","3"]],"missing":[null,1,false],"deleteRemap":[null,2,3,["0"]],"definedRO":[2,1],"definedValue":[7,8],"getter":[41,1,41],"frozen":[9,5,true],"sealed":[1,9,true],"desc":[{"value":3,"writable":true,"enumerable":true,"configurable":true},{"value":1,"writable":true,"enumerable":false,"configurable":true},"function"],"named":[[2,0,1],["0","1","length","callee","extra","Symbol(Symbol.iterator)"],1],"stringKey":["new","new",true],"inherited":[2,1,5,2,["0"]],"iter":["p",2,[2],["p",2]],"tostr":["[object Arguments]",true],"icShare":["L","plain",1,"live"],"manyArgs":[["z",15,30,45,60],70,"q"]},"strict":[1,"b",2,["TypeError","TypeError"],true],"freeze":[1,1,5,1,1,null,1,true,true,false,false,1,{"value":1,"writable":false,"enumerable":true,"configurable":false},9,false,true,false,{"value":9,"writable":true,"enumerable":true,"configurable":false},{"a":1,"b":2},true,["a","b"],"{\"a\":1,\"b\":2}","function",true,true,false,true,false],"protoFreeze":[[2,["x"]],[1,[]],1,"getter"],"redefine":[2,2,["a","c"],"{\"a\":1,\"c\":3}",{"a":1,"c":3},{"value":2,"writable":true,"enumerable":false,"configurable":true},"g",true,["a","c"],"d",["a","b","c"],[["a",1],["b","d"],["c",3]],["b","c","d"],{"k":1,"m":2},{"k":1,"m":6},false,"n",9,["length","name"],2,null],"bigShape":[39,null,7,"dyn","s1",null,false,true,false,39,41],"megaStore":[true,null,1,null,"via proto",3,["hit"],["x"],["viaSetter"],1,"ro",[],2,2,1,0,2,"dict",71],"lazyProto":[true,false,false,"object",true,[],false,true,true,true,true,true,["length","name","arguments","caller","prototype"],1,true,true,true,true,true,"object","object",true,true,5,true,"object",true,3,"object",["prototype"],true,false,"object",true,["length","name","arguments","caller","prototype"],null,0,"undefined","undefined","undefined","object",false,"object",["extra","more","prop3"],"object","object",true],"classFrames":[[2,6,10,"ReferenceError: ref","ReferenceError: ref","ReferenceError: ref",{"ret":1},"TypeError: other",{"caught":true},"RangeError: other",5,6,7,{"x":42,"v":4,"p":8,"rest":[5,6]},8,"TypeError: other",1,"m",{"replaced":1},{"old":2,"f":1,"after":1},true,"TypeError: other",{"other":1},"TypeError: other","bound",9,["construct"],true,true,51],["B before","A.x","A","C",2,"B.y","B after",2,6,"C.z",["x","v","y","z"],true,true,"A.x","A","Twice",1,"A.x","A","Twice",2,"A.x","A","RetBad",null,"caught RangeError","A.x","A","ArrowSuper",5,5,5,"A.x","A","EvalSuper",6,6,"A.x","A","SuperInArgs"]],"privates":[[3,"m3",6],true,false,"TypeError","TypeError","TypeError","TypeError","TypeError",["y","z","w","v","u"],"TypeError","TypeError",[],"{}",7],"withScope":[[5,"outer","outer","has:log","has:a","get:Symbol(Symbol.unscopables)","has:a","get:a",1,"getter","V",true,"I","J",["inh"]],5,5]}
 """;
+
+    [Fact]
+    public void RecursionThroughNewAndSuperHitsTheDepthLimit()
+    {
+        using var engine = new JsEngine();
+        Assert.Throws<JsLimitExceededException>(() => engine.Evaluate("class A { } class B extends A { constructor() { super(); new B(); } } new B();"));
+    }
 
     [Fact]
     public void AddTransitionCacheBumpsTheEpochOfAPrototype()

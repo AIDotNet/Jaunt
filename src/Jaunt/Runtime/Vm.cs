@@ -472,10 +472,15 @@ internal sealed partial class Vm
     /// <summary><see cref="PushCallFrame"/> for the interpreter's New: the frame constructs <paramref name="obj"/>.</summary>
     internal Frame PushNewFrame(JsClosure c, JsValue[] callerRegs, int argStart, int argc, JsObject obj, JsValue newTarget)
     {
+        return PushConstructFrame(c, callerRegs, argStart, argc, JsValue.FromObject(obj), newTarget);
+    }
+
+    private Frame PushConstructFrame(JsClosure c, JsValue[] callerRegs, int argStart, int argc, JsValue thisValue, JsValue newTarget)
+    {
         if (Depth + 1 > MaxDepth) StackOverflowFrame();
         var f = RentFrame();
         BindCallWindow(f, c.Template, callerRegs, argStart, argc);
-        SetupFrame(f, c, JsValue.FromObject(obj), newTarget, FrameFlags.Construct);
+        SetupFrame(f, c, thisValue, newTarget, FrameFlags.Construct);
         return f;
     }
 

@@ -38,7 +38,7 @@ internal enum Op : int
     SwitchInt,
     Ret, RetUndef,
     Throw, ThrowTypeError, ThrowRefError,
-    Call, CallMethod, CallSpread, New, NewSpread, SuperCall, SuperCallSpread,
+    Call, CallMethod, CallSpread, New, NewSpread, SuperCall, SuperCallSpread, SuperBind,
     /// <summary>Calls in tail position (strict code): replace the current frame when the callee is a plain closure.</summary>
     TailCall, TailCallMethod, TailCallSpread, TailCallEval,
     Closure, ClassCreate, SetHomeObject, InitFields, SetFieldInit,
@@ -119,6 +119,7 @@ internal static class OpInfo
         S(Op.NewSpread, R, R, R);
         S(Op.SuperCall, R, R, N);
         S(Op.SuperCallSpread, R, R);
+        S(Op.SuperBind, R);
         S(Op.Closure, R, F);
         S(Op.ClassCreate, R, R, F, O, I);
         S(Op.SetHomeObject, R, R);

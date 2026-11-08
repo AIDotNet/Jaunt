@@ -815,7 +815,7 @@ internal sealed partial class Vm
                             int argc = code[pc + 4];
                             int dst = bp + code[pc + 1];
                             f.Pc = pc + 5;
-                            if (fv.IsObject && fv.Ref is JsClosure c && (c.Template.Flags & InlineNewMask) == 0 && !c.IsDerived && c.FieldInit == null && c.Template.IsConstructor)
+                            if (fv.IsObject && fv.Ref is JsClosure c && (c.Template.Flags & InlineNewMask) == 0 && c.Template.IsConstructor)
                             {
                                 if (--_ticks <= 0) Checkpoint();
                                 var nf = c.IsDerived || c.FieldInit != null
@@ -828,6 +828,26 @@ internal sealed partial class Vm
                             }
                             regs[dst] = Construct(fv, new ReadOnlySpan<JsValue>(regs, argStart, argc));
                             pc += 5;
+                            continue;
+                        }
+                        case Op.SuperCall:
+                        {
+                            int argStart = bp + code[pc + 2];
+                            int argc = code[pc + 3];
+                            int dst = bp + code[pc + 1];
+                            f.Pc = pc + 4;
+                            if (--_ticks <= 0) Checkpoint();
+                            var nf = TryPushSuperFrame(f, argStart, argc);
+                            if (nf != null)
+                            {
+                                nf.RetIndex = dst;
+                                f = nf;
+                                code = f.Code; regs = f.Regs; bp = f.Base; pc = 0; k = f.K;
+                                continue;
+                            }
+                            regs = f.Regs;
+                            regs[dst] = SuperConstruct(f, argc < 0 ? new ReadOnlySpan<JsValue>(f.Args) : new ReadOnlySpan<JsValue>(regs, argStart, argc));
+                            pc += 4;
                             continue;
                         }
                         case Op.Closure:
@@ -1013,7 +1033,40 @@ internal sealed partial class Vm
     private JsObject ConstructPrototype(JsClosure c)
     {
         var proto = c.Get("prototype");
-        return proto.IsObject ? proto.AsObjectUnchecked : Realm.ObjectPrototype;
+        return proto.IsObject ? proto.AsObjectUnchecked : Operations.GetPrototypeFromConstructor(Realm, c, Realm.ObjectPrototype);
+    }
+
+    /// <summary>The frame of a class constructor that <c>new</c> runs in this loop: derived (this unbound) or with instance fields to initialize first.</summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private Frame PushClassNewFrame(JsClosure c, Frame caller, int argStart, int argc, JsValue newTarget)
+    {
+        var thisValue = ConstructThis(c, newTarget);
+        return PushConstructFrame(c, caller.Regs, argStart, argc, thisValue, newTarget);
+    }
+
+    private JsValue ConstructThis(JsClosure c, JsValue newTarget)
+    {
+        if (c.IsDerived) return JsValue.Empty;
+        var nt = newTarget.AsObjectUnchecked;
+        var thisValue = JsValue.FromObject(NewInstance(nt, Operations.GetPrototypeFromConstructor(Realm, nt, Realm.ObjectPrototype)));
+        if (c.FieldInit != null) c.FieldInit.Call(thisValue, ReadOnlySpan<JsValue>.Empty);
+        return thisValue;
+    }
+
+    /// <summary>
+    /// super(...) in a derived constructor whose parent is a closure: its frame, to run in this loop. Null for the other cases,
+    /// which <see cref="SuperConstruct"/> takes. A negative <paramref name="argc"/> forwards the frame's arguments (default constructor).
+    /// </summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private Frame? TryPushSuperFrame(Frame f, int argStart, int argc)
+    {
+        var ctor = f.Callee;
+        if (!ctor.IsDerived || (f.Flags & FrameFlags.Construct) == 0) return null;
+        if (ctor.GetPrototypeOf() is not JsClosure parent || (parent.Template.Flags & InlineNewMask) != 0 || !parent.Template.IsConstructor) return null;
+        var thisValue = ConstructThis(parent, f.NewTarget);
+        return argc < 0
+            ? PushFrame(parent, thisValue, f.Args, f.NewTarget, FrameFlags.Construct)
+            : PushConstructFrame(parent, f.Regs, argStart, argc, thisValue, f.NewTarget);
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]

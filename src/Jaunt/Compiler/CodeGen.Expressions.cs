@@ -944,6 +944,7 @@ internal sealed partial class CodeGen
                 _fb.Position(call);
                 _fb.Emit(Op.SuperCall, d, start, call.Arguments.Count);
             }
+            _fb.Emit(Op.SuperBind, d);
             ResetTo(Math.Max(m, d + 1));
             return d;
         }
@@ -1880,11 +1881,10 @@ internal sealed partial class CodeGen
         _fb = FunctionBuilder.Rent();
         if ((flags & FunctionFlags.Derived) != 0)
         {
-            t.Flags |= FunctionFlags.NeedsArgsArray | FunctionFlags.HasRest;
-            t.RestIndex = 0;
-            int arr = _fb.AllocReg(), d = _fb.AllocReg();
-            _fb.Emit(Op.CreateRestArray, arr, 0);
-            _fb.Emit(Op.SuperCallSpread, d, arr);
+            t.Flags |= FunctionFlags.NeedsArgsArray;
+            int d = _fb.AllocReg();
+            _fb.Emit(Op.SuperCall, d, d, -1);   // forwards the arguments of the frame
+            _fb.Emit(Op.SuperBind, d);
         }
         _fb.Emit(Op.RetUndef);
         _fb.Finish(t);

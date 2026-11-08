@@ -708,7 +708,8 @@ internal sealed partial class Vm
         return home.GetPrototypeOf();
     }
 
-    private JsValue SuperCall(Frame f, ReadOnlySpan<JsValue> args)
+    /// <summary>The first half of super(...): [[Construct]] of the parent; <see cref="SuperBind"/> follows when it returns.</summary>
+    private JsValue SuperConstruct(Frame f, ReadOnlySpan<JsValue> args)
     {
         var ctor = f.Callee;
         var box = f.ThisBox;
@@ -723,13 +724,20 @@ internal sealed partial class Vm
         var parent = ctor.GetPrototypeOf();
         if (parent is not JsFunctionObject pf || !pf.IsConstructor) throw JsErrors.TypeError(Realm, "Super constructor is not a constructor");
         var nt = ntv.IsObject ? ntv.AsObjectUnchecked : ctor;
-        var result = pf.Construct(args, nt);
+        return pf.Construct(args, nt);
+    }
+
+    /// <summary>The second half of super(...): binds this to the result of the parent and initializes the instance fields.</summary>
+    private void SuperBind(Frame f, JsValue result)
+    {
+        var ctor = f.Callee;
+        var box = f.ThisBox;
+        if (!ctor.IsDerived || (f.Flags & FrameFlags.Construct) == 0) ctor = box!.Ctor;
         bool bound = box != null ? box.Value.IsNotEmpty : !f.This.IsEmpty;
         if (bound) throw JsErrors.ReferenceError(Realm, "Super constructor may only be called once");
         f.This = result;
         if (box != null) box.Value = result;
         if (ctor.FieldInit != null) ctor.FieldInit.Call(result, ReadOnlySpan<JsValue>.Empty);
-        return result;
     }
 
     private void ClassCreate(Frame f, JsValue[] regs, int bp, int ctorDst, int protoDst, int fi, int superReg, int hasHeritage)

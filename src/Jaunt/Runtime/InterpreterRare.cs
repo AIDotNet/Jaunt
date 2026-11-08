@@ -186,22 +186,18 @@ internal sealed partial class Vm
                 regs[dst] = Construct(fv, new ReadOnlySpan<JsValue>(arr.Items, 0, (int)arr.Length));
                 return pc + 4;
             }
-            case Op.SuperCall:
-            {
-                int dst = bp + code[pc + 1];
-                var args = new ReadOnlySpan<JsValue>(regs, bp + code[pc + 2], code[pc + 3]);
-                f.Pc = pc + 4;
-                regs[dst] = SuperCall(f, args);
-                return pc + 4;
-            }
             case Op.SuperCallSpread:
             {
                 int dst = bp + code[pc + 1];
                 var arr = ((JsArray)regs[bp + code[pc + 2]].Ref!);
                 f.Pc = pc + 3;
-                regs[dst] = SuperCall(f, new ReadOnlySpan<JsValue>(arr.Items, 0, (int)arr.Length));
+                regs[dst] = SuperConstruct(f, new ReadOnlySpan<JsValue>(arr.Items, 0, (int)arr.Length));
                 return pc + 3;
             }
+            case Op.SuperBind:
+                f.Pc = pc + 2;
+                SuperBind(f, regs[bp + code[pc + 1]]);
+                return pc + 2;
 
             // ------------------------------------------------------------ classes and private names
             case Op.ClassCreate:
