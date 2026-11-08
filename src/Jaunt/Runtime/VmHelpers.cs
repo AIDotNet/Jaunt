@@ -633,6 +633,35 @@ internal sealed partial class Vm
 
     // ------------------------------------------------------------------ object literal / class helpers
 
+    /// <summary>
+    /// A property with a constant key in an object literal, cached per site as shape → next shape. The object can't be observed
+    /// before the literal is complete, so nothing but the layout (a key seen before, a __proto__ or spread earlier) has a say.
+    /// </summary>
+    internal void DefineLiteralProp(in JsValue target, in JsValue keyValue, in JsValue value, ref IcEntry ic)
+    {
+        var obj = Unsafe.As<JsObject>(target.Ref!);
+        var shape = obj.Shape;
+        if (ReferenceEquals(shape, ic.Shape))
+        {
+            int slot = ic.Slot;
+            if (slot >= obj.Slots.Length) GrowSlots(obj, slot);
+            obj.Slots[slot] = value;
+            obj.Shape = ic.NewShape!;
+            Realm.ChargeProperty();
+            return;
+        }
+        var key = new PropertyKey(keyValue.AsStringUnchecked);
+        bool appends = obj.Dict == null && !shape.IsUnique && obj.FindOwn(key, out _) < 0;
+        obj.CreateDataPropertyOrThrow(key, value);
+        if (appends && obj.Dict == null && ic.Misses <= MaxIcMisses)
+        {
+            if (ic.Shape != null) ic.Misses++;
+            ic.Shape = shape;
+            ic.NewShape = obj.Shape;
+            ic.Slot = shape.Count;
+        }
+    }
+
     private void DefineAccessorOp(JsObject obj, JsValue keyValue, JsValue fnValue, int flags)
     {
         var key = Operations.ToPropertyKey(Realm, keyValue);

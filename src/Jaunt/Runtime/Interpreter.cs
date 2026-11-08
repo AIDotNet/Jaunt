@@ -356,14 +356,13 @@ internal sealed partial class Vm
                         case Op.DefinePropK:
                         {
                             f.Pc = pc + 1;
-                            var obj = regs[bp + code[pc + 1]].AsObjectUnchecked;
-                            obj.CreateDataPropertyOrThrow(new PropertyKey(k[code[pc + 2]].AsStringUnchecked), regs[bp + code[pc + 3]]);
-                            pc += 4;
+                            DefineLiteralProp(regs[bp + code[pc + 1]], k[code[pc + 2]], regs[bp + code[pc + 3]], ref f.Feedback.Ics[code[pc + 4]]);
+                            pc += 5;
                             continue;
                         }
                         case Op.NewObject:
-                            regs[bp + code[pc + 1]] = JsValue.FromObject(new JsObject(Realm, Shape.SharedObjectRoot, 0));
-                            pc += 2;
+                            regs[bp + code[pc + 1]] = JsValue.FromObject(new JsObject(Realm, Realm.ObjectRootShape, code[pc + 2]));
+                            pc += 3;
                             continue;
                         case Op.NewArray:
                             f.Pc = pc + 1;
@@ -846,7 +845,7 @@ internal sealed partial class Vm
                                 continue;
                             }
                             regs = f.Regs;
-                            regs[dst] = SuperConstruct(f, argc < 0 ? new ReadOnlySpan<JsValue>(f.Args) : new ReadOnlySpan<JsValue>(regs, argStart, argc));
+                            regs[dst] = SuperConstructFrom(f, argStart, argc);
                             pc += 4;
                             continue;
                         }
@@ -1043,6 +1042,10 @@ internal sealed partial class Vm
         var thisValue = ConstructThis(c, newTarget);
         return PushConstructFrame(c, caller.Regs, argStart, argc, thisValue, newTarget);
     }
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private JsValue SuperConstructFrom(Frame f, int argStart, int argc) =>
+        SuperConstruct(f, argc < 0 ? new ReadOnlySpan<JsValue>(f.Args) : new ReadOnlySpan<JsValue>(f.Regs, argStart, argc));
 
     private JsValue ConstructThis(JsClosure c, JsValue newTarget)
     {

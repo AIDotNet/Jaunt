@@ -305,6 +305,35 @@ out.classFrames = (() => {
   let depth = 0; class Deep extends A { constructor(n) { super(n); depth++; if (n > 0) new Deep(n - 1); } } new Deep(50); r.push(depth);
   return [r, log.slice(0, 40)];
 })();
+// object literals with constant keys, cached per site
+out.literals = (() => {
+  const r = [], sym = Symbol('s');
+  for (let i = 0; i < 3; i++) {
+    const proto = { inherited: i };
+    const mk = [
+      { a: i, b: 2, c: 3 },
+      { a: 1, a: i, b: 2 },
+      { a: 1, b: 2, a: i },
+      { __proto__: proto, a: i },
+      { a: i, __proto__: proto, b: 2 },
+      { ...{ x: i, a: 7 }, a: i, y: 1 },
+      { a: i, ...(i % 2 ? { a: 'spread' } : null), b: 2 },
+      { get a() { return i; }, b: 2, set a(v) { } },
+      { a: 1, get a() { return i; } },
+      { get a() { return 1; }, a: i },
+      { [i % 2 ? 'a' : 'b']: i, a: 'k', b: 'l' },
+      { 1: i, b: 2, 0: 3 },
+      { '__proto__'() { return i; }, m() { return i; }, async n() { }, *o() { }, async *p() { } },
+      { m() { return super.toString === Object.prototype.toString; }, ['c' + 'k']() { } },
+      { [sym]: i, a: 1 },
+    ];
+    r.push(mk.map((o) => [Reflect.ownKeys(o).map(String), Object.getOwnPropertyDescriptor(o, 'a')?.value, Object.getPrototypeOf(o) === proto, o.inherited, Object.keys(o).length]));
+    const names = mk[12], ms = mk[13];
+    r.push(Object.keys(names), names.m.name, names.__proto__.name, names.__proto__(), Object.getOwnPropertyDescriptor(names, 'm').enumerable, Object.getOwnPropertyDescriptor(names, 'm').writable, names.m.hasOwnProperty('prototype'), ms.m(), ms.ck.name);
+    const big = { k0: 0, k1: 1, k2: 2, k3: 3, k4: 4, k5: 5, k6: 6, k7: 7, k8: 8, k9: 9, k10: 10, k11: 11, k12: 12 }; big.added = i; r.push(Object.keys(big).length, big.k12, big.added);
+  }
+  return r;
+})();
 // private elements
 out.privates = (() => {
   class A { #x = 1; #m() { return 'm' + this.#x; } get #g() { return this.#x * 2; } set #g(v) { this.#x = v; } static has(o) { return #x in o; }
@@ -336,7 +365,7 @@ JSON.stringify(out);
 """;
 
     private const string ObjectModelExpected = """
-{"sloppy":{"alias":[10,10,20,2],"extra":["x","y",2,["0","1","3"]],"missing":[null,1,false],"deleteRemap":[null,2,3,["0"]],"definedRO":[2,1],"definedValue":[7,8],"getter":[41,1,41],"frozen":[9,5,true],"sealed":[1,9,true],"desc":[{"value":3,"writable":true,"enumerable":true,"configurable":true},{"value":1,"writable":true,"enumerable":false,"configurable":true},"function"],"named":[[2,0,1],["0","1","length","callee","extra","Symbol(Symbol.iterator)"],1],"stringKey":["new","new",true],"inherited":[2,1,5,2,["0"]],"iter":["p",2,[2],["p",2]],"tostr":["[object Arguments]",true],"icShare":["L","plain",1,"live"],"manyArgs":[["z",15,30,45,60],70,"q"]},"strict":[1,"b",2,["TypeError","TypeError"],true],"freeze":[1,1,5,1,1,null,1,true,true,false,false,1,{"value":1,"writable":false,"enumerable":true,"configurable":false},9,false,true,false,{"value":9,"writable":true,"enumerable":true,"configurable":false},{"a":1,"b":2},true,["a","b"],"{\"a\":1,\"b\":2}","function",true,true,false,true,false],"protoFreeze":[[2,["x"]],[1,[]],1,"getter"],"redefine":[2,2,["a","c"],"{\"a\":1,\"c\":3}",{"a":1,"c":3},{"value":2,"writable":true,"enumerable":false,"configurable":true},"g",true,["a","c"],"d",["a","b","c"],[["a",1],["b","d"],["c",3]],["b","c","d"],{"k":1,"m":2},{"k":1,"m":6},false,"n",9,["length","name"],2,null],"bigShape":[39,null,7,"dyn","s1",null,false,true,false,39,41],"megaStore":[true,null,1,null,"via proto",3,["hit"],["x"],["viaSetter"],1,"ro",[],2,2,1,0,2,"dict",71],"lazyProto":[true,false,false,"object",true,[],false,true,true,true,true,true,["length","name","arguments","caller","prototype"],1,true,true,true,true,true,"object","object",true,true,5,true,"object",true,3,"object",["prototype"],true,false,"object",true,["length","name","arguments","caller","prototype"],null,0,"undefined","undefined","undefined","object",false,"object",["extra","more","prop3"],"object","object",true],"classFrames":[[2,6,10,"ReferenceError: ref","ReferenceError: ref","ReferenceError: ref",{"ret":1},"TypeError: other",{"caught":true},"RangeError: other",5,6,7,{"x":42,"v":4,"p":8,"rest":[5,6]},8,"TypeError: other",1,"m",{"replaced":1},{"old":2,"f":1,"after":1},true,"TypeError: other",{"other":1},"TypeError: other","bound",9,["construct"],true,true,51],["B before","A.x","A","C",2,"B.y","B after",2,6,"C.z",["x","v","y","z"],true,true,"A.x","A","Twice",1,"A.x","A","Twice",2,"A.x","A","RetBad",null,"caught RangeError","A.x","A","ArrowSuper",5,5,5,"A.x","A","EvalSuper",6,6,"A.x","A","SuperInArgs"]],"privates":[[3,"m3",6],true,false,"TypeError","TypeError","TypeError","TypeError","TypeError",["y","z","w","v","u"],"TypeError","TypeError",[],"{}",7],"withScope":[[5,"outer","outer","has:log","has:a","get:Symbol(Symbol.unscopables)","has:a","get:a",1,"getter","V",true,"I","J",["inh"]],5,5]}
+{"sloppy":{"alias":[10,10,20,2],"extra":["x","y",2,["0","1","3"]],"missing":[null,1,false],"deleteRemap":[null,2,3,["0"]],"definedRO":[2,1],"definedValue":[7,8],"getter":[41,1,41],"frozen":[9,5,true],"sealed":[1,9,true],"desc":[{"value":3,"writable":true,"enumerable":true,"configurable":true},{"value":1,"writable":true,"enumerable":false,"configurable":true},"function"],"named":[[2,0,1],["0","1","length","callee","extra","Symbol(Symbol.iterator)"],1],"stringKey":["new","new",true],"inherited":[2,1,5,2,["0"]],"iter":["p",2,[2],["p",2]],"tostr":["[object Arguments]",true],"icShare":["L","plain",1,"live"],"manyArgs":[["z",15,30,45,60],70,"q"]},"strict":[1,"b",2,["TypeError","TypeError"],true],"freeze":[1,1,5,1,1,null,1,true,true,false,false,1,{"value":1,"writable":false,"enumerable":true,"configurable":false},9,false,true,false,{"value":9,"writable":true,"enumerable":true,"configurable":false},{"a":1,"b":2},true,["a","b"],"{\"a\":1,\"b\":2}","function",true,true,false,true,false],"protoFreeze":[[2,["x"]],[1,[]],1,"getter"],"redefine":[2,2,["a","c"],"{\"a\":1,\"c\":3}",{"a":1,"c":3},{"value":2,"writable":true,"enumerable":false,"configurable":true},"g",true,["a","c"],"d",["a","b","c"],[["a",1],["b","d"],["c",3]],["b","c","d"],{"k":1,"m":2},{"k":1,"m":6},false,"n",9,["length","name"],2,null],"bigShape":[39,null,7,"dyn","s1",null,false,true,false,39,41],"megaStore":[true,null,1,null,"via proto",3,["hit"],["x"],["viaSetter"],1,"ro",[],2,2,1,0,2,"dict",71],"lazyProto":[true,false,false,"object",true,[],false,true,true,true,true,true,["length","name","arguments","caller","prototype"],1,true,true,true,true,true,"object","object",true,true,5,true,"object",true,3,"object",["prototype"],true,false,"object",true,["length","name","arguments","caller","prototype"],null,0,"undefined","undefined","undefined","object",false,"object",["extra","more","prop3"],"object","object",true],"classFrames":[[2,6,10,"ReferenceError: ref","ReferenceError: ref","ReferenceError: ref",{"ret":1},"TypeError: other",{"caught":true},"RangeError: other",5,6,7,{"x":42,"v":4,"p":8,"rest":[5,6]},8,"TypeError: other",1,"m",{"replaced":1},{"old":2,"f":1,"after":1},true,"TypeError: other",{"other":1},"TypeError: other","bound",9,["construct"],true,true,51],["B before","A.x","A","C",2,"B.y","B after",2,6,"C.z",["x","v","y","z"],true,true,"A.x","A","Twice",1,"A.x","A","Twice",2,"A.x","A","RetBad",null,"caught RangeError","A.x","A","ArrowSuper",5,5,5,"A.x","A","EvalSuper",6,6,"A.x","A","SuperInArgs"]],"literals":[[[["a","b","c"],0,false,null,3],[["a","b"],0,false,null,2],[["a","b"],0,false,null,2],[["a"],0,true,0,1],[["a","b"],0,true,0,2],[["x","a","y"],0,false,null,3],[["a","b"],0,false,null,2],[["a","b"],null,false,null,2],[["a"],null,false,null,1],[["a"],0,false,null,1],[["b","a"],"k",false,null,2],[["0","1","b"],null,false,null,3],[["__proto__","m","n","o","p"],null,false,null,5],[["m","ck"],null,false,null,2],[["a","Symbol(s)"],1,false,null,1]],["__proto__","m","n","o","p"],"m","__proto__",0,true,true,false,true,"ck",14,12,0,[[["a","b","c"],1,false,null,3],[["a","b"],1,false,null,2],[["a","b"],1,false,null,2],[["a"],1,true,1,1],[["a","b"],1,true,1,2],[["x","a","y"],1,false,null,3],[["a","b"],"spread",false,null,2],[["a","b"],null,false,null,2],[["a"],null,false,null,1],[["a"],1,false,null,1],[["a","b"],"k",false,null,2],[["0","1","b"],null,false,null,3],[["__proto__","m","n","o","p"],null,false,null,5],[["m","ck"],null,false,null,2],[["a","Symbol(s)"],1,false,null,1]],["__proto__","m","n","o","p"],"m","__proto__",1,true,true,false,true,"ck",14,12,1,[[["a","b","c"],2,false,null,3],[["a","b"],2,false,null,2],[["a","b"],2,false,null,2],[["a"],2,true,2,1],[["a","b"],2,true,2,2],[["x","a","y"],2,false,null,3],[["a","b"],2,false,null,2],[["a","b"],null,false,null,2],[["a"],null,false,null,1],[["a"],2,false,null,1],[["b","a"],"k",false,null,2],[["0","1","b"],null,false,null,3],[["__proto__","m","n","o","p"],null,false,null,5],[["m","ck"],null,false,null,2],[["a","Symbol(s)"],1,false,null,1]],["__proto__","m","n","o","p"],"m","__proto__",2,true,true,false,true,"ck",14,12,2],"privates":[[3,"m3",6],true,false,"TypeError","TypeError","TypeError","TypeError","TypeError",["y","z","w","v","u"],"TypeError","TypeError",[],"{}",7],"withScope":[[5,"outer","outer","has:log","has:a","get:Symbol(Symbol.unscopables)","has:a","get:a",1,"getter","V",true,"I","J",["inh"]],5,5]}
 """;
 
     [Fact]
@@ -344,6 +373,35 @@ JSON.stringify(out);
     {
         using var engine = new JsEngine();
         Assert.Throws<JsLimitExceededException>(() => engine.Evaluate("class A { } class B extends A { constructor() { super(); new B(); } } new B();"));
+    }
+
+    [Fact]
+    public void ObjectLiteralsAreChargedToTheBudget()
+    {
+        using var engine = new JsEngine(new JsEngineOptions { Limits = new JsLimits { MaxTrackedBytes = 4 * 1024 * 1024 } });
+        Assert.Throws<JsLimitExceededException>(() => engine.Evaluate("const a = []; while (true) a.push({ p: 1, q: 2, r: 3, s() {} });"));
+    }
+
+    [Fact]
+    public void PrototypeCachesTellRealmsApart()
+    {
+        using var engine = new JsEngine();
+        engine.SetFunction("newRealm", static (ref JsCallContext c) => c.CreateRealm(), 0);
+        var r = engine.Evaluate("""
+            const g = newRealm();
+            g.Object.prototype.foo = 'other'; Object.prototype.foo = 'home';
+            g.Array.prototype.bar = 'other'; Array.prototype.bar = 'home';
+            function read(o) { return o.foo; }
+            function readBar(o) { return o.bar; }
+            function own(o) { return o.foo; }
+            const results = [];
+            for (let i = 0; i < 3; i++) {
+              results.push(read({}), read(new g.Object()), read(g.Object.create(g.Object.prototype)), read(g.eval('({})')));
+              results.push(readBar([]), readBar(new g.Array()), readBar(g.eval('[]')));
+            }
+            results.join();
+            """).AsString();
+        Assert.Equal(string.Join(",", Enumerable.Repeat("home,other,other,other,home,other,other", 3)), r);
     }
 
     [Fact]

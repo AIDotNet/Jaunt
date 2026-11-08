@@ -375,7 +375,7 @@ internal sealed partial class CodeGen
     private int ObjectLiteral(ObjectExpression oe, int dst)
     {
         int d = Dst(dst);
-        _fb.Emit(Op.NewObject, d);
+        _fb.Emit(Op.NewObject, d, Math.Min(oe.Properties.Count, Jaunt.Runtime.Shape.MaxShapeProperties));   // slots to start with
         foreach (var p in oe.Properties)
         {
             int m = Mark;
@@ -401,14 +401,15 @@ internal sealed partial class CodeGen
             }
             else if (prop.Method)
             {
-                int key = Temp();
-                LoadKey(prop, key);
+                int key = staticName == null ? Temp() : -1;
+                if (staticName == null) LoadKey(prop, key);
                 int fn = Temp();
                 int idx = CompileNestedFunction((FunctionExpression)prop.Value, staticName ?? "", FunctionFlags.Method, prop.Start);
                 _fb.Emit(Op.Closure, fn, idx);
                 _fb.Emit(Op.SetHomeObject, fn, d);
                 // computed method keys (incl. symbols) name the function at run time
-                _fb.Emit(Op.DefineAccessor, d, key, fn, 2 | 4 | (staticName == null ? 8 : 0));
+                if (staticName != null) _fb.Emit(Op.DefinePropK, d, _fb.Const(staticName), fn, _fb.NewIc());
+                else _fb.Emit(Op.DefineAccessor, d, key, fn, 2 | 4 | 8);
             }
             else if (staticName != null)
             {
@@ -420,7 +421,7 @@ internal sealed partial class CodeGen
                 else
                 {
                     int v = Expr((Expression)prop.Value, -1, staticName);
-                    _fb.Emit(Op.DefinePropK, d, _fb.Const(staticName), v);
+                    _fb.Emit(Op.DefinePropK, d, _fb.Const(staticName), v, _fb.NewIc());
                 }
             }
             else
