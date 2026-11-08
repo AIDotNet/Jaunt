@@ -445,6 +445,39 @@ internal sealed partial class Vm
         f.Displaced = null;
     }
 
+    /// <summary>Finished coroutine frames for reuse, linked through <see cref="Frame.Displaced"/>. Like the register stack they keep stale references until the root execution ends.</summary>
+    private Frame? _freeCoroutineFrames;
+    private int _freeCoroutineFrameCount;
+    private const int MaxFreeCoroutineFrames = 32;
+    private const int MaxPooledCoroutineRegisters = 128;
+
+    private Frame RentCoroutineFrame(int registerCount)
+    {
+        var f = _freeCoroutineFrames;
+        if (f == null)
+        {
+            f = new Frame { ChunkIndex = -1 };
+            f.Regs = new JsValue[registerCount];
+            return f;
+        }
+        _freeCoroutineFrames = f.Displaced;
+        _freeCoroutineFrameCount--;
+        f.Displaced = null;
+        if (f.Regs.Length < registerCount) f.Regs = new JsValue[registerCount];
+        return f;
+    }
+
+    /// <summary>Takes back the frame of a coroutine that ran to completion; nothing may refer to it any more.</summary>
+    internal void ReleaseCoroutineFrame(Frame f)
+    {
+        if (_freeCoroutineFrameCount >= MaxFreeCoroutineFrames || f.Regs.Length > MaxPooledCoroutineRegisters) return;
+        f.Args = null;
+        f.NewTarget = default;
+        f.Displaced = _freeCoroutineFrames;
+        _freeCoroutineFrames = f;
+        _freeCoroutineFrameCount++;
+    }
+
     /// <summary>Pushes a frame for a closure call; arguments are copied into the new register window.</summary>
     internal Frame PushFrame(JsClosure c, JsValue thisValue, ReadOnlySpan<JsValue> args, JsValue newTarget, FrameFlags flags)
     {
@@ -454,10 +487,7 @@ internal sealed partial class Vm
         int savedTop = _top, savedChunk = _chunkIndex;
         if ((flags & FrameFlags.OwnsRegs) != 0)
         {
-            f = new Frame();
-            f.Regs = new JsValue[t.RegisterCount];
-            f.Base = 0;
-            f.ChunkIndex = -1;
+            f = RentCoroutineFrame(t.RegisterCount);
             PlaceHeapFrame(f);
         }
         else
@@ -726,6 +756,8 @@ internal sealed partial class Vm
         ClearRegisterStack();
         if (_sortScratch != null && _sortScratch.Length > 1 << 12) _sortScratch = null;   // an idle engine keeps at most 64 KB of sort scratch
         TrimJobs();
+        _freeCoroutineFrames = null;
+        _freeCoroutineFrameCount = 0;
         var pool = _frames;   // Sp is 0 here: every slot holds a pooled frame (or nothing)
         for (int i = 0; i < pool.Length; i++)
         {

@@ -94,6 +94,7 @@ internal static class Coroutines
             default:
                 gen.State = GeneratorState.Completed;
                 gen.Frame = null;
+                vm.ReleaseCoroutineFrame(frame);
                 return CreateIterResult(realm, r, true);
         }
     }
@@ -164,9 +165,11 @@ internal static class Coroutines
                     }
                     break;
                 case SuspendKind.Thrown:
+                    vm.ReleaseCoroutineFrame(frame);
                     state.Promise.RejectWith(r);
                     return;
                 default:
+                    vm.ReleaseCoroutineFrame(frame);
                     state.Promise.ResolveWith(r);
                     return;
             }

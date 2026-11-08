@@ -145,6 +145,7 @@ internal static class AsyncGenerators
                 case SuspendKind.Thrown:
                     gen.State = AsyncGenState.Completed;
                     gen.Frame = null;
+                    vm.ReleaseCoroutineFrame(frame);
                     CompleteStep(realm, gen, false, r, true);
                     return;
                 case SuspendKind.Await:
@@ -167,6 +168,7 @@ internal static class AsyncGenerators
                 default:
                     gen.State = AsyncGenState.Completed;
                     gen.Frame = null;
+                    vm.ReleaseCoroutineFrame(frame);
                     CompleteStep(realm, gen, true, r, true);
                     return;
             }
