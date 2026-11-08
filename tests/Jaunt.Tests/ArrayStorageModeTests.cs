@@ -420,7 +420,8 @@ pushedShifted.bindArgs=5001
         using var engine = new JsEngine();
         engine.Evaluate("var log = [];\n" + Script);
         var got = engine.Evaluate("log.join('\\n')").ToString()!.Split('\n');
-        var exp = Expected.Split('\n');
+        // a Windows checkout may turn this source file's line endings, and so this literal's, into CRLF
+        var exp = Expected.ReplaceLineEndings("\n").Split('\n');
         var wrong = exp.Zip(got).Where(p => p.First != p.Second).Select(p => $"expected {p.First} got {p.Second}").ToArray();
         Assert.True(wrong.Length == 0 && exp.Length == got.Length, $"{wrong.Length} of {exp.Length} differ (got {got.Length}):\n" + string.Join("\n", wrong.Take(40)));
     }
