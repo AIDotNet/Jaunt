@@ -75,6 +75,17 @@ internal class JsObject
         realm.ChargeObject();
     }
 
+    /// <summary>Constructor used for exotic objects created with a fully built layout (arguments objects).</summary>
+    protected JsObject(Realm realm, Shape shape, JsValue[] slots, bool exotic)
+    {
+        Realm = realm;
+        IsExotic = exotic;
+        Shape = shape;
+        Slots = slots;
+        realm.ChargeObject();
+        realm.ChargeProperties(shape.Count);
+    }
+
     public virtual string ClassName => "Object";
 
     public JsObject? Proto

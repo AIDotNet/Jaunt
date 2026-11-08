@@ -776,9 +776,11 @@ internal sealed partial class Vm
     {
         var realm = Realm;
         var args = f.Args ?? Array.Empty<JsValue>();
-        var map = new int[Math.Min(args.Length, paramSlots.Length)];
-        Array.Copy(paramSlots, map, map.Length);
-        var obj = new JsMappedArguments(realm, f.Env!, map);
+        int mapLength = Math.Min(args.Length, paramSlots.Length);
+        var layout = Shape.ArgumentsLayout(args.Length, mapped: true);
+        if (layout != null)
+            return new JsMappedArguments(realm, f.Env!, paramSlots, mapLength, args.Length, layout, ArgumentsSlots(realm, args, layout, JsValue.FromObject(f.Callee)));
+        var obj = new JsMappedArguments(realm, f.Env!, paramSlots, mapLength, args.Length);
         for (int i = 0; i < args.Length; i++) obj.AddOwnProperty(PropertyKey.FromIndex((uint)i), args[i], PropFlags.Default);
         obj.AddOwnProperty("length", new JsValue(args.Length), PropFlags.Hidden);
         obj.AddOwnProperty(JsSymbol.Iterator, JsValue.FromObject(realm.ArrayProtoValues), PropFlags.Hidden);
@@ -790,45 +792,102 @@ internal sealed partial class Vm
     {
         var realm = Realm;
         var args = f.Args ?? Array.Empty<JsValue>();
-        var obj = new JsArguments(realm);
+        // CreateUnmappedArgumentsObject (strict code or non-simple parameters): callee is the %ThrowTypeError% accessor
+        var layout = Shape.ArgumentsLayout(args.Length, mapped: false);
+        if (layout != null)
+            return new JsArguments(realm, args.Length, layout, ArgumentsSlots(realm, args, layout, new JsValue(JsTag.Empty, 0, realm.ThrowTypeErrorAccessor)));
+        var obj = new JsArguments(realm, args.Length);
         for (int i = 0; i < args.Length; i++) obj.AddOwnProperty(PropertyKey.FromIndex((uint)i), args[i], PropFlags.Default);
         obj.AddOwnProperty("length", new JsValue(args.Length), PropFlags.Hidden);
         obj.AddOwnProperty(JsSymbol.Iterator, JsValue.FromObject(realm.ArrayProtoValues), PropFlags.Hidden);
-        // CreateUnmappedArgumentsObject (strict code or non-simple parameters): callee is the %ThrowTypeError% accessor
         obj.DefineAccessor("callee", realm.ThrowTypeErrorFunction, realm.ThrowTypeErrorFunction, PropFlags.None);
         return obj;
+    }
+
+    /// <summary>The slots of a fresh arguments object in the order of <see cref="Shape.ArgumentsLayout"/>.</summary>
+    private static JsValue[] ArgumentsSlots(Realm realm, JsValue[] args, Shape layout, JsValue callee)
+    {
+        var slots = new JsValue[layout.Count];
+        Array.Copy(args, slots, args.Length);
+        slots[args.Length] = new JsValue(args.Length);
+        slots[args.Length + 1] = JsValue.FromObject(realm.ArrayProtoValues);
+        slots[args.Length + 2] = callee;
+        return slots;
     }
 }
 
 internal sealed class JsArguments : JsObject
 {
-    public JsArguments(Realm realm) : base(realm, realm.ObjectPrototype) { }
+    private readonly int _argc;
+
+    public JsArguments(Realm realm, int argc) : base(realm, realm.ObjectPrototype) => _argc = argc;
+    public JsArguments(Realm realm, int argc, Shape layout, JsValue[] slots) : base(realm, layout, slots, exotic: false) => _argc = argc;
     public override string ClassName => "Arguments";
+
+    // While in shape mode slot i holds index i: a delete or an overflow of the shape limit moves the object to dictionary mode
+    public override JsValue GetIndex(uint index, JsValue receiver)
+    {
+        if (index < (uint)_argc && Dict == null && (Shape.Flags[index] & PropFlags.Accessor) == 0) return Slots[index];
+        return Get(PropertyKey.FromIndex(index), receiver);
+    }
+
+    public override bool SetIndex(uint index, JsValue value, JsValue receiver)
+    {
+        if (index < (uint)_argc && Dict == null && ReferenceEquals(receiver.Ref, this) && (Shape.Flags[index] & (PropFlags.Accessor | PropFlags.Writable)) == PropFlags.Writable)
+        {
+            Slots[index] = value;
+            return true;
+        }
+        return Set(PropertyKey.FromIndex(index), value, receiver);
+    }
 }
 
 /// <summary>Arguments exotic object with parameter map (10.4.4).</summary>
 internal sealed class JsMappedArguments : JsObject
 {
     private readonly Env _env;
-    private readonly int[] _map; // index → env slot, -1 when unmapped
+    private int[] _map; // index → env slot, -1 when unmapped; the function's shared table until something is unmapped
+    private bool _ownsMap;
+    private readonly int _mapLength;
+    private readonly int _argc;
 
-    public JsMappedArguments(Realm realm, Env env, int[] map) : base(realm, realm.ObjectPrototype, exotic: true)
+    /// <summary>For objects that are filled property by property.</summary>
+    public JsMappedArguments(Realm realm, Env env, int[] map, int mapLength, int argc) : base(realm, realm.ObjectPrototype, exotic: true)
     {
         _env = env;
         _map = map;
+        _mapLength = mapLength;
+        _argc = argc;
+    }
+
+    public JsMappedArguments(Realm realm, Env env, int[] map, int mapLength, int argc, Shape layout, JsValue[] slots) : base(realm, layout, slots, exotic: true)
+    {
+        _env = env;
+        _map = map;
+        _mapLength = mapLength;
+        _argc = argc;
     }
 
     public override string ClassName => "Arguments";
 
+    /// <summary>Only the index keys go through the parameter map; the rest (length, callee, ...) behave as on an ordinary object.</summary>
+    internal override bool CanCacheNamed(in PropertyKey key) => !key.TryGetArrayIndex(out _) && !Shape.IsUnique;
+
     private int MappedSlot(in PropertyKey key)
     {
-        if (!key.TryGetArrayIndex(out uint i) || i >= (uint)_map.Length) return -1;
+        if (!key.TryGetArrayIndex(out uint i) || i >= (uint)_mapLength) return -1;
         return _map[i];
     }
 
     private void Unmap(in PropertyKey key)
     {
-        if (key.TryGetArrayIndex(out uint i) && i < (uint)_map.Length) _map[i] = -1;
+        if (!key.TryGetArrayIndex(out uint i) || i >= (uint)_mapLength) return;
+        if (!_ownsMap)
+        {
+            _map = (int[])_map.Clone();
+            _ownsMap = true;
+        }
+        _map[i] = -1;
     }
 
     public override bool GetOwnProperty(in PropertyKey key, out PropertyDescriptor desc)
@@ -881,6 +940,31 @@ internal sealed class JsMappedArguments : JsObject
         return ok;
     }
 
-    public override JsValue GetIndex(uint index, JsValue receiver) => Get(PropertyKey.FromIndex(index), receiver);
-    public override bool SetIndex(uint index, JsValue value, JsValue receiver) => Set(PropertyKey.FromIndex(index), value, receiver);
+    // While in shape mode slot i holds index i: a delete or an overflow of the shape limit moves the object to dictionary mode.
+    // An index stays mapped only while it is a writable data property (DefineOwnProperty unmaps otherwise).
+    public override JsValue GetIndex(uint index, JsValue receiver)
+    {
+        if (index < (uint)_mapLength)
+        {
+            int slot = _map[index];
+            if (slot >= 0) return _env.Slots[slot];
+        }
+        if (index < (uint)_argc && Dict == null && (Shape.Flags[index] & PropFlags.Accessor) == 0) return Slots[index];
+        return OrdinaryGet(PropertyKey.FromIndex(index), receiver);
+    }
+
+    public override bool SetIndex(uint index, JsValue value, JsValue receiver)
+    {
+        if (index < (uint)_argc && Dict == null && ReferenceEquals(receiver.Ref, this) && (Shape.Flags[index] & (PropFlags.Accessor | PropFlags.Writable)) == PropFlags.Writable)
+        {
+            if (index < (uint)_mapLength)
+            {
+                int slot = _map[index];
+                if (slot >= 0) _env.Slots[slot] = value;
+            }
+            Slots[index] = value;
+            return true;
+        }
+        return Set(PropertyKey.FromIndex(index), value, receiver);
+    }
 }

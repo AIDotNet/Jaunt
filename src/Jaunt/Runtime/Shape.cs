@@ -60,6 +60,13 @@ internal sealed class Shape
     public static readonly Shape SharedFunctionShape = SharedFunctionRoot.AddProperty("length", PropFlags.Configurable)!.AddProperty("name", PropFlags.Configurable)!;
     /// <summary>Shared layout of iterator result objects: value, done.</summary>
     public static readonly Shape SharedIterResultShape = SharedObjectRoot.AddProperty("value", PropFlags.Default)!.AddProperty("done", PropFlags.Default)!;
+    /// <summary>
+    /// Root of arguments object layouts, apart from <see cref="SharedObjectRoot"/> so that no plain object ever has a shape of
+    /// one: a mapped arguments object keeps stale values in the slots of its mapped indices, which ICs must not read.
+    /// </summary>
+    private static readonly Shape SharedArgumentsRoot = new(null, ProtoRole.RealmObjectPrototype);
+    private const int MaxArgumentsLayout = 24;
+    private static readonly Shape?[] s_argumentsLayouts = new Shape?[(MaxArgumentsLayout + 1) * 2];
     /// <summary>Shared layout of a JSON.parse reviver's context object for a primitive value: source.</summary>
     public static readonly Shape SharedJsonContextShape = SharedObjectRoot.AddProperty("source", PropFlags.Default)!;
 
@@ -140,7 +147,45 @@ internal sealed class Shape
             if (ReferenceEquals(c, kv)) return e - 1;
             if (kv is string ks && c is string s && s.Length == ks.Length && string.Equals(s, ks)) return e - 1;
         }
-        return index.TryGetValue(key, out int slot) ? slot : -1;
+    }
+
+    /// <summary>
+    /// Built on first use and immutable afterwards. A shape holds a small bounded number of keys (at most
+    /// <see cref="MaxShapeProperties"/>, or the size limit of <see cref="JsObject.CompactToShape"/>), so a sampled
+    /// string hash can't degrade far, and a miss, the usual outcome on a prototype, costs one or two probes.
+    /// </summary>
+    private byte[] BuildIndex()
+    {
+        int size = 16;
+        while (size < Count * 2) size *= 2;
+        var index = new byte[size];
+        int mask = size - 1;
+        for (int i = 0; i < Count; i++)
+        {
+            int h = PropertyKey.CheapHash(Keys[i].Value) & mask;
+            while (index[h] != 0) h = (h + 1) & mask;
+            index[h] = (byte)(i + 1);
+        }
+        Volatile.Write(ref _index, index);
+        return index;
+    }
+
+    /// <summary>
+    /// The layout of a fresh arguments object with <paramref name="argc"/> arguments (indices, length, @@iterator, callee),
+    /// or null when that many arguments are built property by property.
+    /// </summary>
+    public static Shape? ArgumentsLayout(int argc, bool mapped)
+    {
+        if (argc > MaxArgumentsLayout) return null;
+        int i = argc * 2 + (mapped ? 1 : 0);
+        var shape = Volatile.Read(ref s_argumentsLayouts[i]);
+        if (shape != null) return shape;
+        shape = SharedArgumentsRoot;
+        for (int n = 0; n < argc; n++) shape = shape.AddProperty(PropertyKey.FromIndex((uint)n), PropFlags.Default)!;
+        shape = shape.AddProperty("length", PropFlags.Hidden)!.AddProperty(JsSymbol.Iterator, PropFlags.Hidden)!;
+        shape = shape.AddProperty("callee", mapped ? PropFlags.Hidden : PropFlags.Accessor)!;
+        Volatile.Write(ref s_argumentsLayouts[i], shape);
+        return shape;
     }
 
     /// <summary>Returns the shape obtained by appending a property, or null when the object should go to dictionary mode.</summary>

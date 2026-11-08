@@ -135,6 +135,9 @@ internal sealed partial class Realm
     public JsBuiltin? MapProtoEntries, MapIteratorNext, SetProtoValues, SetIteratorNext;
     public JsBuiltin? StringProtoIterator, StringIteratorNext;
     private JsBuiltin? _throwTypeErrorFunction;
+    /// <summary>The callee accessor of every unmapped arguments object (non-configurable, so no one can replace its functions).</summary>
+    internal Accessor ThrowTypeErrorAccessor => _throwTypeErrorAccessor ??= new Accessor(ThrowTypeErrorFunction, ThrowTypeErrorFunction);
+    private Accessor? _throwTypeErrorAccessor;
     public JsBuiltin ThrowTypeErrorFunction { get => _throwTypeErrorFunction ?? Ensure(IntrinsicGroup.Function)._throwTypeErrorFunction!; set => _throwTypeErrorFunction = value; }
     private JsBuiltin? _evalFunction;
     public JsBuiltin EvalFunction { get => _evalFunction ?? Ensure(IntrinsicGroup.Globals)._evalFunction!; set => _evalFunction = value; }
