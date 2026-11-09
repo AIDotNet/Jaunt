@@ -86,6 +86,8 @@ public sealed partial class JsEngine : IDisposable
 
     internal RootState BeginRoot(JsExecutionOptions? execOptions, CancellationToken token, JsExecutionMode mode)
     {
+        // before the state turns "executing": from then on a request belongs to this execution and must not be cleared
+        Vm.ClearStaleInterrupt(ref _state, StateExecuting);
         int prev = Interlocked.CompareExchange(ref _state, StateExecuting, StateReady);
         if (prev == StateReady)
         {

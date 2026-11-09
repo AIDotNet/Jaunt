@@ -45,6 +45,11 @@ The exact surface is in [docs/FEATURES.md](docs/FEATURES.md), including what is 
 - Every release passes unit tests, test262 and a NativeAOT gate that runs newly written JavaScript in published binaries,
   on Linux x64, Windows x64 and macOS ARM64.
 
+### Fixed before release
+
+- `JsEngine.Interrupt()` could be lost when it arrived just as an execution began, leaving the script running until another
+  limit stopped it. CI exposed this as an intermittent test failure.
+
 ### Compatibility notes
 
 - The `net11.0` assets are built with the .NET 11 RC SDK (`11.0.100-rc.2`), and .NET 11 was verified on that RC. They will
