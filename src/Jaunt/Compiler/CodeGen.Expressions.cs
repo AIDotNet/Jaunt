@@ -2129,7 +2129,7 @@ internal sealed partial class CodeGen
             }
             ResetTo(m);
         }
-        _fb.Emit(Op.RetUndef);
+        _fb.Emit(isStatic ? Op.RetUndef : Op.RetFieldInit);
         var result = EndFunction(t);
         (_fb, _func, _scope, _control, _envDepth, _completionReg, _optionalExit, _template, _tryCatchDepth) = saved;
         return result;

@@ -21,6 +21,8 @@ internal enum FrameFlags : byte
     Entry = 16,
     /// <summary>Entry coroutine frame whose driver takes an uncaught throw as a return value with <see cref="SuspendKind.Thrown"/>, instead of a CLR exception.</summary>
     ThrowAsResult = 32,
+    /// <summary>A class's field initializer run in the loop, on top of the constructor frame it runs for: its <see cref="Op.RetFieldInit"/> resumes that frame and stores nothing.</summary>
+    NoResult = 64,
 }
 
 internal enum SuspendKind : byte { None, Yield, YieldRaw, Await, Initial, Thrown }
@@ -45,7 +47,18 @@ internal sealed class Frame
     public Env? Env;
     public int EnvDepth;
     public JsValue This;
+    /// <summary>Of a frame with <see cref="FrameFlags.Construct"/>; left over from an earlier call in any other. To read new.target whatever the frame, see <see cref="NewTargetValue"/>.</summary>
     public JsValue NewTarget;
+    /// <summary>The value of new.target in this frame: the one it was constructed with, an arrow's (or eval's) inherited one, or undefined.</summary>
+    public JsValue NewTargetValue
+    {
+        get
+        {
+            if ((Flags & FrameFlags.Construct) != 0) return NewTarget;
+            var c = Callee;
+            return c != null && (c.Template.Flags & FunctionFlags.Arrow) != 0 ? c.BoundNewTarget : default;
+        }
+    }
     /// <summary>Shared this-binding of a derived constructor once it created arrow functions (or of such an arrow).</summary>
     public ThisBox? ThisBox;
     public JsClosure Callee = null!;
@@ -614,6 +627,21 @@ internal sealed partial class Vm
     }
 
     /// <summary>
+    /// The frame that runs a class's field initializer in the interpreter loop rather than through a nested one, above
+    /// the frame <paramref name="regs"/> belongs to. That frame is a constructor about to start, at pc 0, whose handlers
+    /// so cannot catch a throw from the initializer (see <see cref="UnwindToHandler"/>), or the one that just called super().
+    /// </summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private Frame PushFieldInitFrame(JsClosure init, JsValue[] regs, JsValue thisValue)
+    {
+        if (Depth + 1 > MaxDepth) StackOverflowFrame();
+        var f = RentFrame();
+        BindCallWindow(f, init.Template, regs, _top, 0);
+        SetupFrame(f, init, thisValue, default, FrameFlags.NoResult);
+        return f;
+    }
+
+    /// <summary>
     /// Gives <paramref name="f"/> its register window for a call made by the interpreter (see <see cref="PushCallFrame"/>):
     /// overlapping the caller's argument registers when possible, otherwise a fresh window the arguments are copied to.
     /// Initializes the registers above the arguments and the arguments array.
@@ -676,7 +704,7 @@ internal sealed partial class Vm
         // Reference stores into the (heap-allocated, pooled) frame each cost a GC write barrier, so a field is stored
         // only when its value changes. A pooled frame keeps its callee, environment and this between calls (recursion
         // and callbacks in loops re-enter the same closure at the same depth); ReleasePooledFrames drops them when the
-        // root execution ends. PopFrame clears Args and NewTarget, and a freshly allocated frame is clear. The frame's
+        // root execution ends; new.target likewise, as `new` in a loop passes the same one, and only a construct frame reads it. PopFrame clears Args. The frame's
         // place in the stack is its depth (see _frames): no caller link and no "current frame" field are written.
         var t = c.Template;
         if (!ReferenceEquals(f.Callee, c))
@@ -692,7 +720,8 @@ internal sealed partial class Vm
         if (!ReferenceEquals(f.Env, env)) f.Env = env;
         f.EnvDepth = 0;
         f.Suspend = SuspendKind.None;
-        if (c.HasRareParts || f.ThisBox != null) BindRareParts(f, c, t);
+        if ((flags & FrameFlags.Construct) != 0 && !ReferenceEquals(f.NewTarget.Ref, newTarget.Ref)) f.NewTarget = newTarget;
+        if (c.HasRareParts || f.ThisBox != null) BindRareParts(f, c);
         var realm = Realm;
         var calleeRealm = c.Realm;
         if (!ReferenceEquals(realm, calleeRealm))
@@ -708,7 +737,6 @@ internal sealed partial class Vm
         }
         else
         {
-            if (newTarget.Ref != null) f.NewTarget = newTarget;
             if ((t.Flags & FunctionFlags.Strict) == 0 && thisValue.IsNotObject)
             {
                 if (thisValue.IsNullOrUndefined) thisValue = JsValue.FromObject(calleeRealm.GlobalObject);
@@ -739,7 +767,7 @@ internal sealed partial class Vm
         if (!ReferenceEquals(f.Env, env)) f.Env = env;
         f.EnvDepth = 0;
         f.Suspend = SuspendKind.None;
-        if (c.HasRareParts || f.ThisBox != null) BindRareParts(f, c, t);
+        if (c.HasRareParts || f.ThisBox != null) BindRareParts(f, c);
         var realm = Realm;
         var calleeRealm = c.Realm;
         var flags = FrameFlags.None;
@@ -780,15 +808,7 @@ internal sealed partial class Vm
 
     /// <summary>The per-call state of the closures that have rare parts, and clearing what a pooled frame kept from an earlier call. Out of line: frame setup is inlined into the interpreter loop.</summary>
     [MethodImpl(MethodImplOptions.NoInlining)]
-    private static void BindRareParts(Frame f, JsClosure c, FunctionTemplate t)
-    {
-        f.ThisBox = c.ThisBox;
-        if ((t.Flags & FunctionFlags.Arrow) != 0)
-        {
-            var nt = c.BoundNewTarget;
-            if (nt.Ref != null) f.NewTarget = nt;
-        }
-    }
+    private static void BindRareParts(Frame f, JsClosure c) => f.ThisBox = c.ThisBox;
 
     /// <summary>OrdinaryCallBindThis for a sloppy function and a primitive, null or undefined receiver.</summary>
     [MethodImpl(MethodImplOptions.NoInlining)]
@@ -816,7 +836,6 @@ internal sealed partial class Vm
             _top = f.SavedTop;
             if (_poisonRegisters) PoisonReleasedWindow(f);
             f.Args = null;
-            f.NewTarget = default;
         }
         else RemoveHeapFrame(f);
         Sp--;
@@ -856,6 +875,7 @@ internal sealed partial class Vm
             f.Env = null;
             f.ThisBox = null;
             f.Args = null;
+            f.NewTarget = default;
             f.CallerRealm = null!;
             f.This = default;
         }
@@ -1053,13 +1073,19 @@ internal sealed partial class Vm
             if (f.This.IsEmpty) { error = JsValue.FromObject(JsError.Create(CallerRealmOf(f), ErrorKind.ReferenceError, "Must call super constructor in derived class before accessing 'this' or returning from derived constructor")); return false; }
         }
         value = f.This;
-        // instances of this constructor will be about this big: spares them the growth from no slots, or empty slots
-        if (f.NewTarget.Ref is JsClosure nt && value.Ref is JsObject o)
-        {
-            int n = o.Shape.Count;
-            if (n > nt.Feedback.InstanceSlots && n <= MaxInstanceSlots) nt.Feedback.InstanceSlots = n;
-        }
+        if (value.IsObject) LearnInstanceSlots(f, value);
         return true;
+    }
+
+    /// <summary>The next instance of this constructor will be about this big: spares it the growth from no slots, or empty slots.</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void LearnInstanceSlots(Frame f, in JsValue instance)
+    {
+        if (f.NewTarget.Ref is JsClosure nt)
+        {
+            int n = Unsafe.As<JsObject>(instance.Ref!).Shape.Count;
+            nt.Feedback.InstanceSlots = n < MaxInstanceSlots ? n : MaxInstanceSlots;
+        }
     }
 
     internal const int MaxInstanceSlots = 32;
@@ -1068,7 +1094,13 @@ internal sealed partial class Vm
     private JsObject NewInstance(JsObject newTarget, JsObject proto)
     {
         var realm = Realm;
-        return newTarget is JsClosure c ? new JsObject(realm, realm.RootShapeFor(proto), c.Feedback.InstanceSlots) : new JsObject(realm, proto);
+        if (newTarget is not JsClosure c) return new JsObject(realm, proto);
+        // Taken, not just read: each instance's unused room is paid for by a finished instance that had the properties, which were
+        // charged to the budget. Otherwise one large instance would leave every later one, say empty ones, with room nothing charged for.
+        var fb = c.Feedback;
+        int slots = fb.InstanceSlots;
+        fb.InstanceSlots = 0;
+        return new JsObject(realm, realm.RootShapeFor(proto), slots);
     }
 
     // ------------------------------------------------------------------ closures
@@ -1081,15 +1113,17 @@ internal sealed partial class Vm
         var c = new JsClosure(realm, t, env, fb, fproto);
         if (creator != null)
         {
-            c.Module = creator.Callee?.Module;
+            // only what is set is stored: each reference store costs a GC write barrier, and a closure is mostly nulls
+            var creatorFn = creator.Callee;
+            if (creatorFn?.Module is { } module) c.Module = module;
             if (t.IsArrow)
             {
                 // arrows in a derived constructor share its this-binding (super() may run later, even in the arrow)
                 if (creator.ThisBox != null || (creator.Callee != null && creator.Callee.IsDerived && (creator.Flags & FrameFlags.Construct) != 0))
-                    c.ThisBox = creator.ThisBox ??= new ThisBox { Value = creator.This, Ctor = creator.Callee!, NewTarget = creator.NewTarget };
-                c.BoundThis = creator.This;
-                c.BoundNewTarget = creator.NewTarget;
-                c.HomeObject = creator.Callee?.HomeObject;
+                    c.ThisBox = creator.ThisBox ??= new ThisBox { Value = creator.This, Ctor = creator.Callee!, NewTarget = creator.NewTargetValue };
+                JsValue.Store(ref c.BoundThis, creator.This);
+                c.BoundNewTarget = creator.NewTargetValue;
+                if (creatorFn?.HomeObject is { } home) c.HomeObject = home;
             }
         }
         if (t.IsGenerator)

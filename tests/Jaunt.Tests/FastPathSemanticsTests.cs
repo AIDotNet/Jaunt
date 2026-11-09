@@ -2667,6 +2667,219 @@ sw s
         using var engine = new JsEngine();
         var got = engine.Evaluate(ToInt32AndTypeofNamesScript).AsString().Split('\n');
         var expected = ToInt32AndTypeofNamesExpected.ReplaceLineEndings("\n").Split('\n');
+    // Field initializers run in the interpreter loop, instance slots sized from the last instance, new.target only in construct
+    // frames, per-iteration environments, closures sharing "length" and "name". The expected values were produced by Node from the same script.
+    private const string ConstructionScript = """
+const L = [];
+const T = (name, fn) => { let r; try { r = fn(); } catch (e) { r = 'threw ' + (e && e.constructor ? e.constructor.name : typeof e); } L.push(name + ' = ' + JSON.stringify(r)); };
+const keys = o => Reflect.ownKeys(o).map(String);
+
+// ---- field initializers: order, this, new.target, arguments
+T('fieldOrder', () => { const log = []; class C { a = log.push('a'); b = (log.push('b'), this.a + 1); constructor(x = (log.push('param'), this.b)) { log.push('body', x); } } const c = new C(); return [log, c.a, c.b, keys(c)]; });
+T('fieldNewTarget', () => { class C { t = new.target; nt = new.target; constructor() { this.u = new.target === C; } } const c = new C(); return [c.t === undefined, c.u]; });
+T('argsSurviveFields', () => { class C { a = [1, 2, 3].map(x => x * 2); b = new Array(5).fill(9); constructor(p, q, r) { this.args = [p, q, r, arguments.length]; } } return new C(7, 8, 9).args; });
+T('manyArgsAndFields', () => { const g = (...a) => a.length; class C { x = g(1, 2, 3, 4, 5, 6, 7, 8); constructor(a, b, c, d, e, f) { this.s = a + b + c + d + e + f; } } return [new C(1, 2, 3, 4, 5, 6).s, new C(1, 2, 3, 4, 5, 6, 7).x]; });
+T('methodsAndArrowInField', () => { class C { v = 5; get = () => this.v; m() { return this.v * 2; } w = this.m(); } const c = new C(); c.v = 6; return [c.get(), c.w]; });
+T('evalInField', () => { class C { a = 1; b = eval('this.a + 1'); c = (0, eval)('typeof this'); } const c = new C(); return [c.b, c.c]; });
+T('argumentsInFieldEval', () => { class C { a = eval('arguments'); } return new C(); });
+T('computedAndPrivate', () => { let n = 0; const k = () => 'k' + ++n; class C { [k()] = 1; #p = 2; [k()] = this.#p + 1; get p() { return this.#p; } static s = 3; } const c = new C(); return [keys(c), c.k1, c.k2, c.p, C.s, new C().k2]; });
+T('fieldNoValue', () => { class C { a; b = undefined; c = null; 'quoted key' = 1; 42 = 2; } const c = new C(); return [keys(c), 'a' in c, c.a === undefined]; });
+T('nestedNewInField', () => { let d = 0; class C { kid = d++ < 3 ? new C() : null; depth = d; } const c = new C(); return [c.depth, c.kid.depth, c.kid.kid.kid.kid]; });
+T('sameClassManyTimes', () => { class C { a = 1; b = 2; c = this.a + this.b; } let s = 0; for (let i = 0; i < 100; i++) s += new C().c; return s; });
+
+// ---- a throw in an initializer must not reach the constructor's handlers
+T('throwBase', () => { const log = []; class C { a = (() => { throw new RangeError('boom'); })(); constructor() { try { log.push('body'); throw 1; } catch (e) { log.push('caught ' + e); } } } try { new C(); } catch (e) { log.push(e.message); } return log; });
+T('throwBaseFirstInstruction', () => { const log = []; class C { a = null.x; constructor() { try { log.push('body'); } finally { log.push('fin'); } } } try { new C(); } catch (e) { log.push(e.constructor.name); } return log; });
+T('throwBuiltinInField', () => { const log = []; class C { a = JSON.parse('{'); constructor() { try { log.push('body'); } catch (e) { log.push('caught'); } } } try { new C(); } catch (e) { log.push(e.constructor.name); } return log; });
+T('throwDerivedInSuperTry', () => { const log = []; class A {} class B extends A { a = (() => { throw new TypeError('fi'); })(); constructor() { try { super(); log.push('no'); } catch (e) { log.push('caught ' + e.message, this === undefined ? 'u' : 'bound'); } } } new B(); return log; });
+T('throwDerivedOutside', () => { const log = []; class A {} class B extends A { a = (() => { throw new TypeError('fi'); })(); constructor() { super(); log.push('no'); } } try { new B(); } catch (e) { log.push(e.message); } return log; });
+T('newAfterThrowInField', () => { let bad = true; class C { a = (() => { if (bad) throw 1; return 2; })(); constructor(x) { this.x = x; } } const r = []; for (let i = 0; i < 4; i++) { bad = i % 2 === 0; try { const c = new C(i); r.push([c.a, c.x]); } catch (e) { r.push(e); } } return r; });
+T('finallyAroundNew', () => { const log = []; class C { a = (() => { throw 'x'; })(); } function f() { try { return new C(); } catch (e) { log.push('c' + e); return 'r'; } finally { log.push('f'); } } return [f(), log]; });
+
+// ---- derived
+T('derivedFieldsOrder', () => { const log = []; class A { a = log.push('A.a'); constructor() { log.push('A.body', keys(this).join()); } } class B extends A { b = log.push('B.b'); constructor() { log.push('B.pre'); super(); log.push('B.post', keys(this).join()); } } class D extends B { d = log.push('D.d'); } new D(); return log; });
+T('superTwice', () => { let n = 0; class A { constructor() { n++; } } class B extends A { f = 1; constructor() { super(); try { super(); } catch (e) { this.e = e.constructor.name; } } } const b = new B(); return [n, b.e, b.f]; });
+T('thisBeforeSuper', () => { class A {} class B extends A { constructor() { this.x = 1; super(); } } return new B(); });
+T('noSuper', () => { class A {} class B extends A { constructor() { } } return new B(); });
+T('returnPrimitiveDerived', () => { class A {} class B extends A { constructor() { super(); return 1; } } return new B(); });
+T('returnUndefinedDerived', () => { class A {} class B extends A { f = 1; constructor() { super(); return undefined; } } return new B().f; });
+T('returnObjectDerived', () => { class A {} class B extends A { f = 1; constructor() { super(); return { z: 1 }; } } return keys(new B()); });
+T('returnPrimitiveBase', () => { class A { constructor() { this.p = 1; return 5; } } function F() { this.q = 2; return 'x'; } function G() { this.r = 3; return { s: 4 }; } return [new A().p, new F().q, new G().s, new G().r]; });
+T('superInArrow', () => { class A { constructor() { this.a = 1; } } class B extends A { f = this.a + 1; constructor() { const s = () => super(); s(); this.g = this.f + 1; } } const b = new B(); return [b.a, b.f, b.g]; });
+T('superInEval', () => { class A { constructor() { this.a = 1; } } class B extends A { f = this.a + 1; constructor() { eval('super()'); } } return new B().f; });
+T('superArrowThrowingField', () => { class A {} class B extends A { f = (() => { throw 'no'; })(); constructor() { const s = () => { try { super(); } catch (e) { return 'c' + e; } }; this_ = s(); } } var this_; try { new B(); } catch (e) { return [this_, e.constructor.name]; } });
+T('superParentChanges', () => { class A { constructor() { this.who = 'A'; } } class Z { constructor() { this.who = 'Z'; } } class B extends A { f = this.who + '!'; } const r = [new B().f]; Object.setPrototypeOf(B, Z); r.push(new B().f, new B() instanceof A); Object.setPrototypeOf(B, A); r.push(new B().f); return r; });
+T('superParentNull', () => { class A {} class B extends A {} Object.setPrototypeOf(B, null); return new B(); });
+T('superParentFunctionProto', () => { class A {} class B extends A { x = 1; } Object.setPrototypeOf(B, Function.prototype); return new B(); });
+T('superParentArrow', () => { class A {} class B extends A {} Object.setPrototypeOf(B, () => {}); return new B(); });
+T('superParentProxyBound', () => { const log = []; function P() { this.p = new.target === B; } class B extends P { f = this.p; } const r = [new B().f]; Object.setPrototypeOf(B, new Proxy(P, { construct(t, a, nt) { log.push('trap'); return Reflect.construct(t, a, nt); } })); r.push(new B().f, log.length); Object.setPrototypeOf(B, P.bind(null)); r.push(new B().f); return r; });
+T('extendsBuiltin', () => { class E extends Error { code = 7; constructor(m) { super(m); this.z = this.code + 1; } } class M extends Map { n = this.size; } class AA extends Array { t = this.length; } const e = new E('hi'); return [e.message, e.code, e.z, e instanceof Error, new M([[1, 2]]).n, new AA(3).t, keys(new AA(1))]; });
+T('extendsFunctionCtor', () => { function F(a) { this.a = a; } class C extends F { b = this.a + 1; constructor(a) { super(a); } } class D extends C {} const d = new D(4); return [d.a, d.b, keys(d), d instanceof F]; });
+
+// ---- fields are definitions on whatever super() returned
+T('fieldNotSetter', () => { const log = []; class A { set x(v) { log.push('set'); } get x() { return 'g'; } } class B extends A { x = 1; } const b = new B(); return [b.x, log, keys(b)]; });
+T('fieldOnFrozenReturn', () => { class A { constructor() { return Object.freeze({}); } } class B extends A { x = 1; } return new B(); });
+T('fieldOnNonExtensibleAfterIcFilled', () => { class A { constructor(o) { return o; } } class B extends A { x = 1; } const r = []; r.push(new B({}).x); r.push(new B({}).x); try { new B(Object.preventExtensions({})); r.push('no'); } catch (e) { r.push(e.constructor.name); } return r; });
+T('fieldOverExistingAfterIcFilled', () => { class A { constructor(o) { return o; } } class B extends A { x = 1; y = 2; } const r = []; new B({}); new B({}); const o = { y: 0, x: 9 }; new B(o); r.push(keys(o), o.x, o.y); const g = {}; Object.defineProperty(g, 'x', { get() { return 'getter'; }, configurable: true }); new B(g); r.push(Object.getOwnPropertyDescriptor(g, 'x').value); const n = {}; Object.defineProperty(n, 'x', { value: 1, configurable: false }); try { new B(n); r.push('no'); } catch (e) { r.push(e.constructor.name); } return r; });
+T('fieldOnProxyReturn', () => { const log = []; class A { constructor(o) { return o; } } class B extends A { x = 1; } new B({}); const p = new Proxy({}, { defineProperty(t, k, d) { log.push(k, d.value, d.writable, d.enumerable, d.configurable); return Reflect.defineProperty(t, k, d); } }); new B(p); return log; });
+T('fieldOnArrayFunctionReturn', () => { class A { constructor(o) { return o; } } class B extends A { x = 1; length = 0; } new B({}); const a = [1, 2, 3]; new B(a); const f = function () {}; new B(f); return [a.length, a.x, f.x, f.length]; });
+T('fieldOnPrototypeObject', () => { class A { constructor(o) { return o; } } class B extends A { x = 1; } const read = c => c.x; const p = {}; const child = Object.create(p); new B({}); new B({}); const r = [read(child), read(child)]; new B(p); r.push(read(child)); return r; });
+T('fieldOnPrototypeObject2', () => { class A { constructor(o) { return o; } } class B extends A { x = 1; } const read = c => c.x; const q = { x: 'q' }; const p = Object.create(q); const child = Object.create(p); new B(Object.create(q)); new B(Object.create(q)); const r = [read(child), read(child)]; new B(p); r.push(read(child)); return r; });
+
+// ---- new and the prototype property
+T('protoChanges', () => { function F() { this.v = 1; } const r = []; const p1 = F.prototype; p1.m = 1; r.push(new F().m); F.prototype = { m: 2 }; r.push(new F().m); F.prototype = p1; r.push(new F().m); F.prototype = 5; const o = new F(); r.push(Object.getPrototypeOf(o) === Object.prototype, o.v); F.prototype = null; r.push(Object.getPrototypeOf(new F()) === Object.prototype); F.prototype = Object.prototype; r.push(Object.getPrototypeOf(new F()) === Object.prototype); F.prototype = Array.prototype; r.push(new F() instanceof Array, Array.isArray(new F())); F.prototype = Function.prototype; r.push(typeof new F(), Object.getPrototypeOf(new F()) === Function.prototype); F.prototype = p1; r.push(new F().m); return r; });
+T('protoShared', () => { function F() { this.a = 1; } function G() { this.b = 1; this.c = 2; } G.prototype = F.prototype; F.prototype.q = 1; const f = new F(), g = new G(); return [keys(f), keys(g), f.q, g.q, Object.getPrototypeOf(f) === Object.getPrototypeOf(g)]; });
+T('protoAfterProtoChange', () => { function F() {} const b1 = { w: 1 }, b2 = { w: 2 }; Object.setPrototypeOf(F.prototype, b1); const a = new F(); Object.setPrototypeOf(F.prototype, b2); const c = new F(); return [a.w, c.w]; });
+T('protoFrozenCtor', () => { function F() {} const p = F.prototype; Object.freeze(F); return [Object.getPrototypeOf(new F()) === p]; });
+T('protoNonWritableDefine', () => { function F() {} const p = { z: 1 }; Object.defineProperty(F, 'prototype', { value: p, writable: false }); return new F().z; });
+T('classProtoDescriptor', () => { class C {} const d = Object.getOwnPropertyDescriptor(C, 'prototype'); return [d.writable, d.enumerable, d.configurable, keys(C), C.prototype.constructor === C]; });
+T('reflectConstruct', () => { class A { a = new.target; f = 1; constructor() { this.nt = new.target; } } function N() {} N.prototype = { fromN: 1 }; const x = Reflect.construct(A, [], N); const log = []; const pn = new Proxy(N, { get(t, k, r) { log.push(String(k)); return Reflect.get(t, k, r); } }); const y = Reflect.construct(A, [], pn); const bound = N.bind(null); const z = Reflect.construct(A, [], bound); return [x.fromN, x.nt === N, x.a === undefined, y.fromN, log, Object.getPrototypeOf(z) === Object.prototype || Object.getPrototypeOf(z) === A.prototype, z.fromN]; });
+T('newTargetSameFeedback', () => { const mk = () => function () { this.a = 1; }; const F = mk(), G = mk(); F.prototype.w = 'F'; G.prototype.w = 'G'; const r = []; for (let i = 0; i < 4; i++) r.push(new (i % 2 ? F : G)().w); return r; });
+T('classFactorySameFeedback', () => { const mk = t => class { f = t; }; const A = mk('a'), B = mk('b'); const r = []; for (let i = 0; i < 4; i++) { const o = new (i % 2 ? A : B)(); r.push(o.f, o instanceof A); } return r; });
+T('notConstructors', () => { const r = []; for (const f of [() => {}, async function () {}, function* () {}, ({ m() {} }).m, Math.max]) { try { new f(); r.push('no'); } catch (e) { r.push(e.constructor.name); } } class C {} try { C(); } catch (e) { r.push(e.constructor.name); } return r; });
+T('generatorFunctionPrototype', () => { function* g() {} return [typeof g.prototype, Object.getPrototypeOf(g.prototype) === Object.getPrototypeOf(function* () {}).prototype, 'constructor' in Object.getOwnPropertyDescriptors(g.prototype)]; });
+
+// ---- slots sized from what earlier instances had: order, size changes
+T('slotHintOrder', () => { function F(n) { if (n & 1) this.a = 1; if (n & 2) this.b = 2; this.c = 3; if (n & 4) this.d = 4; for (let i = 0; i < (n >> 3); i++) this['k' + i] = i; } const r = []; for (const n of [7, 0, 1, 2, 4, 8 + 7, 40 * 8, 0, 3]) { const o = new F(n); r.push(keys(o).length > 8 ? keys(o).length + ':' + keys(o).slice(-1) : keys(o).join('')); } return r; });
+T('slotHintDeleteAdd', () => { function F() { this.a = 1; this.b = 2; delete this.a; this.a = 3; this.c = 4; } new F(); new F(); const o = new F(); return [keys(o), o.a]; });
+T('slotHintEmptyInstanceHasNothing', () => { function F(big) { if (big) for (let i = 0; i < 20; i++) this['p' + i] = i; } new F(true); const o = new F(false); const r = [keys(o), JSON.stringify(o), 'p0' in o, o.p0]; const u = []; for (const k in o) u.push(k); r.push(u); o.z = 1; r.push(keys(o)); return r; });
+T('slotHintManyProps', () => { function F() { for (let i = 0; i < 100; i++) this['p' + i] = i; } new F(); const o = new F(); return [keys(o).length, o.p99, keys(o)[50]]; });
+T('slotHintThrowingCtor', () => { const leak = []; function F(n) { for (let i = 0; i < n; i++) this['p' + i] = i; if (!n) { leak.push(this); throw 'x'; } } new F(20); for (let i = 0; i < 3; i++) { try { new F(0); } catch (e) {} } return [leak.length, keys(leak[0]), keys(leak[2])]; });
+T('slotHintRecursiveCtor', () => { function N(d) { this.l = d ? new N(d - 1) : null; this.r = d ? new N(d - 1) : null; this.d = d; } const c = o => o ? 1 + c(o.l) + c(o.r) : 0; const t = new N(5); return [c(t), keys(t), keys(t.l.l)]; });
+T('freezeSealInCtor', () => { function F() { this.a = 1; Object.freeze(this); } const o = new F(); 'use strict'; o.a = 2; return [o.a, Object.isFrozen(o)]; });
+T('accessorInCtor', () => { function F() { Object.defineProperty(this, 'g', { get() { return 7; }, enumerable: true }); this.x = 1; } return [new F().g, keys(new F())]; });
+
+// ---- environments copied per iteration
+T('perIter', () => { const fs = []; for (let i = 0; i < 3; i++) fs.push(() => i); return fs.map(f => f()); });
+T('perIterMutated', () => { const fs = []; for (let i = 0; i < 6; i++) { fs.push(() => i); i++; } return fs.map(f => f()); });
+T('perIterInUpdate', () => { const fs = []; for (let i = 0, g = () => i; i < 3; i++, fs.push(g)) { } return fs.map(f => f()); });
+T('perIterTwoAndObject', () => { const fs = []; for (let i = 0, o = { v: 1 }, s = 'x'; i < 3; i++, s += 'y') { fs.push(() => [i, o, s]); o.v++; } const r = fs.map(f => f()); return [r[0][2], r[2][2], r[0][0], r[2][0], r[0][1] === r[2][1], r[0][1].v]; });
+T('perIterEval', () => { const fs = []; for (let i = 0; i < 3; i++) fs.push(() => eval('i')); return fs.map(f => f()); });
+T('perIterEvalVar', () => { const fs = []; for (let i = 0; i < 3; i++) { eval('var ev' + i + ' = i * 2'); fs.push(() => i); } return [ev0, ev1, ev2, fs[2]()]; });
+T('perIterTdz', () => { const fs = []; for (let i = 0, j = (fs.push(() => { try { return k; } catch (e) { return e.constructor.name; } }), 1), k = 2; i < 2; i++) { } return fs[0](); });
+T('perIterWith', () => { const o = { w: 'o' }; const fs = []; with (o) { for (let i = 0; i < 2; i++) fs.push(() => w + i); } o.w = 'p'; return fs.map(f => f()); });
+
+// ---- closures
+T('closureProps', () => { const mk = () => () => 1; const a = mk(), b = mk(); a.x = 1; return [a.x, b.x, a.name, a.length, keys(a), keys(b), a === b]; });
+T('closureNameDefine', () => { const mk = () => (p, q) => 1; const a = mk(), b = mk(); Object.defineProperty(a, 'name', { value: 'renamed' }); Object.defineProperty(a, 'length', { value: 9 }); return [a.name, a.length, b.name, b.length, mk().name, mk().length]; });
+T('closureNameWritable', () => { const mk = () => function nm(p) {}; const a = mk(), b = mk(); Object.defineProperty(a, 'name', { writable: true }); a.name = 'w'; const c = mk(); return [a.name, b.name, c.name, Object.getOwnPropertyDescriptor(a, 'name').writable, Object.getOwnPropertyDescriptor(c, 'name').writable]; });
+T('closureDeleteName', () => { const mk = () => ({ m() {} }).m; const a = mk(), b = mk(); delete a.name; delete a.length; return [a.name, a.length, keys(a), b.name, b.length, keys(b), keys(mk())]; });
+T('closureAssignReadonly', () => { const mk = () => () => 1; const a = mk(); a.name = 'x'; a.length = 7; const r = [a.name, a.length]; const s = () => { 'use strict'; a.name = 'y'; }; try { s(); r.push('no'); } catch (e) { r.push(e.constructor.name); } r.push(mk().name); return r; });
+T('closureFreezeAndAddMany', () => { const mk = () => () => 1; const a = mk(), b = mk(); for (let i = 0; i < 10; i++) b['p' + i] = i; Object.freeze(a); return [Object.isFrozen(a), Object.isFrozen(mk()), keys(b).length, keys(mk()).length, b.name, b.p9]; });
+T('closureAccessorOnName', () => { const mk = () => () => 1; const a = mk(); Object.defineProperty(a, 'name', { get() { return 'acc'; } }); return [a.name, mk().name, typeof Object.getOwnPropertyDescriptor(a, 'name').get, Object.getOwnPropertyDescriptor(mk(), 'name').value]; });
+T('anonymousNamedByKey', () => { const k = 'dyn', sym = Symbol('s'); const mk = () => ({ [k]: () => 1, [sym]: function () {}, a: () => 2, get [k + 2]() { return 1; } }); const o = mk(), p = mk(); return [o[k].name, o[sym].name, o.a.name, p[k].name, Object.getOwnPropertyDescriptor(o, 'dyn2').get.name]; });
+T('anonymousClassFieldName', () => { const k = 'key'; class C { [k] = () => 1; a = () => 2; b = function () {}; c = class {}; #d = () => 3; d() { return this.#d.name; } static e = () => 1; } const o = new C(), q = new C(); return [o.a.name, o.b.name, o.c.name, o.d(), C.e.name, q.a.name]; });
+T('assignNamed', () => { let f; const fs = []; for (let i = 0; i < 2; i++) { f = () => i; fs.push(f.name); } return fs; });
+T('functionPrototypeLazy', () => { const mk = () => function (a, b) {}; const a = mk(), b = mk(); const d0 = Object.getOwnPropertyDescriptor(a, 'prototype'); const r = [keys(a), keys(mk()), d0.writable, d0.enumerable, d0.configurable, typeof d0.value, a.prototype.constructor === a, a.prototype === a.prototype, a.prototype !== b.prototype, keys(a.prototype), Object.getOwnPropertyDescriptor(a.prototype, 'constructor').enumerable]; b.prototype = 3; r.push(b.prototype, Object.getOwnPropertyDescriptor(b, 'prototype').writable); return r; });
+T('thisAndHome', () => { const o = { v: 1, m() { return [1, 2].map(x => this.v + x); }, n() { return (() => super.toString === Object.prototype.toString)(); } }; function F() { this.g = () => new.target === F; } class P { w() { return 'P'; } } class Q extends P { w() { return (() => super.w() + 'Q')(); } } return [o.m(), o.n(), new F().g(), new Q().w()]; });
+T('arrowInCtorThisBox', () => { class A {} class B extends A { constructor() { const g = () => this; let e; try { g(); } catch (x) { e = x.constructor.name; } super(); this.same = g() === this; this.e = e; } } const b = new B(); return [b.same, b.e]; });
+T('legacyCaller', () => { function who() { return who.caller === null ? 'null' : typeof who.caller; } class C { w = who(); } function F() { this.w = who(); } function H() { return new C().w; } return [H(), new F().w]; });
+
+// ---- inside generators and async
+T('newInGenerator', () => { class C { a = 1; b = [...[1, 2]].length; } class D extends C { c = this.a + 1; } function* g() { const x = new C(); yield x.b; const y = new D(); yield y.c; yield new (class { z = (function* () { yield 9; })().next().value; })().z; } return [...g()]; });
+T('fieldThrowInGenerator', () => { class C { a = (() => { throw 'g'; })(); } function* g() { try { yield new C(); } catch (e) { yield 'c' + e; } } return [...g()]; });
+T('fieldsAndCallbacks', () => { class C { a = [3, 1, 2].sort((x, y) => x - y); b = this.a.map(x => new (class { v = x * 2; })().v); } return new C().b; });
+
+L.join('\n');
+""";
+
+    private const string ConstructionExpected = """
+fieldOrder = [["a","b","param","body",2],1,2,["a","b"]]
+fieldNewTarget = [true,true]
+argsSurviveFields = [7,8,9,3]
+manyArgsAndFields = [21,8]
+methodsAndArrowInField = [6,10]
+evalInField = [2,"object"]
+argumentsInFieldEval = "threw SyntaxError"
+computedAndPrivate = [["k1","k2"],1,3,2,3,3]
+fieldNoValue = [["42","a","b","c","quoted key"],true,true]
+nestedNewInField = [4,4,null]
+sameClassManyTimes = 300
+throwBase = ["boom"]
+throwBaseFirstInstruction = ["TypeError"]
+throwBuiltinInField = ["SyntaxError"]
+throwDerivedInSuperTry = ["caught fi","bound"]
+throwDerivedOutside = ["fi"]
+newAfterThrowInField = [1,[2,1],1,[2,3]]
+finallyAroundNew = ["r",["cx","f"]]
+derivedFieldsOrder = ["B.pre","A.a","A.body","a","B.b","B.post","a,b","D.d"]
+superTwice = [2,"ReferenceError",1]
+thisBeforeSuper = "threw ReferenceError"
+noSuper = "threw ReferenceError"
+returnPrimitiveDerived = "threw TypeError"
+returnUndefinedDerived = 1
+returnObjectDerived = ["z"]
+returnPrimitiveBase = [1,2,4,null]
+superInArrow = [1,2,3]
+superInEval = 2
+superArrowThrowingField = undefined
+superParentChanges = ["A!","Z!",true,"A!"]
+superParentNull = "threw TypeError"
+superParentFunctionProto = "threw TypeError"
+superParentArrow = "threw TypeError"
+superParentProxyBound = [true,true,1,true]
+extendsBuiltin = ["hi",7,8,true,1,3,["length","t"]]
+extendsFunctionCtor = [4,5,["a","b"],true]
+fieldNotSetter = [1,[],["x"]]
+fieldOnFrozenReturn = "threw TypeError"
+fieldOnNonExtensibleAfterIcFilled = [1,1,"TypeError"]
+fieldOverExistingAfterIcFilled = [["y","x"],1,2,1,"TypeError"]
+fieldOnProxyReturn = ["x",1,true,true,true]
+fieldOnArrayFunctionReturn = "threw TypeError"
+fieldOnPrototypeObject = [null,null,1]
+fieldOnPrototypeObject2 = ["q","q",1]
+protoChanges = [1,2,1,true,1,true,true,true,false,"object",true,1]
+protoShared = [["a"],["b","c"],1,1,true]
+protoAfterProtoChange = [2,2]
+protoFrozenCtor = [true]
+protoNonWritableDefine = 1
+classProtoDescriptor = [false,false,false,["length","name","prototype"],true]
+reflectConstruct = [1,true,true,1,["prototype"],true,null]
+newTargetSameFeedback = ["G","F","G","F"]
+classFactorySameFeedback = ["b",false,"a",true,"b",false,"a",true]
+notConstructors = ["TypeError","TypeError","TypeError","TypeError","TypeError","TypeError"]
+generatorFunctionPrototype = ["object",true,true]
+slotHintOrder = ["abcd","c","ac","bc","cd","abcdk0","41:k39","c","abc"]
+slotHintDeleteAdd = [["b","a","c"],3]
+slotHintEmptyInstanceHasNothing = [[],"{}",false,null,[],["z"]]
+slotHintManyProps = [100,99,"p50"]
+slotHintThrowingCtor = [3,[],[]]
+slotHintRecursiveCtor = [63,["l","r","d"],["l","r","d"]]
+freezeSealInCtor = [1,true]
+accessorInCtor = [7,["g","x"]]
+perIter = [0,1,2]
+perIterMutated = [1,3,5]
+perIterInUpdate = [0,0,0]
+perIterTwoAndObject = ["x","xyy",0,2,true,4]
+perIterEval = [0,1,2]
+perIterEvalVar = [0,2,4,2]
+perIterTdz = 2
+perIterWith = ["p0","p1"]
+closureProps = [1,null,"",0,["length","name","x"],["length","name"],false]
+closureNameDefine = ["renamed",9,"",2,"",2]
+closureNameWritable = ["w","nm","nm",true,false]
+closureDeleteName = ["",0,[],"m",0,["length","name"],["length","name"]]
+closureAssignReadonly = ["",0,"TypeError",""]
+closureFreezeAndAddMany = [true,false,12,2,"",9]
+closureAccessorOnName = ["acc","","function",""]
+anonymousNamedByKey = ["dyn","[s]","a","dyn","get dyn2"]
+anonymousClassFieldName = ["a","b","c","#d","e","a"]
+assignNamed = ["f","f"]
+functionPrototypeLazy = [["length","name","arguments","caller","prototype"],["length","name","arguments","caller","prototype"],true,false,false,"object",true,true,true,["constructor"],false,3,true]
+thisAndHome = [[2,3],true,true,"PQ"]
+arrowInCtorThisBox = [true,"ReferenceError"]
+legacyCaller = ["null","function"]
+newInGenerator = [2,2,9]
+fieldThrowInGenerator = ["cg"]
+fieldsAndCallbacks = [2,4,6]
+""";
+
+    [Fact]
+    public void ConstructionMatchesReferenceBehavior()
+    {
+        using var engine = new JsEngine();
+        var got = engine.Evaluate(ConstructionScript).AsString().Split('\n');
+        var expected = ConstructionExpected.ReplaceLineEndings("\n").TrimEnd('\n').Split('\n');
         Assert.Equal(expected.Length, got.Length);
         for (int i = 0; i < expected.Length; i++) Assert.True(expected[i] == got[i], $"line {i}: expected {expected[i]} but got {got[i]}");
     }

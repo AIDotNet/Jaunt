@@ -730,10 +730,11 @@ internal sealed partial class Vm
     /// A class field with a constant name: <see cref="DefineLiteralProp"/> for an ordinary extensible instance. Unlike a
     /// literal's target, <c>this</c> can be anything a base constructor returned, so anything else takes CreateDataProperty.
     /// </summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
     private void DefineFieldProp(in JsValue target, in JsValue keyValue, in JsValue value, ref IcEntry ic)
     {
-        var obj = target.AsObjectUnchecked;
-        if (obj.GetType() == typeof(JsObject) && obj.Extensible) DefineLiteralProp(target, keyValue, value, ref ic);
+        var obj = Unsafe.As<JsObject>(target.Ref!);
+        if (obj.GetType() == typeof(JsObject) && obj.Extensible && !obj.IsPrototypeObject) DefineLiteralProp(target, keyValue, value, ref ic);
         else obj.CreateDataPropertyOrThrow(new PropertyKey(keyValue.AsStringUnchecked), value);
     }
 
@@ -774,6 +775,7 @@ internal sealed partial class Vm
         }
         string name = key.Value is JsSymbol sym ? (sym.Description == null ? "" : "[" + sym.Description + "]") : (string)key.Value;
         if (prefix != null) name = prefix + " " + name;
+        (fn as JsClosure)?.UnshareSlots();
         int idx = fn.FindOwn("name", out _);
         if (idx >= 0) fn.WriteSlot(idx, new JsValue(name));
         else fn.DefineOwnProperty("name", PropertyDescriptor.Data(new JsValue(name), PropFlags.Configurable));
@@ -832,8 +834,8 @@ internal sealed partial class Vm
         return pf.Construct(args, nt);
     }
 
-    /// <summary>The second half of super(...): binds this to the result of the parent and initializes the instance fields.</summary>
-    private void SuperBind(Frame f, JsValue result)
+    /// <summary>The second half of super(...): binds this to the result of the parent; returns the field initializer of the class, for the caller to run.</summary>
+    private JsClosure? SuperBind(Frame f, JsValue result)
     {
         var ctor = f.Callee;
         var box = f.ThisBox;
@@ -842,7 +844,7 @@ internal sealed partial class Vm
         if (bound) throw JsErrors.ReferenceError(Realm, "Super constructor may only be called once");
         f.This = result;
         if (box != null) box.Value = result;
-        if (ctor.FieldInit != null) ctor.FieldInit.Call(result, ReadOnlySpan<JsValue>.Empty);
+        return ctor.FieldInit;
     }
 
     private void ClassCreate(Frame f, JsValue[] regs, int bp, int ctorDst, int protoDst, int fi, int superReg, int hasHeritage)

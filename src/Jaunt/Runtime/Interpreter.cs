@@ -939,6 +939,25 @@ internal sealed partial class Vm
                         case Op.InitialYield:
                             return InitialYieldOp(f, PcAt(ref code0, ref ip));
 
+                        // classes with fields: out of the way of the hotter cases above
+                        case Op.SuperBind:
+                        {
+                            f.Pc = PcAt(ref code0, ref ip) + 2;
+                            var nf = SuperBindOp(f, Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)));
+                            if (nf != null) { f = nf; goto Reload; }
+                            ip = ref Unsafe.Add(ref ip, 2);
+                            continue;
+                        }
+                        case Op.DefineFieldK:
+                            f.Pc = PcAt(ref code0, ref ip) + 1;
+                            DefineFieldProp(Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)), f.K[Unsafe.Add(ref ip, 2)], Unsafe.Add(ref r0, Unsafe.Add(ref ip, 3)), ref f.Feedback.Ics[Unsafe.Add(ref ip, 4)]);
+                            ip = ref Unsafe.Add(ref ip, 5);
+                            continue;
+                        case Op.RetFieldInit:
+                            if ((f.Flags & FrameFlags.NoResult) == 0) { result = default; goto Return; }
+                            f = PopFieldInitFrame(f);
+                            goto Reload;
+
                         default:
                         {
                             int pc = PcAt(ref code0, ref ip);
@@ -1177,6 +1196,13 @@ internal sealed partial class Vm
     [MethodImpl(MethodImplOptions.NoInlining)]
     private JsValue ConstructReturnValue(Frame f, JsValue value)
     {
+        // the usual end of a constructor: nothing returned, this bound in the frame
+        ref readonly var self = ref f.This;
+        if (self.IsObject && f.ThisBox == null && (value.IsUndefined || !f.Callee.IsDerived))
+        {
+            LearnInstanceSlots(f, self);
+            return self;
+        }
         if (!TryConstructResult(f, ref value, out var error)) return Raise(error);
         return value;
     }
@@ -1335,9 +1361,8 @@ internal sealed partial class Vm
         if (fv.IsObject && fv.Ref is JsClosure c && (c.Template.Flags & InlineNewMask) == 0 && c.Template.IsConstructor)
         {
             if (--_ticks <= 0) Checkpoint();
-            var nf = c.IsDerived || c.FieldInit != null
-                ? PushClassNewFrame(c, f, argStart, argc, fv)
-                : PushNewFrame(c, regs, argStart, argc, NewInstance(c, ConstructPrototype(c)), fv);
+            if (c.IsDerived || c.FieldInit != null) return PushClassNewFrame(c, f, argStart, argc, fv, dst);
+            var nf = PushNewFrame(c, regs, argStart, argc, NewInstance(c, ConstructPrototype(c)), fv);
             nf.RetIndex = dst;
             return nf;
         }
@@ -1354,12 +1379,8 @@ internal sealed partial class Vm
         int argc = code[pc + 3];
         int dst = bp + code[pc + 1];
         if (--_ticks <= 0) Checkpoint();
-        var nf = TryPushSuperFrame(f, argStart, argc);
-        if (nf != null)
-        {
-            nf.RetIndex = dst;
-            return nf;
-        }
+        var nf = TryPushSuperFrame(f, argStart, argc, dst);
+        if (nf != null) return nf;
         var result = SuperConstructFrom(f, argStart, argc);
         f.Regs[dst] = result;
         return null;
@@ -1545,12 +1566,34 @@ internal sealed partial class Vm
         return proto.IsObject ? proto.AsObjectUnchecked : Operations.GetPrototypeFromConstructor(Realm, c, Realm.ObjectPrototype);
     }
 
-    /// <summary>The frame of a class constructor that <c>new</c> runs in this loop: derived (this unbound) or with instance fields to initialize first.</summary>
+    /// <summary>The frame to run for a class constructor that <c>new</c> enters in this loop: derived (this unbound) or with instance fields to initialize first, in a frame of their own on top of the constructor's.</summary>
     [MethodImpl(MethodImplOptions.NoInlining)]
-    private Frame PushClassNewFrame(JsClosure c, Frame caller, int argStart, int argc, JsValue newTarget)
+    private Frame PushClassNewFrame(JsClosure c, Frame caller, int argStart, int argc, JsValue newTarget, int dst)
     {
         var thisValue = ConstructThis(c, newTarget);
-        return PushConstructFrame(c, caller.Regs, argStart, argc, thisValue, newTarget);
+        var ctorFrame = PushConstructFrame(c, caller.Regs, argStart, argc, thisValue, newTarget);
+        ctorFrame.RetIndex = dst;
+        var init = c.IsDerived ? null : c.FieldInit;
+        return init != null ? PushFieldInitFrame(init, ctorFrame.Regs, thisValue) : ctorFrame;
+    }
+
+    /// <summary>The frame a field initializer pushed by <see cref="PushFieldInitFrame"/> resumes when it ends; nothing is stored in it.</summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private Frame PopFieldInitFrame(Frame f)
+    {
+        PopFrame(f);
+        return FrameAt(Sp - 1);
+    }
+
+    /// <summary>
+    /// The second half of super(...) in this loop: binds this, then the frame of the field initializer to run, or null.
+    /// A throw from it is seen by this frame's handlers at the super() call, as the spec has it.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private Frame? SuperBindOp(Frame f, JsValue result)
+    {
+        var init = SuperBind(f, result);
+        return init != null ? PushFieldInitFrame(init, f.Regs, result) : null;
     }
 
     [MethodImpl(MethodImplOptions.NoInlining)]
@@ -1560,10 +1603,8 @@ internal sealed partial class Vm
     private JsValue ConstructThis(JsClosure c, JsValue newTarget)
     {
         if (c.IsDerived) return JsValue.Empty;
-        var nt = newTarget.AsObjectUnchecked;
-        var thisValue = JsValue.FromObject(NewInstance(nt, Operations.GetPrototypeFromConstructor(Realm, nt, Realm.ObjectPrototype)));
-        if (c.FieldInit != null) c.FieldInit.Call(thisValue, ReadOnlySpan<JsValue>.Empty);
-        return thisValue;
+        var nt = Unsafe.As<JsObject>(newTarget.Ref!);   // a new.target is an object, checked where it came from
+        return JsValue.FromObject(NewInstance(nt, Operations.GetPrototypeFromConstructor(Realm, nt, Realm.ObjectPrototype)));
     }
 
     /// <summary>
@@ -1571,15 +1612,18 @@ internal sealed partial class Vm
     /// which <see cref="SuperConstruct"/> takes. A negative <paramref name="argc"/> forwards the frame's arguments (default constructor).
     /// </summary>
     [MethodImpl(MethodImplOptions.NoInlining)]
-    private Frame? TryPushSuperFrame(Frame f, int argStart, int argc)
+    private Frame? TryPushSuperFrame(Frame f, int argStart, int argc, int dst)
     {
         var ctor = f.Callee;
         if (!ctor.IsDerived || (f.Flags & FrameFlags.Construct) == 0) return null;
         if (ctor.GetPrototypeOf() is not JsClosure parent || (parent.Template.Flags & InlineNewMask) != 0 || !parent.Template.IsConstructor) return null;
         var thisValue = ConstructThis(parent, f.NewTarget);
-        return argc < 0
+        var ctorFrame = argc < 0
             ? PushFrame(parent, thisValue, f.Args, f.NewTarget, FrameFlags.Construct)
             : PushConstructFrame(parent, f.Regs, argStart, argc, thisValue, f.NewTarget);
+        ctorFrame.RetIndex = dst;
+        var init = parent.IsDerived ? null : parent.FieldInit;
+        return init != null ? PushFieldInitFrame(init, ctorFrame.Regs, thisValue) : ctorFrame;
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]

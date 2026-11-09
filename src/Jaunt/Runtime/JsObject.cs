@@ -130,6 +130,15 @@ internal class JsObject
         realm.ChargeObject();
     }
 
+    /// <summary>Constructor used for function objects, which come with their slots (see <see cref="JsClosure"/>).</summary>
+    internal JsObject(Realm realm, Shape shape, JsValue[] slots)
+    {
+        Realm = realm;
+        Shape = shape;
+        Slots = slots;
+        realm.ChargeObject();
+    }
+
     /// <summary>Constructor used for exotic objects created with a fully built layout (arguments objects).</summary>
     protected JsObject(Realm realm, Shape shape, JsValue[] slots, bool exotic)
     {

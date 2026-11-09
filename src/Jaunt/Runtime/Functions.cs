@@ -34,7 +34,16 @@ internal sealed class Env
         Slots = slots;
     }
 
-    public Env CopyForIteration() => new(Parent, (JsValue[])Slots.Clone()) { Layout = Layout };
+    /// <summary>A loop body's closures each keep their own copy. Not <c>Array.Clone</c>: that allocates through the runtime's slow path, several times the cost of the rest of this.</summary>
+    public Env CopyForIteration()
+    {
+        var from = Slots;
+        var to = new JsValue[from.Length];
+        for (int i = 0; i < to.Length; i++) JsValue.Store(ref to[i], from[i]);
+        var copy = new Env(Parent, to);
+        if (_dynamic != null) copy.Layout = _dynamic.Layout;
+        return copy;
+    }
 }
 
 [Flags]
@@ -121,8 +130,10 @@ internal sealed class Feedback
     /// <summary><c>Template.Code</c> and <c>Template.Constants</c>, one load from the frame (see <see cref="Frame.Feedback"/>).</summary>
     public readonly int[] Code;
     public readonly JsValue[] Constants;
-    /// <summary>For a constructor: the slot count to give new instances, learned from those constructed so far (at most <see cref="Vm.MaxInstanceSlots"/>).</summary>
+    /// <summary>For a constructor: the slot count to give the next instance, learned from the last one finished and taken by the next one (at most <see cref="Vm.MaxInstanceSlots"/>).</summary>
     public int InstanceSlots;
+    /// <summary>"length" and "name" of the closures of a function with no "prototype", shared while none has redefined them (see <see cref="JsClosure"/>).</summary>
+    public JsValue[]? SharedClosureSlots;
 
     public Feedback(FunctionTemplate t)
     {
@@ -156,6 +167,7 @@ internal abstract class JsFunctionObject : JsObject
 {
     protected JsFunctionObject(Realm realm, JsObject? proto) : base(realm, proto) { }
     protected JsFunctionObject(Realm realm, Shape shape, int slots) : base(realm, shape, slots) { }
+    protected JsFunctionObject(Realm realm, Shape shape, JsValue[] slots) : base(realm, shape, slots) { }
     protected JsFunctionObject(Realm realm, JsObject? proto, bool exotic) : base(realm, proto, exotic) { }
 
     public override string ClassName => "Function";
@@ -197,16 +209,39 @@ internal sealed class JsClosure : JsFunctionObject
     public JsClosure? FieldInit { get => _rare?.FieldInit; set { if (value != null || _rare != null) (_rare ??= new()).FieldInit = value; } }
 
     public JsClosure(Realm realm, FunctionTemplate t, Env? env, Feedback fb, JsObject proto)
-        : base(realm, realm.FunctionShapeFor(proto), t.IsConstructor || t.IsGenerator ? 3 : 2)   // the third slot is for "prototype"
+        : base(realm, realm.FunctionShapeFor(proto), InitialSlots(t, fb))
     {
         Template = t;
         Env = env;
         Feedback = fb;
-        // length, name are the first two slots of the function shape
-        Slots[0] = new JsValue(t.Length);
-        Slots[1] = new JsValue(t.Name);
         IsClassConstructor = t.IsClassConstructor;
         IsDerived = t.IsDerived;
+    }
+
+    /// <summary>
+    /// "length" and "name", the first two slots of the function shape. Arrows and methods, which have nothing else, share
+    /// one array per function: these properties are not writable, so only a redefinition writes them, and that takes
+    /// a copy first (<see cref="DefineOwnProperty"/>, <see cref="Vm.SetFunctionName"/>). Adding a property grows into a new array.
+    /// </summary>
+    private static JsValue[] InitialSlots(FunctionTemplate t, Feedback fb)
+    {
+        if (t.IsConstructor || t.IsGenerator)
+        {
+            var own = new JsValue[3];   // the third slot is for "prototype"
+            own[0] = new JsValue(t.Length);
+            own[1] = new JsValue(t.Name);
+            return own;
+        }
+        return fb.SharedClosureSlots ?? NewSharedSlots(t, fb);
+    }
+
+    private static JsValue[] NewSharedSlots(FunctionTemplate t, Feedback fb) => fb.SharedClosureSlots = new[] { new JsValue(t.Length), new JsValue(t.Name) };
+
+    /// <summary>Before anything that may write "length" or "name" whatever their attributes.</summary>
+    internal void UnshareSlots()
+    {
+        var slots = Slots;
+        if (ReferenceEquals(slots, Feedback.SharedClosureSlots)) Slots = new[] { slots[0], slots[1] };   // not Clone: every accessor of a literal comes here, for its name
     }
 
     /// <summary>
@@ -293,6 +328,7 @@ internal sealed class JsClosure : JsFunctionObject
 
     public override bool DefineOwnProperty(in PropertyKey key, in PropertyDescriptor desc)
     {
+        UnshareSlots();
         if (IsLegacyKey(key))
         {
             // materialize as an ordinary own property holding the current value, then apply the definition
