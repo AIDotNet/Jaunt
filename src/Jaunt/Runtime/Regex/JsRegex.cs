@@ -53,7 +53,7 @@ internal sealed class JsRegex
     public static JsRegex Compile(string pattern, string flags)
     {
         var parser = new RegexParser(pattern, flags);
-        var tree = RegexParser.Resolve(parser.Parse(), parser);
+        var tree = Flatten(RegexParser.Resolve(parser.Parse(), parser));
         var c = new Compiler(flags.Contains('u') || flags.Contains('v'));
         c.Emit(tree, back: false);
         c.Code.Add(OpMatch);
@@ -67,6 +67,40 @@ internal sealed class JsRegex
         re.RequiresNative = flags.Contains('v') || dupNames || parser.NeedsNative || unicodeIgnoreCase || pattern.Contains("\\p{") || pattern.Contains("\\P{")
             || (pattern.Contains("(?<") && pattern.Contains("\\u")) || NeedsNative(tree);
         return re;
+    }
+
+    /// <summary>
+    /// Greedy unbounded repeats of a greedy unbounded single-character repeat, without captures (<c>(?:a*)*</c>,
+    /// <c>(?:a+)+</c>, <c>(?:\d{2,})+</c>) become one repeat of the character, with the product of the minimums. Both forms
+    /// reach the same end positions, the nested one first reaching each in decreasing order (with repeats), so the first
+    /// one where the rest of the pattern succeeds is the same, while the nested form backtracks exponentially.
+    /// </summary>
+    private static RNode Flatten(RNode n)
+    {
+        switch (n)
+        {
+            case RSeq s:
+                for (int i = 0; i < s.Items.Count; i++) s.Items[i] = Flatten(s.Items[i]);
+                return s;
+            case RAlt a:
+                for (int i = 0; i < a.Alts.Count; i++) a.Alts[i] = Flatten(a.Alts[i]);
+                return a;
+            case RGroup g: g.Body = Flatten(g.Body); return g;
+            case RLook l: l.Body = Flatten(l.Body); return l;
+            case RRepeat r:
+            {
+                r.Body = Flatten(r.Body);
+                var body = r.Body is RSeq { Items.Count: 1 } one ? one.Items[0] : r.Body;
+                if (r.Max == -1 && r.Greedy && r.CapFrom >= r.CapTo
+                    && body is RRepeat { Max: -1, Greedy: true, Body: RChar or RAny or RSet } inner && inner.CapFrom >= inner.CapTo
+                    && (inner.Min <= 1 || r.Min >= 1)   // (?:a{2,})* cannot match one character
+                    && (long)r.Min * inner.Min <= int.MaxValue)
+                    return new RRepeat { Body = inner.Body, Min = r.Min * inner.Min, Max = -1, Greedy = true, CapFrom = r.CapFrom, CapTo = r.CapFrom };
+                return r;
+            }
+            default:
+                return n;
+        }
     }
 
     private static bool NeedsNative(RNode n) => n switch

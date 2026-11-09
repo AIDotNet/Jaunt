@@ -2970,6 +2970,9 @@ T('leadingLoops', () => [ex(/(\w+)@/, 'ab cd@e'), ex(/\b\w+@/, 'abc d@'), ex(/.*
   ex(/a+b/, 'aaaxaab'), ex(/[ab]+c/, 'abab bc'), all(/\w+@/g, 'a@ bb@ ccc'), all(/\s+$/gm, 'a  \nb \nc'), 'a  b   '.replace(/\s+$/, ''), 'x1y22'.split(/\d+/)]);
 T('atomicSets', () => [ex(/([a-z]+)(\d)/, 'abc1'), ex(/(\d+)(\s+)(\w)/, '12  x'), ex(/(\w+)(\d)/, 'ab12'), ex(/(a+)([^a])/, 'aaab'), ex(/([a-z]+)([A-Z]+)z/, 'abCDz'), ex(/(\s*)(\S+)/, '  ab'),
   ex(/(.+)(\n)/, 'ab\ncd'), ex(/(x*)(y+)(x)/, 'xxyyx'), ex(/([^,]+),([^,]+)/, 'a,b,c')]);
+T('nestedStars', () => { const s = 'aaaa', r = []; for (const re of [/(?:a*)*b/, /(?:a*)*/, /(?:a+)+/, /(?:a+)*a/, /(?:a*)+$/, /(?:a{2,})*/, /(?:a{2,})+/, /(?:a{2,}){2,}/, /x(?:a*)*?/, /(?:[ab]*)*c/, /(?:(a)*)*/, /(?:a*?)*/, /(?:.*)*$/m, /(?:\d+)+\./]) {
+  for (const t of ['', 'a', 'aaa', 'aaab', 'xaaay', 'ab\nc', '12.3', s]) { const m = re.exec(t); r.push(m ? m.index + ':' + m[0].length : '-'); } } return r.join(' '); });
+T('nestedStarsOrder', () => [ex(/((?:a*)*)(a*)b/, 'aaab'), ex(/((?:a+)+)(a)/, 'aaaa'), ex(/((?:a*)*?)c/, 'aac'), ex(/^((?:\w+)*)\s(\w+)$/, 'ab cd'), ex(/((?:a{2,})+)(a*)/, 'aaaaa')]);
 
 L.join('\n');
 """;
@@ -3006,6 +3009,8 @@ longRuns = [null,null,null,null,null,null,[35,"bababababababababababababc",0],nu
 linearShapes = [false,true,false,3001,false,3002,false,[0,"AB;",0],false,[3,"345x",0],false,[0,"aab","aa",0],[3,"abc","b",6],[1,"abc","b",4],[[0,"qaz"],[4,"qz"]]]
 leadingLoops = [[3,"cd@","cd",0],[4,"d@",0],[3,"afoo",0],[3,"cd9",0],[1,"xxxy",0],[6,"bc",0],[1,"bbc",0],[0,"abcd",0],[3,"cd@","d",0],[0,"aa",0],[3,"cd@",0],[3,"b@",0],[3,"y cd@x",0],[3,"34.",0],[4,"aab",0],[5,"bc",0],[[0,"a@"],[3,"bb@"]],[[1,"  "],[5," "]],"a  b",["x","y",""]]
 atomicSets = [[0,"abc1","abc","1",0],[0,"12  x","12","  ","x",0],[0,"ab12","ab1","2",0],[0,"aaab","aaa","b",0],[0,"abCDz","ab","CD",0],[0,"  ab","  ","ab",0],[0,"ab\n","ab","\n",0],[0,"xxyyx","xx","yy","x",0],[0,"a,b","a","b",0]]
+nestedStars = "- - - 0:4 - 0:2 - - 0:0 0:1 0:3 0:3 0:0 0:1 0:0 0:4 - 0:1 0:3 0:3 1:3 0:1 - 0:4 - 0:1 0:3 0:3 1:3 0:1 - 0:4 0:0 0:1 0:3 4:0 5:0 4:0 4:0 0:4 0:0 0:0 0:3 0:3 0:0 0:0 0:0 0:4 - - 0:3 0:3 1:3 - - 0:4 - - - - - - - 0:4 - - - - 0:1 - - - - - - - - 3:1 - - 0:0 0:1 0:3 0:3 0:0 0:1 0:0 0:4 0:0 0:1 0:3 0:3 0:0 0:1 0:0 0:4 0:0 0:1 0:3 0:4 0:5 0:2 0:4 0:4 - - - - - - 0:3 -"
+nestedStarsOrder = [[0,"aaab","aaa","",0],[0,"aaaa","aaa","a",0],[0,"aac","aa",0],[0,"ab cd","ab","cd",0],[0,"aaaaa","aaaaa","",0]]
 """;
 
     [Fact]
