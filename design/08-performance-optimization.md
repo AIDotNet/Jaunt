@@ -337,3 +337,27 @@ METRIC=cpu python3 bench/cross/report.py ...            # 以 CPU 时间交叉�
 三引擎对比（两轮取优，MoeJS ×1.001）：state-reducer −19%、map-set −19%、json-roundtrip −18%、concat-build −7%、dynamic-props −7%；**MoeJS/Jaunt 几何均值 1.028 → 1.049**，最快项数 Jaunt 31 / MoeJS 26 / Jint 2。higher-order 在对比里显示 +8%，但它是 GC 主导的负载，同一构建连续两次 `--run-loop` 相差 30%；交替运行各三次的受控 A/B 为带 scratch 收集 9.8–10.0 ms、不带 10.6–11.0 ms（−7%），以 A/B 为准。
 
 验证：单测 578/578（两种模式）与 17 个新对照用例（Map 表的迭代中删除/插入、压缩、-0/NaN、绳子键、clear、两万项表；reviver 的重复键、`context.source`、holder 变更、索引键顺序、嵌套数组；字符串拼接边界；结果收集的 species、重入、抛错、大结果）、test262 100,167/100,169（两种模式）。
+
+## 12. 第五轮实施记录：数组解构、私有字段、`**`，以及两个否定结论（2026-11-08，7dcac93 之后）
+
+本轮先重跑三引擎对比确认现状（本机 Apple M4，SDK 10.0.300 / 运行时 10.0.8，MoeJS 同一台机器同一时段）：**MoeJS/Jaunt 几何均值 1.42**，59 项里只有 float-loop（0.98）落后，higher-order 持平（1.03）。§1 的目标全部达成，所以本轮不再按“落后项”找问题，而是用隔离微基准找绝对开销大的语言构造。`dotnet-trace` 采样在本机仍被 `PollGCWorker` 严重失真（state-reducer 97%），只用它定位到 higher-order 的回调机制占比高，其余结论都来自微基准 A/B（`--run-loop`，同一构建、交替运行）。
+
+**做了的（三项，都有 Node 生成期望值的对照测试 `ArrayPatternsPrivateFieldsAndExponentMatchReferenceBehavior`）：**
+
+| 改动 | 微基准（µs/run） | 说明 |
+|---|---:|---|
+| **数组模式一条指令**：`const [v, w] = x` / `for (const [k, v] of m)` 的目标全是局部寄存器或环境槽时，CodeGen 发一条 `Op.DestructArray src, dst, n`，替代 GetIterator + n×IterNextOrUndef + IterClose（四次 RareOp 与一个 IteratorRecord 分配）。快路径：原型链未改动的稠密数组直接从元素存储读 n 个值；任何洞、分页/队列存储、非数组都回退到完整的迭代器协议（next 抛出不 close，读完 close）。只有当两次 next() 之间不可能运行用户代码时才融合：元素必须是省略或标识符，绑定是寄存器/环境槽（排除脚本级、with/eval 动态、import；赋值模式下再排除 const/函数名/需要 TDZ 检查的目标，它们会在两步之间抛错） | destructure 3263 → 650（按下标读同一数据 632）；destructure-decl 3115 → 712 | graph-algos −6%（AOT −9%，分配 5.5 → 3.4 MB）、map-set −8%、astar −8.5%、dynamic-props −13% |
+| **私有字段进主循环**：`PrivateGet`/`PrivateSet` 在 RunLoop 主 switch 中，命中“对象有该字段”的常见情形走不内联的小帮助函数（线性扫描 `PrivateElements`），方法/访问器/错误仍走原慢路径；`PrivateDefine` 也直接从主循环调用 | class-base-fields 4152 → 3631（−12.5%）；class-new 4481 → 3965 | classes-inheritance −9.6% |
+| **`**` 数字快路径**：`Op.Exp` 进主 switch，两个数字直接 `MathBuiltins.Pow`（已有 `b == 2 → a*a`），其余走 `ArithSlow`（BigInt / ToNumeric） | pow 10943 → 4769（纯乘法等价写法 3876） | classes-inheritance 含 `r ** 2`，其 −9.6% 可能部分来自此项。bigint 同一轮 −19%，但其 `**` 全是 BigInt，走不到这条快路径，该变化原因未查明 |
+
+三引擎对比（同一 MoeJS 数据）：Jaunt 自身几何均值 ×0.986；**MoeJS/Jaunt 1.418 → 1.438**；未改动项在 ±3% 内（intl-format +3.8% 为噪声，与本轮改动无关）。
+
+**评估后不做的（有测量）：**
+
+1. **解释器驱动的回调内建（替代 CallCallback → Run → 嵌套 RunLoop）**。完整实现过：forEach/map/filter/some/every/find/findIndex/reduce 的循环由 `FrameFlags.Driver` 帧在 RunLoop 内推进，回调帧返回时走驱动而不是嵌套循环；语义对照（可变数组、提前退出、species、bound/native/生成器回调、异常、`error.stack`）与 Node 全部一致。结果：JIT 下 cb-foreach 1345 vs 走原内建路径（`Array.prototype.forEach.call`）1320，cb-map 1533 vs 1511；NativeAOT 下 1650 vs 1597，1786 vs 1788——**嵌套 RunLoop 入口在当前代码上已经不是成本**（第三轮的 `_onThread`/栈探测缓存之后），§“NativeAOT vs JIT”里的 +12 ns/次重入在本轮构建上测不到。已回退，不留代码。副产品：发现池化帧的不变式“Callee 相同则 Feedback 相同”必须由任何自定义帧种类维护（驱动帧曾因借用调用者的 Callee 而让后续同闭包的调用拿到空代码）。
+2. **多态内联缓存（2–4 个 shape）**：mono-method 2965 vs poly-method（3 个类交替）3111，每次多态调用只多 1.6 ns——megamorphic 的 Vm 级 (shape, name) 缓存已经足够便宜。
+3. **`instanceof` 缓存**：每次约 20 ns（含 `Symbol.hasInstance` 查找与原型链遍历），classes-inheritance 里 3000 次 ≈ 0.7%。
+4. **Math 一元内建的委托链**：float-onecall − float-nocall ≈ 5 ns/次调用，float-loop 的时间在 `Math.sin` 本身；把 `Math` 提升为局部变量只省 GetGlobal 的 4 ns。
+5. 类构造路径剩余开销（`extends` + `super()` 约 40 ns/对象：`GetPrototypeFromConstructor` 的 `Get("prototype")`、SuperBind RareOp、ConstructReturnValue）与 `FieldInit.Call` 的嵌套 Run：按 1 的结论后者无收益；前者每项 3–5 ns 是估计值，未单独测量，未做。
+
+验证：单测 622/622；test262 100,167/100,169（同两处 Apple ICU 数据差异，0 跳过）；NativeAOT（ILCompiler 10.0.14）`verify` 全部 PASS，AOT 下 58/59 工作负载结果与 Node 一致（unicode-text 为既有的 InvariantGlobalization 差异）。

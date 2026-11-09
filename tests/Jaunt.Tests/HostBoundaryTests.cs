@@ -151,6 +151,35 @@ public class HostBoundaryTests
     }
 
     [Fact]
+    public void AnInterruptAsSoonAsTheExecutionBeginsIsNeverLost()
+    {
+        // the interrupter fires in the moment the engine turns "executing", before the execution's budget has started;
+        // a lost request would leave the endless loop to the timeout, which surfaces as a different exception
+        for (int i = 0; i < 300; i++)
+        {
+            using var engine = new JsEngine(new JsEngineOptions { Limits = new JsLimits { Timeout = TimeSpan.FromSeconds(10) } });
+            var interrupter = new Thread(() => { while (!engine.IsExecuting) Thread.SpinWait(1); engine.Interrupt(); }) { IsBackground = true };
+            interrupter.Start();
+            Assert.Throws<OperationCanceledException>(() => engine.Evaluate("for (;;) {}"));
+            interrupter.Join();
+        }
+    }
+
+    [Fact]
+    public void AnInterruptBetweenExecutionsDoesNotStopTheNextOne()
+    {
+        // SetValue turns the engine "executing" for a moment without an execution: a request landing there is stale
+        using var engine = new JsEngine();
+        using var stop = new ManualResetEventSlim();
+        var interrupter = new Thread(() => { while (!stop.IsSet) engine.Interrupt(); }) { IsBackground = true };
+        interrupter.Start();
+        for (int i = 0; i < 200_000; i++) engine.SetValue("x", JsValue.From(i));
+        stop.Set();
+        interrupter.Join();
+        Assert.Equal(1.0, engine.Evaluate("1").AsNumber());
+    }
+
+    [Fact]
     public void DotnetRegexBackendObeysTheExecutionBudget()
     {
         const string script = "/^(?:a|aa)+$/.test('a'.repeat(40) + '!')";

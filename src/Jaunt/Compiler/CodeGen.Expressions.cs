@@ -1317,6 +1317,29 @@ internal sealed partial class CodeGen
         _fb.Mark(skip);
     }
 
+    /// <summary>
+    /// Whether an array pattern can be bound by <see cref="Op.DestructArray"/>: at most 16 elements, each an elision or an
+    /// identifier whose store is a register or environment-slot write that cannot throw or run user code, so that reading
+    /// all the iteration values first is unobservable. Script-level, dynamic (with / eval) and import bindings are excluded,
+    /// and in assignment mode so are const / function-name targets and bindings that need a TDZ check (they throw, and
+    /// the spec throws them between two iterator steps).
+    /// </summary>
+    private bool IsPlainLocalArrayPattern(ArrayPattern ap, PatternMode mode)
+    {
+        var els = ap.Elements;
+        if (els.Count == 0 || els.Count > 16) return false;
+        foreach (var el in els)
+        {
+            if (el == null) continue;
+            if (el is not Identifier id) return false;
+            var r = _refs[id];
+            var b = r.Binding;
+            if (b == null || b.IsEvalDynamic || b.Scope.Kind == ScopeKind.Script || b.Kind == BindingKind.Import) return false;
+            if (mode == PatternMode.Assign && (b.Kind == BindingKind.FuncName || b.IsConst || (r.NeedsTdzCheck && b.HasTdz))) return false;
+        }
+        return true;
+    }
+
     private void BindPattern(Node target, int value, PatternMode mode)
     {
         Enter(target);
@@ -1432,6 +1455,18 @@ internal sealed partial class CodeGen
             case ArrayPattern ap:
             {
                 int m = Mark;
+                if (IsPlainLocalArrayPattern(ap, mode))
+                {
+                    // `const [v, w] = x`: one instruction reads the values, the stores run no user code (see Op.DestructArray)
+                    int n = ap.Elements.Count;
+                    int first = Mark;
+                    for (int i = 0; i < n; i++) Temp();
+                    _fb.Emit(Op.DestructArray, value, first, n);
+                    for (int i = 0; i < n; i++)
+                        if (ap.Elements[i] is Identifier eid) BindPattern(eid, first + i, mode);
+                    ResetTo(m);
+                    break;
+                }
                 int iter = Temp();
                 _fb.Emit(Op.GetIterator, iter, value);
                 int regionStart = _fb.Pc;

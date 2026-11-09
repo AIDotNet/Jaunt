@@ -509,6 +509,102 @@ JSON.stringify(out);
 
     // Long arrays in page mode (filter, flat, flatMap, Array.from and push past one page of elements) and Map/Set tables
     // across their page boundaries: every way of reading and changing them. The expected values were produced by Node.
+    // Array patterns of plain local targets are one instruction (Op.DestructArray) that reads the iteration values first;
+    // private fields are read and written in the dispatch loop; ** has a number fast path. Expected output from Node.
+    private const string PatternsAndPrivatesScript = """
+const out = [];
+const log = (...a) => out.push(JSON.stringify(a));
+{ const [a, b] = [1, 2]; const [c, , d] = [1, 2, 3]; const [e, f] = [1]; const [g] = []; let h, i; [h, i] = [5, 6]; log('basic', a, b, c, d, e, f, g, h, i); }
+{ const [a, b] = 'xy'; const [c, d] = new Set([7, 8]); const [e, f] = new Map([[1, 2]]); log('iterables', a, b, c, d, e, f); }
+{ const arr = [1, 2, 3]; const log2 = []; arr[Symbol.iterator] = function* () { log2.push('iter'); yield 10; yield 20; yield 30; }; const [a, b] = arr; log('customIter', a, b, log2); }
+{ const log2 = []; const it = { [Symbol.iterator]() { let i = 0; return { next() { log2.push('next'); return { value: i++, done: false }; }, return() { log2.push('return'); return {}; } }; } }; const [a, b] = it; log('close', a, b, log2); }
+{ const log2 = []; const it = { [Symbol.iterator]() { let i = 0; return { next() { log2.push('next'); return { value: i++, done: i > 1 }; }, return() { log2.push('return'); return {}; } }; } }; const [a, b, c] = it; log('exhausted', a, b, c, log2); }
+{ const log2 = []; const it = { [Symbol.iterator]() { return { next() { log2.push('next'); throw new TypeError('nx'); }, return() { log2.push('return'); return {}; } }; } }; try { const [a] = it; } catch (e) { log('nextThrows', e.constructor.name, log2); } }
+{ const it = { [Symbol.iterator]() { return { next() { return { value: 1, done: false }; }, return() { throw new RangeError('rt'); } }; } }; try { const [a] = it; log('no'); } catch (e) { log('returnThrows', e.constructor.name); } }
+{ const a = [1,,3]; const [x, y, z] = a; log('holes', x, y, z); Array.prototype[1] = 'proto'; const [p, q] = [1,,3]; delete Array.prototype[1]; log('protoHole', p, q); }
+{ try { const [a] = null; } catch (e) { log('null', e.constructor.name); } try { const [a] = 5; } catch (e) { log('num', e.constructor.name); } try { const [a] = {}; } catch (e) { log('obj', e.constructor.name); } }
+{ const a = [1, 2]; const [x = 9, y = 8, z = 7] = a; log('defaults', x, y, z); }
+{ let x = 1, y = 2; [x, y] = [y, x]; log('swap', x, y); }
+{ const fns = []; for (const [i, v] of [[0, 'a'], [1, 'b']]) fns.push(() => i + v); log('capturedLoop', fns.map(f => f())); }
+{ const r = []; for (const [k, v] of new Map([['a', 1], ['b', 2]])) r.push(k + v); log('mapEntries', r); }
+{ function f([a, b], [c] = [3]) { return [a, b, c]; } log('params', f([1, 2]), f([1, 2], [9])); }
+{ const o = {}; [o.a, o.b] = [1, 2]; log('memberTargets', o); }
+{ const arr = [1, 2, 3]; const [a, ...rest] = arr; log('rest', a, rest); }
+{ function* g() { const [a, b] = yield 1; return a + b; } const it = g(); it.next(); log('genPattern', it.next([2, 3]).value); }
+{ let [a, b] = [1, 2]; { let [a, b] = [3, 4]; log('shadow', a, b); } log('outer', a, b); }
+{ const [a, b] = new Array(5); log('newArray', a, b); const big = []; big[4000] = 1; const [c, d] = big; log('sparseBig', c, d); }
+{ const q = [0, 1, 2, 3, 4, 5, 6, 7]; for (let i = 0; i < 5; i++) q.shift(); q.push(8); const [a, b, c, d] = q; log('queueMode', a, b, c, d); }
+{ const [a, b, c] = [1, 2, 3].entries(); log('entriesIter', a, b, c); }
+{ const [a, b, c, d, e, f, g, h, i, j, k, l, m, n, o, p, q] = Array.from({ length: 20 }, (_, i) => i); log('seventeen', a, q); }
+{ try { eval('const [a, b] = [1, 2]; log("evalPattern", a, b)'); } catch (e) { log('eval', e.message); } }
+{ with ({ w: 0 }) { const [w2, w3] = [1, 2]; log('withPattern', w2, w3); } }
+{ var [va, vb] = [1, 2]; log('varPattern', va, vb); }
+{ class A { #x = 1; #m() { return 2; } get #g() { return 3; } set #s(v) { this.v = v; } static #sx = 9; read() { return [this.#x, this.#m(), this.#g, (this.#s = 5, this.v), A.#sx]; } write(v) { this.#x = v; return this.#x; } has(o) { return #x in o; } } const a = new A(); log('private', a.read(), a.write(7), a.has(a), a.has({}), a.has(Object.freeze(new A()))); }
+{ class A { #x = 1; static read(o) { return o.#x; } static write(o, v) { o.#x = v; } } try { A.read({}); } catch (e) { log('missingGet', e.constructor.name); } try { A.write({}, 1); } catch (e) { log('missingSet', e.constructor.name); } try { A.read(5); } catch (e) { log('primitiveGet', e.constructor.name); } const f = Object.freeze(new A()); A.write(f, 3); log('frozenPrivate', A.read(f)); }
+{ class A { #m() { return 1; } static set(o) { o.#m = 2; } get #g() { return 1; } static setG(o) { o.#g = 2; } } try { A.set(new A()); } catch (e) { log('methodWrite', e.constructor.name); } try { A.setG(new A()); } catch (e) { log('noSetter', e.constructor.name); } }
+{ class B { #a = 1; #b = 2; #c = 3; #d = 4; #e = 5; sum() { return this.#a + this.#b + this.#c + this.#d + this.#e; } } log('manyPrivate', new B().sum()); }
+{ class P { #p = 1; static get(o) { return o.#p; } } const px = new Proxy(new P(), {}); try { P.get(px); log('no'); } catch (e) { log('proxyPrivate', e.constructor.name); } }
+{ class Q { #v = 0; bump() { return ++this.#v; } } const q = new Q(); q.bump(); q.bump(); log('compound', q.bump()); }
+{ log('exp', 2 ** 10, 2 ** -1, (-8) ** (1/3), 2 ** 0.5 === Math.SQRT2, String(10n ** 3n), (-2) ** 2, 0 ** 0, NaN ** 0, 1 ** Infinity, '3' ** '2'); try { 2n ** -1n; } catch (e) { log('expNeg', e.constructor.name); } try { 2 ** 2n; } catch (e) { log('expMixed', e.constructor.name); } }
+out.join('\n')
+""";
+
+    private const string PatternsAndPrivatesExpected = """
+["basic",1,2,1,3,1,null,null,5,6]
+["iterables","x","y",7,8,[1,2],null]
+["customIter",10,20,["iter"]]
+["close",0,1,["next","next","return"]]
+["exhausted",0,null,null,["next","next"]]
+["nextThrows","TypeError",["next"]]
+["returnThrows","RangeError"]
+["holes",1,null,3]
+["protoHole",1,"proto"]
+["null","TypeError"]
+["num","TypeError"]
+["obj","TypeError"]
+["defaults",1,2,7]
+["swap",2,1]
+["capturedLoop",["0a","1b"]]
+["mapEntries",["a1","b2"]]
+["params",[1,2,3],[1,2,9]]
+["memberTargets",{"a":1,"b":2}]
+["rest",1,[2,3]]
+["genPattern",5]
+["shadow",3,4]
+["outer",1,2]
+["newArray",null,null]
+["sparseBig",null,null]
+["queueMode",5,6,7,8]
+["entriesIter",[0,1],[1,2],[2,3]]
+["seventeen",0,16]
+["evalPattern",1,2]
+["withPattern",1,2]
+["varPattern",1,2]
+["private",[1,2,3,5,9],7,true,false,true]
+["missingGet","TypeError"]
+["missingSet","TypeError"]
+["primitiveGet","TypeError"]
+["frozenPrivate",3]
+["methodWrite","TypeError"]
+["noSetter","TypeError"]
+["manyPrivate",15]
+["proxyPrivate","TypeError"]
+["compound",3]
+["exp",1024,0.5,null,true,"1000",4,1,1,null,9]
+["expNeg","RangeError"]
+["expMixed","TypeError"]
+""";
+
+    [Fact]
+    public void ArrayPatternsPrivateFieldsAndExponentMatchReferenceBehavior()
+    {
+        using var engine = new JsEngine();
+        var got = engine.Evaluate(PatternsAndPrivatesScript).AsString().Split('\n');
+        var expected = PatternsAndPrivatesExpected.ReplaceLineEndings("\n").TrimEnd('\n').Split('\n');
+        Assert.Equal(expected.Length, got.Length);
+        for (int i = 0; i < expected.Length; i++) Assert.True(expected[i] == got[i], $"line {i}: expected {expected[i]} but got {got[i]}");
+    }
+
     private const string PagedScript = """
 const out = {};
 const N = 9000;

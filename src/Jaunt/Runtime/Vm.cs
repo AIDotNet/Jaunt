@@ -151,7 +151,7 @@ internal sealed partial class Vm
         _deadline = timeout is { } t && t != Timeout.InfiniteTimeSpan ? Stopwatch.GetTimestamp() + (long)(t.TotalSeconds * Stopwatch.Frequency) : long.MaxValue;
         _timeout = timeout ?? TimeSpan.Zero;
         _token = token;
-        lock (_interruptLock) _interrupt = 0;
+        // _interrupt is not cleared here: the engine is already "executing", so a request may have arrived for this very execution
         MaxDepth = maxDepth;
         _budgetActive = true;
         ResetTicks();
@@ -175,6 +175,20 @@ internal sealed partial class Vm
         int chunk = (int)Math.Min(1024, Math.Max(1, remaining));
         _tickChunk = chunk;
         _ticks = chunk;
+    }
+
+    /// <summary>
+    /// Drops a request left by an earlier execution, which can land after <see cref="EndBudget"/> while the engine still reads
+    /// as executing. Called before the engine state turns <paramref name="executing"/>: while it does not read so, a
+    /// pending request is stale, since <see cref="RequestInterrupt"/> only sets one under the same lock when it does.
+    /// </summary>
+    public void ClearStaleInterrupt(ref int engineState, int executing)
+    {
+        if (_interrupt == 0) return;
+        lock (_interruptLock)
+        {
+            if (Volatile.Read(ref engineState) != executing) _interrupt = 0;
+        }
     }
 
     /// <summary>Interrupts the active execution if <paramref name="isActive"/> holds at the time of the request.</summary>
