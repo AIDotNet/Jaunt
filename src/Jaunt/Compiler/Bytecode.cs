@@ -67,6 +67,8 @@ internal enum Op : int
     Intrinsic,
     /// <summary>A class field with a constant name: this, name, value, inline cache.</summary>
     DefineFieldK,
+    /// <summary>The end of an instance field initializer, which may run on top of its constructor's frame without a result to store (hot returns need no check for that).</summary>
+    RetFieldInit,
     Count_,
 }
 
@@ -127,7 +129,7 @@ internal static class OpInfo
         S(Op.Jmp, J); S(Op.JmpTrue, R, J); S(Op.JmpFalse, R, J); S(Op.JmpNullish, R, J); S(Op.JmpNotNullish, R, J);
         S(Op.JmpUndef, R, J); S(Op.JmpNotUndef, R, J);
         S(Op.SwitchInt, R, I); // followed by I jump targets (variable)
-        S(Op.Ret, R); S(Op.RetUndef);
+        S(Op.Ret, R); S(Op.RetUndef); S(Op.RetFieldInit);
         S(Op.Throw, R); S(Op.ThrowTypeError, K); S(Op.ThrowRefError, K);
         S(Op.Call, R, R, O, R, N); S(Op.TailCall, R, R, O, R, N);
         S(Op.CallMethod, R, R, K, C, R, N); S(Op.TailCallMethod, R, R, K, C, R, N);

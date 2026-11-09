@@ -80,7 +80,7 @@ internal static class BytecodeVerifier
         if (code.Length == 0 || !IsTerminator((Op)code[last])) Fail(t, code.Length, "function does not end with a terminator");
     }
 
-    private static bool IsTerminator(Op op) => op is Op.Ret or Op.RetUndef or Op.Throw or Op.Jmp or Op.ThrowTypeError or Op.ThrowRefError or Op.SwitchInt or Op.ThrowConstAssign;
+    private static bool IsTerminator(Op op) => op is Op.Ret or Op.RetUndef or Op.RetFieldInit or Op.Throw or Op.Jmp or Op.ThrowTypeError or Op.ThrowRefError or Op.SwitchInt or Op.ThrowConstAssign;
 
     private static void Fail(FunctionTemplate t, int pc, string message) =>
         throw new InvalidOperationException($"Jaunt bytecode verification failed in '{t.Name}' at {pc}: {message}.");

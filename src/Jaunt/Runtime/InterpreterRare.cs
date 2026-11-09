@@ -24,7 +24,7 @@ internal sealed partial class Vm
             case Op.Debugger:
             case Op.InitFields:
                 return pc + 1;
-            case Op.LoadNewTarget: regs[bp + code[pc + 1]] = f.NewTarget; return pc + 2;
+            case Op.LoadNewTarget: regs[bp + code[pc + 1]] = f.NewTargetValue; return pc + 2;
             case Op.LoadCallee: regs[bp + code[pc + 1]] = JsValue.FromObject(f.Callee); return pc + 2;
             case Op.ThrowConstAssign:
                 throw JsErrors.TypeError(realm, "Assignment to constant variable.");
@@ -90,9 +90,6 @@ internal sealed partial class Vm
                 obj.CreateDataPropertyOrThrow(key, regs[bp + code[pc + 3]]);
                 return pc + 4;
             }
-            case Op.DefineFieldK:
-                DefineFieldProp(regs[bp + code[pc + 1]], k[code[pc + 2]], regs[bp + code[pc + 3]], ref f.Feedback.Ics[code[pc + 4]]);
-                return pc + 5;
             case Op.DefineAccessor:
                 DefineAccessorOp(regs[bp + code[pc + 1]].AsObjectUnchecked, regs[bp + code[pc + 2]], regs[bp + code[pc + 3]], code[pc + 4]);
                 return pc + 5;
@@ -192,11 +189,6 @@ internal sealed partial class Vm
                 regs[dst] = SuperConstruct(f, arr.ContiguousElements());
                 return pc + 3;
             }
-            case Op.SuperBind:
-                f.Pc = pc + 2;
-                SuperBind(f, regs[bp + code[pc + 1]]);
-                return pc + 2;
-
             // ------------------------------------------------------------ classes and private names
             case Op.ClassCreate:
                 ClassCreate(f, regs, bp, code[pc + 1], code[pc + 2], code[pc + 3], code[pc + 4], code[pc + 5]);

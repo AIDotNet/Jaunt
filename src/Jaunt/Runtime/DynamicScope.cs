@@ -401,9 +401,9 @@ internal sealed partial class Vm
         if (caller != null)
         {
             if (caller.ThisBox != null || (caller.Callee.IsDerived && (caller.Flags & FrameFlags.Construct) != 0))
-                c.ThisBox = caller.ThisBox ??= new ThisBox { Value = caller.This, Ctor = caller.Callee, NewTarget = caller.NewTarget };
+                c.ThisBox = caller.ThisBox ??= new ThisBox { Value = caller.This, Ctor = caller.Callee, NewTarget = caller.NewTargetValue };
             c.BoundThis = caller.This;
-            c.BoundNewTarget = caller.NewTarget;
+            c.BoundNewTarget = caller.NewTargetValue;
             c.HomeObject = home;
             c.Module = caller.Callee.Module;
         }
