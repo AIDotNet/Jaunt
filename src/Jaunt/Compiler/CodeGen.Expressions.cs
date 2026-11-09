@@ -220,7 +220,7 @@ internal sealed partial class CodeGen
                 return d;
             }
             case Identifier id:
-                if (id.Name == "undefined" && _refs[id] is { Binding: null, Dynamic: false })
+                if (id.Name == "undefined" && ResolvedRef.Get(id) is { Binding: null, Dynamic: false })
                 {
                     int d = Dst(dst);
                     _fb.Emit(Op.LoadUndef, d);
@@ -522,11 +522,11 @@ internal sealed partial class CodeGen
         switch (ue.Operator)
         {
             case Operator.TypeOf:
-                if (ue.Argument is Identifier gid && _refs[gid].Binding == null)
+                if (ue.Argument is Identifier gid && ResolvedRef.Get(gid).Binding == null)
                 {
                     int d0 = Dst(dst);
                     int t = Temp();
-                    if (_refs[gid].Dynamic) _fb.Emit(Op.LdName, t, _fb.Const(gid.Name), 1);
+                    if (ResolvedRef.Get(gid).Dynamic) _fb.Emit(Op.LdName, t, _fb.Const(gid.Name), 1);
                     else _fb.Emit(Op.GetGlobalTypeof, t, _fb.Const(gid.Name), _fb.NewIc());
                     _fb.Emit(Op.Typeof, d0, t);
                     Release(t);
@@ -564,7 +564,7 @@ internal sealed partial class CodeGen
                 }
                 else if (ue.Argument is Identifier did)
                 {
-                    var dref = _refs[did];
+                    var dref = ResolvedRef.Get(did);
                     if (dref.Binding == null) _fb.Emit(Op.DelName, d0, _fb.Const(did.Name));
                     else if (dref.Binding.IsEvalDynamic) _fb.Emit(Op.DelName, d0, _fb.Const(did.Name));
                     else _fb.Emit(Op.LoadFalse, d0);
@@ -712,7 +712,7 @@ internal sealed partial class CodeGen
         if (up.Argument is CallExpression ucall) return CallAssignmentTarget(ucall, dst);
         if (up.Argument is Identifier id)
         {
-            var res = _refs[id];
+            var res = ResolvedRef.Get(id);
             if (res.Binding != null && !res.Binding.Captured && res.Binding.Register >= 0 && !res.Binding.IsConst && res.Binding.Kind != BindingKind.FuncName)
             {
                 int reg = res.Binding.Register;
@@ -983,7 +983,7 @@ internal sealed partial class CodeGen
         Literal => true,
         UnaryExpression { Operator: Operator.UnaryNegation, Argument: NumericLiteral } => true,
         FunctionExpression or ArrowFunctionExpression => true,
-        Identifier id => _refs.TryGetValue(id, out var r) && !r.Dynamic && !r.NeedsTdzCheck && r.Binding is { Captured: false, Register: >= 0 },
+        Identifier id => ResolvedRef.TryGet(id, out var r) && !r.Dynamic && !r.NeedsTdzCheck && r.Binding is { Captured: false, Register: >= 0 },
         _ => false,
     };
 
@@ -1060,7 +1060,7 @@ internal sealed partial class CodeGen
             _fb.Emit(Op.LoadUndef, thisR);
             _fb.Mark(end);
         }
-        else if (call.Callee is Identifier cid && _refs[cid] is { Binding: null, Dynamic: true })
+        else if (call.Callee is Identifier cid && ResolvedRef.Get(cid) is { Binding: null, Dynamic: true })
         {
             fn = Temp();
             thisR = Temp();
@@ -1140,7 +1140,7 @@ internal sealed partial class CodeGen
             // strict code: an unresolvable global reference throws even if the right-hand side creates the
             // property, because the reference is resolved first (6.2.5.6) — resolve eagerly when the RHS may run code
             if (ae.Left is Identifier did0 && (IsDynamicRef(did0)
-                || (_func.Strict && _refs[did0] is { Binding: null, Dynamic: false } && !IsPureExpression(ae.Right) && !DeclaredByScript(did0.Name))))
+                || (_func.Strict && ResolvedRef.Get(did0) is { Binding: null, Dynamic: false } && !IsPureExpression(ae.Right) && !DeclaredByScript(did0.Name))))
             {
                 int rr = EmitResolveRef(did0);
                 int v = Expr(ae.Right, -1, AssignName(ae, did0));
@@ -1150,7 +1150,7 @@ internal sealed partial class CodeGen
             }
             if (ae.Left is Identifier id)
             {
-                var res = _refs[id];
+                var res = ResolvedRef.Get(id);
                 if (res.Binding != null && !res.Binding.Captured && res.Binding.Register >= 0 && !res.Binding.IsConst
                     && res.Binding.Kind is not BindingKind.FuncName and not BindingKind.Import && !res.NeedsTdzCheck
                     && (WritesDestinationLast(ae.Right) || !Mentions(ae.Right, id.Name)))
@@ -1183,7 +1183,7 @@ internal sealed partial class CodeGen
             }
         }
         bool logical = ae.Operator is Operator.LogicalAndAssignment or Operator.LogicalOrAssignment or Operator.NullishCoalescingAssignment;
-        if (!logical && ae.Left is Identifier rid && _refs[rid] is { Binding: { Captured: false, Register: >= 0 } rb } rres
+        if (!logical && ae.Left is Identifier rid && ResolvedRef.Get(rid) is { Binding: { Captured: false, Register: >= 0 } rb } rres
             && !rb.IsConst && rb.Kind is not BindingKind.FuncName and not BindingKind.Import && !rres.NeedsTdzCheck && !HasSideEffects(ae.Right))
         {
             int reg = rb.Register;
@@ -1332,7 +1332,7 @@ internal sealed partial class CodeGen
         {
             if (el == null) continue;
             if (el is not Identifier id) return false;
-            var r = _refs[id];
+            var r = ResolvedRef.Get(id);
             var b = r.Binding;
             if (b == null || b.IsEvalDynamic || b.Scope.Kind == ScopeKind.Script || b.Kind == BindingKind.Import) return false;
             if (mode == PatternMode.Assign && (b.Kind == BindingKind.FuncName || b.IsConst || (r.NeedsTdzCheck && b.HasTdz))) return false;
@@ -1694,7 +1694,7 @@ internal sealed partial class CodeGen
     {
         Enter(node);
         int m = Mark;
-        var classScope = _scopes[node];
+        var classScope = NodeTable.Scope(node);
         var classDecs = ClassDecorators(node);
         bool decorated = classDecs.Count > 0;
         foreach (var el in body.Body) if (ElementDecorators(el).Count > 0) { decorated = true; break; }
@@ -1998,7 +1998,7 @@ internal sealed partial class CodeGen
     {
         var saved = (_fb, _func, _scope, _control, _envDepth, _completionReg, _optionalExit, _template, _tryCatchDepth);
         var key = _analyzer.GetFieldInitKey(body, isStatic);
-        _functions.TryGetValue(key, out var fi);
+        NodeTable.TryGetFunction(key, out var fi);
         var t = new FunctionTemplate
         {
             Name = isStatic ? "<static_initializer>" : "<instance_members_initializer>",
@@ -2111,7 +2111,7 @@ internal sealed partial class CodeGen
     private int CompileStaticBlock(StaticBlock sb)
     {
         var saved = (_fb, _func, _scope, _control, _envDepth, _completionReg, _optionalExit, _template, _tryCatchDepth);
-        var fi = _functions[sb];
+        var fi = NodeTable.Function(sb);
         var t = new FunctionTemplate { Name = "<static_block>", Script = _script, Flags = FunctionFlags.Strict | FunctionFlags.Method };
         BeginFunction(fi, t);
         FinalizeEnvLayout(fi.Scope);

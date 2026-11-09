@@ -3,6 +3,12 @@
 Jaunt follows [Semantic Versioning](https://semver.org/) from 1.0.0. See "Versioning" in the [README](README.md) for what
 counts as public API.
 
+## Unreleased
+
+### Performance
+
+- Script compilation is about 16% faster and allocates about 11% less, measured under NativeAOT on the benchmark corpus.
+
 ## 1.0.1 (2026-11-08)
 
 First release on NuGet. Everything listed under 1.0.0 applies; that tag failed its release checks and was never published.

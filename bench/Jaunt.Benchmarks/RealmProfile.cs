@@ -59,35 +59,26 @@ public static class CompileProfile
         // allocation split (single run after warm-up)
         var program = new Acornima.Parser(plain).ParseScript(src);
         long b0 = GC.GetAllocatedBytesForCurrentThread();
-        var scopes = new Dictionary<Acornima.Ast.Node, Jaunt.Compiler.Scope>();
-        var functions = new Dictionary<Acornima.Ast.Node, Jaunt.Compiler.FunctionInfo>();
-        var refs = new Dictionary<Acornima.Ast.Identifier, Jaunt.Compiler.ResolvedRef>();
-        var analyzer = new Jaunt.Compiler.ScopeAnalyzer(scopes, functions, refs, null, 1000, null) { MayContainEval = false };
+        var analyzer = new Jaunt.Compiler.ScopeAnalyzer(null, 1000, null) { MayContainEval = false };
         analyzer.AnalyzeProgram(program, false);
         long b1 = GC.GetAllocatedBytesForCurrentThread();
         var script = new Jaunt.Compiler.ScriptTemplate { Body = null!, SourceName = "x", IsModule = false, Strict = false };
-        var gen = new Jaunt.Compiler.CodeGen(script, src, scopes, functions, refs, analyzer, 1000, null);
+        var gen = new Jaunt.Compiler.CodeGen(script, src, analyzer, 1000, null);
         script.Body = gen.CompileProgram(program, false);
         long b2 = GC.GetAllocatedBytesForCurrentThread();
         var sw = Stopwatch.StartNew();
         for (int i = 0; i < 200; i++)
         {
-            var sc = new Dictionary<Acornima.Ast.Node, Jaunt.Compiler.Scope>();
-            var fn = new Dictionary<Acornima.Ast.Node, Jaunt.Compiler.FunctionInfo>();
-            var rf = new Dictionary<Acornima.Ast.Identifier, Jaunt.Compiler.ResolvedRef>();
-            new Jaunt.Compiler.ScopeAnalyzer(sc, fn, rf, null, 1000, null) { MayContainEval = false }.AnalyzeProgram(program, false);
+            new Jaunt.Compiler.ScopeAnalyzer(null, 1000, null) { MayContainEval = false }.AnalyzeProgram(program, false);
         }
         Console.WriteLine($"analyze          {sw.Elapsed.TotalMicroseconds / 200,8:F1} µs");
         sw.Restart();
         for (int i = 0; i < 200; i++)
         {
-            var sc = new Dictionary<Acornima.Ast.Node, Jaunt.Compiler.Scope>();
-            var fn = new Dictionary<Acornima.Ast.Node, Jaunt.Compiler.FunctionInfo>();
-            var rf = new Dictionary<Acornima.Ast.Identifier, Jaunt.Compiler.ResolvedRef>();
-            var an = new Jaunt.Compiler.ScopeAnalyzer(sc, fn, rf, null, 1000, null) { MayContainEval = false };
+            var an = new Jaunt.Compiler.ScopeAnalyzer(null, 1000, null) { MayContainEval = false };
             an.AnalyzeProgram(program, false);
             var st = new Jaunt.Compiler.ScriptTemplate { Body = null!, SourceName = "x", IsModule = false, Strict = false };
-            st.Body = new Jaunt.Compiler.CodeGen(st, src, sc, fn, rf, an, 1000, null).CompileProgram(program, false);
+            st.Body = new Jaunt.Compiler.CodeGen(st, src, an, 1000, null).CompileProgram(program, false);
         }
         if (Environment.GetEnvironmentVariable("JAUNT_ALLOC") == "1")
         {
@@ -99,7 +90,7 @@ public static class CompileProfile
             sampler.Print();
         }
         Console.WriteLine($"analyze+codegen  {sw.Elapsed.TotalMicroseconds / 200,8:F1} µs");
-        Console.WriteLine($"analyze alloc {(b1 - b0) / 1024.0,8:F1} KB   codegen alloc {(b2 - b1) / 1024.0,8:F1} KB   refs={refs.Count} scopes={scopes.Count} functions={functions.Count}");
+        Console.WriteLine($"analyze alloc {(b1 - b0) / 1024.0,8:F1} KB   codegen alloc {(b2 - b1) / 1024.0,8:F1} KB");
     }
 
     private static void Measure(string name, int n, Action a)

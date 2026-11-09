@@ -34,10 +34,6 @@ internal sealed partial class CodeGen
         /// <summary>AsyncIterator: register set to true once the iterator was closed (or must not be closed).</summary>
         public int FlagReg;
     }
-
-    private readonly Dictionary<Node, Scope> _scopes;
-    private readonly Dictionary<Node, FunctionInfo> _functions;
-    private readonly Dictionary<Identifier, ResolvedRef> _refs;
     private readonly ScopeAnalyzer _analyzer;
     private readonly ScriptTemplate _script;
     private readonly string _source;
@@ -59,14 +55,10 @@ internal sealed partial class CodeGen
     private int _depth;
     private readonly int _maxDepth;
 
-    public CodeGen(ScriptTemplate script, string source, Dictionary<Node, Scope> scopes, Dictionary<Node, FunctionInfo> functions,
-        Dictionary<Identifier, ResolvedRef> refs, ScopeAnalyzer analyzer, int maxDepth, Action? checkpoint)
+    public CodeGen(ScriptTemplate script, string source, ScopeAnalyzer analyzer, int maxDepth, Action? checkpoint)
     {
         _script = script;
         _source = source;
-        _scopes = scopes;
-        _functions = functions;
-        _refs = refs;
         _analyzer = analyzer;
         _maxDepth = maxDepth;
         _checkpoint = checkpoint;
@@ -75,7 +67,8 @@ internal sealed partial class CodeGen
     private void Enter(Node node)
     {
         if (++_depth > _maxDepth) throw new CompileError("NestingTooDeep", "Maximum syntax nesting depth exceeded.", node);
-        System.Runtime.CompilerServices.RuntimeHelpers.EnsureSufficientExecutionStack();
+        // the probe leaves room for far more than 16 levels; a recursion that goes deep crosses every multiple of 16
+        if ((_depth & 15) == 0) System.Runtime.CompilerServices.RuntimeHelpers.EnsureSufficientExecutionStack();
     }
 
     private void Leave() => _depth--;
@@ -93,7 +86,7 @@ internal sealed partial class CodeGen
 
     public FunctionTemplate CompileProgram(Program program, bool isModule)
     {
-        var fi = _functions[program];
+        var fi = NodeTable.Function(program);
         var t = new FunctionTemplate
         {
             Name = isModule ? "<module>" : "<script>",
@@ -213,7 +206,7 @@ internal sealed partial class CodeGen
     private FunctionTemplate CompileFunction(Node fnNode, string name, FunctionFlags extra)
     {
         Enter(fnNode);
-        var fi = _functions[fnNode];
+        var fi = NodeTable.Function(fnNode);
         var f = (IFunction)fnNode;
         var flags = extra;
         if (fi.Strict) flags |= FunctionFlags.Strict;
@@ -400,7 +393,7 @@ internal sealed partial class CodeGen
 
     private Scope? EnterScope(Node owner, bool pushEnv = true)
     {
-        if (!_scopes.TryGetValue(owner, out var s)) return null;
+        if (!NodeTable.TryGetScope(owner, out var s)) return null;
         FinalizeEnvLayout(s);
         int slot = 0;
         foreach (var b in s.Ordered) if (b.Captured && !b.IsLexical && b.Kind != BindingKind.Import) b.EnvSlot = slot++;
@@ -450,7 +443,7 @@ internal sealed partial class CodeGen
 
     private int LoadIdentifier(Identifier id, int dst)
     {
-        var r = _refs[id];
+        var r = ResolvedRef.Get(id);
         var b = r.Binding;
         if (b == null)
         {
@@ -499,7 +492,7 @@ internal sealed partial class CodeGen
     /// <summary>Stores <paramref name="src"/> into an identifier reference (assignment or initialization).</summary>
     private void StoreIdentifier(Identifier id, int src, bool init)
     {
-        var r = _refs[id];
+        var r = ResolvedRef.Get(id);
         if (r.Binding == null)
         {
             if (r.Dynamic)
@@ -802,7 +795,7 @@ internal sealed partial class CodeGen
             case VariableDeclaration vd: VariableDeclaration(vd); break;
             case FunctionDeclaration fd:
                 // hoisted; Annex B: copy block binding into the var binding when evaluated
-                if (fd.Id != null && _refs.TryGetValue(fd.Id, out var fref) && fref.Binding?.AnnexBVar is { } annex)
+                if (fd.Id != null && ResolvedRef.TryGet(fd.Id, out var fref) && fref.Binding?.AnnexBVar is { } annex)
                 {
                     int m = Mark;
                     int r = LoadBinding(fref.Binding, -1, false);
@@ -1008,7 +1001,7 @@ internal sealed partial class CodeGen
             }
             else if (d.Id is Identifier id)
             {
-                var res = _refs[id];
+                var res = ResolvedRef.Get(id);
                 if (res.Binding != null && !res.Binding.Captured && res.Binding.Kind != BindingKind.Import && res.Binding.Register >= 0
                     && !res.NeedsTdzCheck && !Mentions(d.Init, id.Name))
                 {
@@ -1124,7 +1117,7 @@ internal sealed partial class CodeGen
         int m = Mark;
         int iter = Temp(), val = Temp();
         // lexical bindings: registers/slots are assigned here; the environment is created per iteration
-        Scope? outer = _scopes.ContainsKey(f) ? EnterScope(f, pushEnv: false) : null;
+        Scope? outer = NodeTable.TryGetScope(f, out _) ? EnterScope(f, pushEnv: false) : null;
         if (f.Left is VariableDeclaration { Kind: VariableDeclarationKind.Var } ivd
             && ivd.Declarations[0] is { Init: { } init, Id: Identifier initId })
         {
@@ -1188,7 +1181,7 @@ internal sealed partial class CodeGen
         _fb.Position(f);
         int m = Mark;
         int iter = Temp(), val = Temp();
-        Scope? outer = _scopes.ContainsKey(f) ? EnterScope(f, pushEnv: false) : null;
+        Scope? outer = NodeTable.TryGetScope(f, out _) ? EnterScope(f, pushEnv: false) : null;
         int src = ForHeadExpr(f.Right, outer);
         _fb.Position(f.Right);
         _fb.Emit(Op.GetIterator, iter, src);

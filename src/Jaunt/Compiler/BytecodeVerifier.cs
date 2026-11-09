@@ -27,9 +27,10 @@ internal static class BytecodeVerifier
         else Array.Clear(starts, 0, limit);
         var jumps = s_jumps ??= new List<int>();
         jumps.Clear();
-        int pc = 0;
+        int pc = 0, last = 0;
         while (pc < code.Length)
         {
+            last = pc;
             starts[pc] = true;
             int opv = code[pc];
             if (opv < 0 || opv >= (int)Op.Count_) Fail(t, pc, "unknown opcode");
@@ -76,14 +77,7 @@ internal static class BytecodeVerifier
             if (h.Start < 0 || h.End < h.Start || h.End > code.Length || (uint)h.Target >= (uint)limit || !starts[h.Target]) Fail(t, h.Target, "bad handler");
             if (h.ExceptionReg < 0 || h.ExceptionReg >= t.RegisterCount) Fail(t, h.Target, "bad handler register");
         }
-        if (code.Length == 0 || !IsTerminator((Op)code[LastStart(code)])) Fail(t, code.Length, "function does not end with a terminator");
-    }
-
-    private static int LastStart(int[] code)
-    {
-        int pc = 0, last = 0;
-        while (pc < code.Length) { last = pc; pc += OpInfo.Length(code, pc); }
-        return last;
+        if (code.Length == 0 || !IsTerminator((Op)code[last])) Fail(t, code.Length, "function does not end with a terminator");
     }
 
     private static bool IsTerminator(Op op) => op is Op.Ret or Op.RetUndef or Op.Throw or Op.Jmp or Op.ThrowTypeError or Op.ThrowRefError or Op.SwitchInt or Op.ThrowConstAssign;
