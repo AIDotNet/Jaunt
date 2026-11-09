@@ -186,8 +186,18 @@ internal sealed class JsRegex
             _prefix = sb.ToString();
             return;
         }
-        var (set, nullable) = First(tree);
+        var (set, nullable) = First(tree, _unicode);
         if (set == null || nullable || set.IsEmpty) return;
+        var excluded = set.Complement(0x10FFFF);
+        if (excluded.IsEmpty) return;   // every position can begin a match
+        if (excluded.Ranges[^1] < 128)
+        {
+            // only ASCII characters are excluded (a negated class, ignore-case): every other code unit is a candidate,
+            // and in Unicode mode the high half of a pair is found before its low half
+            _firstValues = System.Buffers.SearchValues.Create(Chars(excluded));
+            _firstExcept = true;
+            return;
+        }
         bool supplementary = set.Ranges[^1] > 0xFFFF;
         var bmp = set.Intersect(CharSet.Range(0, 0xFFFF));
         bool surrogates = !bmp.Intersect(CharSet.Range(0xD800, 0xDFFF)).IsEmpty;
@@ -211,6 +221,15 @@ internal sealed class JsRegex
         _firstSet = set;
     }
 
+    /// <summary>The ASCII characters that satisfy <paramref name="matches"/>, plus every non-ASCII code point when <paramref name="nonAscii"/>.</summary>
+    private static CharSet IgnoreCaseFirst(Func<int, bool> matches, bool nonAscii)
+    {
+        var list = new List<(int, int)>();
+        for (int x = 0; x < 128; x++) if (matches(x)) list.Add((x, x));
+        if (nonAscii) list.Add((128, 0x10FFFF));
+        return CharSet.FromRanges(list);
+    }
+
     private static char[] Chars(CharSet set)
     {
         var a = new char[set.Count];
@@ -221,9 +240,9 @@ internal sealed class JsRegex
 
     /// <summary>
     /// The characters that can begin a match of <paramref name="n"/> (null: any) and whether it can match empty.
-    /// Over-approximates: ignore-case, '.', back references and class strings give up.
+    /// Over-approximates: '.', back references and class strings give up, and ignore-case may add every non-ASCII character.
     /// </summary>
-    private static (CharSet? Set, bool Nullable) First(RNode n)
+    private static (CharSet? Set, bool Nullable) First(RNode n, bool unicode)
     {
         switch (n)
         {
@@ -231,16 +250,30 @@ internal sealed class JsRegex
             case RAssert:
             case RLook:
                 return (CharSet.Empty, true);
+            case RChar ch when !ch.IgnoreCase:
+                return (CharSet.Single(ch.C), false);
             case RChar ch:
-                return ch.IgnoreCase ? (null, false) : (CharSet.Single(ch.C), false);
+            {
+                // matches x when Canonicalize(x) == Canonicalize(C); without u/v no non-ASCII character canonicalizes to ASCII
+                int k = RegexCase.Canon(ch.C, unicode);
+                return (IgnoreCaseFirst(x => RegexCase.Canon(x, unicode) == k, unicode || k >= 128), false);
+            }
             case RSet set when !set.IgnoreCase:
                 return (set.Negate ? set.Set.Complement() : set.Set, false);
+            case RSet set:
+            {
+                // as compiled: membership of Canonicalize(x) in the closed set
+                var closed = set.Canonical ? set.Set : RegexCase.Close(set.Set, unicode);
+                bool negate = set.Negate;
+                bool nonAscii = unicode || negate || (!closed.IsEmpty && closed.Ranges[^1] >= 128);
+                return (IgnoreCaseFirst(x => closed.Contains(RegexCase.Canon(x, unicode)) != negate, nonAscii), false);
+            }
             case RGroup g:
-                return First(g.Body);
+                return First(g.Body, unicode);
             case RRepeat r:
             {
                 if (r.Max == 0) return (CharSet.Empty, true);
-                var (bs, bn) = First(r.Body);
+                var (bs, bn) = First(r.Body, unicode);
                 return (bs, bn || r.Min == 0);
             }
             case RSeq s:
@@ -248,7 +281,7 @@ internal sealed class JsRegex
                 var acc = CharSet.Empty;
                 foreach (var item in s.Items)
                 {
-                    var (fs, fn) = First(item);
+                    var (fs, fn) = First(item, unicode);
                     if (fs == null) return (null, false);
                     acc = acc.Union(fs);
                     if (!fn) return (acc, false);
@@ -261,7 +294,7 @@ internal sealed class JsRegex
                 bool nullable = false;
                 foreach (var alt in a.Alts)
                 {
-                    var (fs, fn) = First(alt);
+                    var (fs, fn) = First(alt, unicode);
                     if (fs == null) return (null, false);
                     acc = acc.Union(fs);
                     nullable |= fn;
@@ -320,7 +353,12 @@ internal sealed class JsRegex
                     break;
                 }
                 case RChar ch:
-                    if (ch.IgnoreCase) { Code.Add(OpCharI | b); Code.Add(RegexCase.Canon(ch.C, Unicode)); }
+                    if (LegacyIgnoreCaseChars(ch) is { } same)
+                    {
+                        if (same.Count == 1) { Code.Add(OpChar | b); Code.Add(same.Ranges[0]); }
+                        else { Code.Add(OpSet | b); Code.Add(AddSet(same)); Code.Add(0); }
+                    }
+                    else if (ch.IgnoreCase) { Code.Add(OpCharI | b); Code.Add(RegexCase.Canon(ch.C, Unicode)); }
                     else { Code.Add(OpChar | b); Code.Add(ch.C); }
                     break;
                 case RAny any:
@@ -409,20 +447,42 @@ internal sealed class JsRegex
             return l;
         }
 
-        private int AddSet(RSet set)
+        /// <summary>
+        /// The set and matcher flags of a class. Ignore-case matching (Canonicalize(x) in the closed set) becomes plain
+        /// membership in the preimage of the closed set: the same characters, no case mapping per character.
+        /// </summary>
+        private (int Index, int Flags) AddSet(RSet set)
         {
             var s = set.Set;
-            if (set.IgnoreCase && !set.Canonical) s = RegexCase.Close(s, Unicode);
+            if (set.IgnoreCase)
+            {
+                if (!set.Canonical) s = RegexCase.Close(s, Unicode);
+                s = RegexCase.Preimage(s, Unicode);
+            }
+            Sets.Add(s);
+            return (Sets.Count - 1, set.Negate ? 2 : 0);
+        }
+
+        private int AddSet(CharSet s)
+        {
             Sets.Add(s);
             return Sets.Count - 1;
         }
 
         private void EmitSet(RSet set, int b)
         {
+            var (index, flags) = AddSet(set);
             Code.Add(OpSet | b);
-            Code.Add(AddSet(set));
-            Code.Add((set.IgnoreCase ? 1 : 0) | (set.Negate ? 2 : 0));
+            Code.Add(index);
+            Code.Add(flags);
         }
+
+        /// <summary>
+        /// Without u/v, an ignore-case character is compiled as the set of characters with the same canonical form (the
+        /// case table is small); with u/v it stays a canonicalizing comparison, which needs no table.
+        /// </summary>
+        private CharSet? LegacyIgnoreCaseChars(RChar ch) =>
+            ch.IgnoreCase && !Unicode ? RegexCase.Preimage(CharSet.Single(RegexCase.Canon(ch.C, false)), false) : null;
 
         private static bool IsSingleChar(RNode n) => n is RChar or RAny or RSet;
 
@@ -436,10 +496,16 @@ internal sealed class JsRegex
                 Code.Add(OpSimpleLoop | b);
                 switch (rp.Body)
                 {
+                    case RChar ch when LegacyIgnoreCaseChars(ch) is { } same: Code.Add(3); Code.Add(AddSet(same)); Code.Add(0); break;
                     case RChar ch when ch.IgnoreCase: Code.Add(1); Code.Add(RegexCase.Canon(ch.C, Unicode)); Code.Add(0); break;
                     case RChar ch: Code.Add(0); Code.Add(ch.C); Code.Add(0); break;
                     case RAny any: Code.Add(2); Code.Add(any.DotAll ? 1 : 0); Code.Add(0); break;
-                    case RSet set: Code.Add(3); Code.Add(AddSet(set)); Code.Add((set.IgnoreCase ? 1 : 0) | (set.Negate ? 2 : 0)); break;
+                    case RSet set:
+                    {
+                        var (index, flags) = AddSet(set);
+                        Code.Add(3); Code.Add(index); Code.Add(flags);
+                        break;
+                    }
                 }
                 Code.Add(rp.Min);
                 Code.Add(rp.Max);

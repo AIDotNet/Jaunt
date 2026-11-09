@@ -2943,6 +2943,8 @@ T('lookbehind', () => [all(/(?<=\$)\d+(\.\d+)?/g, '$1.50 $2 3.0'), all(/(?<=a\d+
 // ---- ignore case and flags
 T('ignoreCase', () => [ex(/k/i, 'K'), ex(/K/iu, 'K'), ex(/K/i, 'k'), ex(/K/iu, 'K'), all(/[a-z]+/gi, 'ABC def'), ex(/hello/i, 'say HeLLo'), ex(/[^a]/i, 'Ab'), ex(/\w/iu, 'ſ'), ex(/\W/iu, 'ſ'),
   ex(/ß/i, 'ẞ'), ex(/ß/iu, 'ẞ'), all(/[k-l]+/giu, 'KKL'), ex(/(a)\1/i, 'aA'), ex(/s+/i, 'Ssſ')]);
+T('ignoreCaseScan', () => [all(/[xz]{2}/gi, 'axZ zz XY'), all(/[^a-z]/gi, 'ab1C_é'), all(/s/giu, 'aſS'), all(/k/gi, 'aKK'), all(/K/gi, 'kKK'), all(/[à-ÿ]/gi, 'CAFÉ café'),
+  all(/hello|world/gi, 'Hello WORLD'), all(/(?:x|Y)z/gi, 'XZ yZ'), all(/\u{1F600}/giu, 'a\u{1F600}'), ex(/[^\u{1F600}]/iu, '\u{1F600}\u{1F600}b'), all(/\w+@/gi, 'AB@ c@')]);
 T('flags', () => [all(/a.c/gs, 'a\nc abc'), all(/a.c/g, 'a\nc abc'), all(/^\w/gm, 'ab\ncd\r\nef'), all(/\w$/gm, 'ab\ncd'), all(/\Bb/g, 'ab b'), ex(/(?<y>\d{4})-(?<m>\d\d)/d, 'on 2024-05').indices]);
 
 // ---- replace / split / match / matchAll / search with the fast paths
@@ -2979,6 +2981,7 @@ lazyFollow = [[0,"a1b","1",0],[[0,"{{a}}","a"],[6,"{{b\n}}","b\n"]],[0,"xaby","a
 nestedLoops = [[0,"ab",null,0],[0,"abcd","a","bcd","",0],[0,"abac","a","a",0],[6,"abc",0],[0,"ab cd","cd",0],[0,"xxxxxxxxxxy","xxxxxxxxxx",0]]
 lookbehind = [[[1,"1.50",".50"],[7,"2",null]],[[3,"x"],[10,"x"]],[[3,"2"],[7,"3"]],[4,"","1","053",0],[2,"b","a",0],[[0,"a"],[2,"b"],[5,"c"]]]
 ignoreCase = [[null,0],[0,"\u212a",0],[null,0],[0,"K",0],[[0,"ABC"],[4,"def"]],[4,"HeLLo",0],[1,"b",0],[0,"\u17f",0],[null,0],[null,0],[0,"\u1e9e",0],[[0,"K\u212aL"]],[0,"aA","a",0],[0,"Ss",0]]
+ignoreCaseScan = [[[1,"xZ"],[4,"zz"]],[[2,"1"],[4,"_"],[5,"\ue9"]],[[1,"\u17f"],[2,"S"]],[[2,"K"]],[[2,"\u212a"]],[[3,"\uc9"],[8,"\ue9"]],[[0,"Hello"],[6,"WORLD"]],[[0,"XZ"],[3,"yZ"]],[[1,"\ud83d\ude00"]],[4,"b",0],[[0,"AB@"],[4,"c@"]]]
 flags = [[[0,"a\nc"],[4,"abc"]],[[4,"abc"]],[[0,"a"],[3,"c"],[7,"e"]],[[1,"b"],[4,"d"]],[[1,"b"]],null]
 replaceForms = ["05/2024 [2024-05] [] [-06]-06","a1b3c","a--$2b","a{\"n\":\"b\"}c","x","&lt;a &amp; b>","012"]
 splitForms = [["a","b","c"],["a","1","b","2","","2","c"],["a","b"],[""],[],["a","b","c"],["a",",b"],["one","two","three",""]]
