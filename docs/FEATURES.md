@@ -1,6 +1,6 @@
 # Jaunt feature manifest
 
-Version: `0.1.0-alpha.1`. This manifest is the contract the test262 runner uses for skips
+Version: `1.0.0`. This manifest is the contract the test262 runner uses for skips
 (`tools/Jaunt.Test262/Program.cs`, `Manifest`). A feature is listed as supported only if it is implemented in the
 compiler/VM/builtins **and** available identically under CoreCLR and NativeAOT. Syntax the parser accepts but Jaunt
 does not implement is rejected at compile time with a `JsCompileException` — never silently compiled as different
