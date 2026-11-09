@@ -550,7 +550,8 @@ plain and poisoned, test262 100,167/100,169, NativeAOT `verify` on net10.0.
 ## Seventh pass: slow operations against V8 jitless, and NativeAOT settings (2026-11-09)
 
 Single-operation micro-benchmarks against `node --jitless` (V8 13.6) showed that property access, calls, `for-of` and destructuring
-were already level or ahead, and that a few operations lagged. Times are per operation under NativeAOT on an Apple M4:
+were already level or ahead, and that a few operations lagged. Times are per operation under NativeAOT on an Apple M4, with each
+engine's empty loop subtracted:
 
 | Operation | Before | After | V8 jitless |
 | --- | ---: | ---: | ---: |
@@ -574,10 +575,10 @@ method and module function). Making objects and environments smaller on its own 
 
 | Setting | Effect |
 | --- | --- |
-| `OptimizationPreference=Speed` | wall −2.0%, 19 workloads better and 2 worse by more than 3%; compile −6%, first call +2%, 6.8 to 7.1 MB; `nqueens` 0.96 to 0.88 ms, `graph-algos` +3.8%, `event-loop-scheduler` +3.1% |
-| `IlcInstructionSet=apple-m1` | within ±2% on 8 workloads, except `closures` +4% |
+| `OptimizationPreference=Speed` | wall −2.0%, 19 workloads better and 2 worse by more than 3%; compile −6%, first call +2%, 6.8 to 7.1 MB; `nqueens` 0.97 to 0.89 ms, `graph-algos` +3.8%, `event-loop-scheduler` +3.1% |
+| `IlcInstructionSet=apple-m1` | within about ±2% on 8 workloads, except `closures` +4% |
 | `[SkipLocalsInit]` on `RunLoop` | no stable gain |
-| `DOTNET_gcConcurrent=0` | `higher-order` −9%, `map-set` −5%, others about ±1.4% on 6 allocation-heavy workloads |
+| `DOTNET_gcConcurrent=0` | `higher-order` −9%, `map-set` −5%, others within about ±2% on 6 allocation-heavy workloads |
 | `DOTNET_GCgen0size`, `DOTNET_GCgen0MaxBudget`, `DOTNET_GCLOHThreshold` | within about ±2% on those workloads |
 
 `samples/Jaunt.AotHost` now publishes with `Speed`, so NativeAOT figures from here on are not directly comparable with earlier ones.
