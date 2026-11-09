@@ -2962,6 +2962,15 @@ T('longRuns', () => { const a = 'ab'.repeat(30), p = '\u{1F600}'; return [ex(/\w
   ex(/[a-z\uD800-\uDFFF]+/, a + p + a + '!')[0].length, ex(/[a-z\uD800-\uDFFF]+/u, a + p + a + '!')[0].length, ex(/[ab]{20,25}c/, a + 'c'), ex(/[ab]{20,25}/, a)[0].length, ex(/^[a-z ;]+$/i, 'The Lazy; '.repeat(9)) !== null,
   ex(/(\d{17,})x/, '1'.repeat(40) + 'x')[1].length, ex(/([^,]*),([^,]*)$/, 'q'.repeat(30) + ',' + 'w'.repeat(30)).slice(2, 4).map(s => s.length), ex(/\s+$/, 'a' + ' '.repeat(50))[0].length]; });
 
+// ---- leading loops (later starts skipped past the run) and atomic loops before a disjoint class
+T('linearShapes', () => { const x = 'x'.repeat(3000), sp = 'a' + ' '.repeat(3000) + 'a', d = '1'.repeat(3000); return [/[a-z]+\d$/.test(x), /[a-z]+\d$/.test(x + '7'), /\w+@/.test(x), /\w+@/.exec(x + '@')[0].length, /\s+$/.test(sp), ex(/\s+$/, sp + ' ')[0], /[a-z]+;/i.test(x), ex(/[a-z]+;/i, 'AB;'),
+  /\d+x/.test(d), ex(/\d+x/, '12 345x'), /(?:a*)*b/.test('a'.repeat(30)), ex(/(a*)*b/, 'aab'), ex(/a(b)c/g, 'abcabc', 2), ex(/a(b)c/y, 'xabc', 1), all(/q.*?z/g, 'qaz qz q')]; });
+T('leadingLoops', () => [ex(/(\w+)@/, 'ab cd@e'), ex(/\b\w+@/, 'abc d@'), ex(/.*foo/, 'xx\nafoo'), ex(/[a-z]*\d/, 'ab cd9'), ex(/(?<=x)x+y/, 'xxxxy'), ex(/(?<=a)b+c/, 'abbbbabc'), ex(/(?=b)\w+c/, 'abbc'),
+  ex(/\w+(?<=c)d/, 'abcd'), ex(/(\w)+@/, 'ab cd@'), ex(/\w+\1?/, 'aa'), ex(/^\w+@/m, 'ab\ncd@'), ex(/\w+@/u, 'a\u{1F600}b@'), ex(/[^@]+@x/, 'ab@y cd@x'), ex(/\d+(?!\d)\./, '12 34.'),
+  ex(/a+b/, 'aaaxaab'), ex(/[ab]+c/, 'abab bc'), all(/\w+@/g, 'a@ bb@ ccc'), all(/\s+$/gm, 'a  \nb \nc'), 'a  b   '.replace(/\s+$/, ''), 'x1y22'.split(/\d+/)]);
+T('atomicSets', () => [ex(/([a-z]+)(\d)/, 'abc1'), ex(/(\d+)(\s+)(\w)/, '12  x'), ex(/(\w+)(\d)/, 'ab12'), ex(/(a+)([^a])/, 'aaab'), ex(/([a-z]+)([A-Z]+)z/, 'abCDz'), ex(/(\s*)(\S+)/, '  ab'),
+  ex(/(.+)(\n)/, 'ab\ncd'), ex(/(x*)(y+)(x)/, 'xxyyx'), ex(/([^,]+),([^,]+)/, 'a,b,c')]);
+
 L.join('\n');
 """;
 
@@ -2994,6 +3003,9 @@ legacyStatics = [["1","2","12","x","y"],"9","k9"]
 regexpCache = [[true,null],[true,"1"],[true,"a"]]
 long = [4,0,40000,0,5000,0]
 longRuns = [null,null,null,null,null,null,[35,"bababababababababababababc",0],null,true,41,[30,30],null]
+linearShapes = [false,true,false,3001,false,3002,false,[0,"AB;",0],false,[3,"345x",0],false,[0,"aab","aa",0],[3,"abc","b",6],[1,"abc","b",4],[[0,"qaz"],[4,"qz"]]]
+leadingLoops = [[3,"cd@","cd",0],[4,"d@",0],[3,"afoo",0],[3,"cd9",0],[1,"xxxy",0],[6,"bc",0],[1,"bbc",0],[0,"abcd",0],[3,"cd@","d",0],[0,"aa",0],[3,"cd@",0],[3,"b@",0],[3,"y cd@x",0],[3,"34.",0],[4,"aab",0],[5,"bc",0],[[0,"a@"],[3,"bb@"]],[[1,"  "],[5," "]],"a  b",["x","y",""]]
+atomicSets = [[0,"abc1","abc","1",0],[0,"12  x","12","  ","x",0],[0,"ab12","ab1","2",0],[0,"aaab","aaa","b",0],[0,"abCDz","ab","CD",0],[0,"  ab","  ","ab",0],[0,"ab\n","ab","\n",0],[0,"xxyyx","xx","yy","x",0],[0,"a,b","a","b",0]]
 """;
 
     [Fact]

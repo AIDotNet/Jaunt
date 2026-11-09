@@ -149,6 +149,65 @@ internal sealed class JsRegex
                     || MatchOne(kind, arg, flags, 0x2028) || MatchOne(kind, arg, flags, 0x2029)))
                     code[pc + 8] = 1;
             }
+            else if (greedy && (code[q] == OpSet || (code[q] == OpSimpleLoop && code[q + 4] >= 1)))
+            {
+                // the continuation must first match a character of another class: when no character is in both, a
+                // given-back character (one the loop accepted) can never continue
+                var mine = Accepts(kind, arg, flags);
+                var next = code[q] == OpSet ? Accepts(3, code[q + 1], code[q + 2]) : Accepts(code[q + 1], code[q + 2], code[q + 3]);
+                if (mine != null && next != null && mine.Intersect(next).IsEmpty) code[pc + 8] = 1;
+            }
+        }
+        _leadLoop = LeadingLoop();
+    }
+
+    /// <summary>The code points a single-character matcher accepts; null when that is not a plain set (case folding at match time).</summary>
+    private CharSet? Accepts(int kind, int arg, int flags)
+    {
+        switch (kind)
+        {
+            case 0: return CharSet.Single(arg);
+            case 2: return arg != 0 ? CharSet.AllCodePoints : CharSet.FromRanges(new List<(int, int)> { (10, 10), (13, 13), (0x2028, 0x2029) }).Complement();
+            case 3 when (flags & 1) == 0: return (flags & 2) != 0 ? _sets[arg].Complement() : _sets[arg];
+            default: return null;
+        }
+    }
+
+    /// <summary>
+    /// Address of a greedy, unbounded forward simple loop that is the first thing a match consumes (after zero-width
+    /// items only), or -1. When an attempt from position p ran it over [p, e) and failed, an attempt from any q in
+    /// (p, e) fails too: its loop stops at the same e and can only try a subset of the lengths tried from p, and the
+    /// rest of the pattern sees the same input at the same positions. Only the captured text differs, which matters
+    /// only through back references, so a pattern with any back reference has no leading loop.
+    /// </summary>
+    private int _leadLoop = -1;
+
+    private int LeadingLoop()
+    {
+        var code = _code;
+        for (int pc = 0; pc < code.Length; pc += InstrLen(code, pc))
+            if ((code[pc] & 0xFF) == OpBackRef) return -1;
+        int at = 0;
+        while (true)
+        {
+            int op = code[at];
+            switch (op)
+            {
+                case OpSaveStart:
+                case OpSaveEnd:
+                case OpBol:
+                case OpEol:
+                case OpWordB:
+                    at += 2;
+                    continue;
+                case OpLook:
+                    at = code[at + 2];
+                    continue;
+                case OpSimpleLoop:
+                    return code[at + 5] == -1 && code[at + 6] != 0 ? at : -1;
+                default:
+                    return -1;
+            }
         }
     }
 
@@ -180,9 +239,24 @@ internal sealed class JsRegex
     private CharSet? _firstSet;
     private bool HasStartScan => _prefix != null || _firstValues != null || _firstSet != null;
 
+    /// <summary>
+    /// A literal character (BMP, no surrogate) that every match consumes, from the top level of the pattern after its
+    /// first item, or -1: a search where it does not occur at or after the start fails at once. Checked once per search,
+    /// it bounds patterns that would otherwise backtrack at every position of a text that cannot match.
+    /// </summary>
+    private int _required = -1;
+
     private void AnalyseStart(RNode tree)
     {
         var items = tree is RSeq seq ? seq.Items : new List<RNode> { tree };
+        for (int i = items.Count - 1; i >= 1; i--)
+        {
+            if (items[i] is RChar { IgnoreCase: false } rc && (rc.C < 0xD800 || (rc.C > 0xDFFF && rc.C <= 0xFFFF)))
+            {
+                _required = rc.C;
+                break;
+            }
+        }
         if (items.Count > 0 && items[0] is RAssert { Kind: AssertKind.Bol, Multiline: false })
         {
             _anchored = true;
@@ -578,6 +652,8 @@ internal sealed class JsRegex
         private Choice[] _choices = new Choice[64];
         private int _choiceCount;
         private int _steps;
+        /// <summary>Where the leading loop (see <see cref="_leadLoop"/>) stopped in the current attempt, or -1.</summary>
+        private int _leadEnd;
 
         public Matcher(JsRegex re, string input, Action? tick)
         {
@@ -622,6 +698,8 @@ internal sealed class JsRegex
                 if (start != 0) return false;
                 sticky = true;
             }
+            if (re._required >= 0 && start < len && s.AsSpan(start).IndexOf((char)re._required) < 0) return false;
+            if (re._required >= 0 && start >= len) return false;
             bool scan = !sticky && re.HasStartScan;
             int capLen = re.CaptureCount * 2;
             for (int at = start; at <= len;)
@@ -634,6 +712,7 @@ internal sealed class JsRegex
                 Caps.AsSpan(0, capLen).Fill(-1);
                 _undoCount = 0;
                 _choiceCount = 0;
+                _leadEnd = -1;
                 int end = Run(0, at);
                 if (end >= 0)
                 {
@@ -642,7 +721,9 @@ internal sealed class JsRegex
                     return true;
                 }
                 if (sticky) return false;
-                at += re._unicode && at + 1 < len && char.IsHighSurrogate(s[at]) && char.IsLowSurrogate(s[at + 1]) ? 2 : 1;
+                // no position inside the run the leading loop consumed can begin a match either
+                if (_leadEnd > at) at = _leadEnd;
+                else at += re._unicode && at + 1 < len && char.IsHighSurrogate(s[at]) && char.IsLowSurrogate(s[at + 1]) ? 2 : 1;
             }
             return false;
         }
@@ -1007,6 +1088,7 @@ internal sealed class JsRegex
                                 count++;
                                 Step();
                             }
+                            if (pc == re._leadLoop) _leadEnd = pos;
                             // an atomic loop (see AnalyseLoops) has no use for the characters it could give back
                             if (count > min && code[pc + 8] == 0) PushChoice(1, next, pos, count - min, pc);
                         }
