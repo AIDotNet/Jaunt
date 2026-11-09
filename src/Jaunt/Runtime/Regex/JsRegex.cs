@@ -123,6 +123,7 @@ internal sealed class JsRegex
         for (int pc = 0; pc < code.Length; pc += InstrLen(code, pc))
         {
             if (code[pc] != OpSimpleLoop) continue;   // forward loops only
+            if (code[pc + 1] == 3 && (code[pc + 3] & 1) == 0) AddLoopStops(code[pc + 2], (code[pc + 3] & 2) != 0);
             int q = pc + 9;
             for (int hops = 0; hops < 16; hops++)
             {
@@ -149,6 +150,23 @@ internal sealed class JsRegex
                     code[pc + 8] = 1;
             }
         }
+    }
+
+    /// <summary>
+    /// Per set index, for forward class loops: the code units a vectorised search looks for to find where a long run
+    /// ends (the members, searched with IndexOfAnyExcept, or for a negated class the excluded characters, with IndexOfAny).
+    /// Only when that stops exactly where the code-unit loop does: in Unicode mode at a surrogate too.
+    /// </summary>
+    private System.Buffers.SearchValues<char>?[]? _loopStops;
+
+    private void AddLoopStops(int setIndex, bool negate)
+    {
+        if (_loopStops?[setIndex] != null || (negate && _unicode)) return;
+        var bmp = _sets[setIndex].Intersect(CharSet.Range(0, 0xFFFF));
+        if (bmp.IsEmpty || bmp.Count > 256) return;
+        if (_unicode && !bmp.Intersect(CharSet.Range(0xD800, 0xDFFF)).IsEmpty) return;
+        _loopStops ??= new System.Buffers.SearchValues<char>?[_sets.Length];
+        _loopStops[setIndex] = System.Buffers.SearchValues.Create(Chars(bmp));
     }
 
     /// <summary>The pattern can only match at position 0 (a leading <c>^</c> without the m flag).</summary>
@@ -951,8 +969,19 @@ internal sealed class JsRegex
                             var set = re._sets[arg];
                             bool negate = (flags & 2) != 0;
                             int limit = greedy ? (max == -1 ? int.MaxValue : max) : min;
-                            while (count < limit && pos < s.Length)
+                            int end = (int)Math.Min((long)pos + limit, s.Length);
+                            while (pos < end)
                             {
+                                if (count == 16 && re._loopStops?[arg] is { } stops)
+                                {
+                                    // a long run: find its end with a vectorised search (see AnalyseLoops)
+                                    var span = s.AsSpan(pos, end - pos);
+                                    int i = negate ? span.IndexOfAny(stops) : span.IndexOfAnyExcept(stops);
+                                    int n = i < 0 ? span.Length : i;
+                                    pos += n;
+                                    count += n;
+                                    break;
+                                }
                                 int c = s[pos];
                                 if ((unicode && (uint)(c - 0xD800) <= 0x7FF) || set.Contains(c) == negate) break;
                                 pos++;

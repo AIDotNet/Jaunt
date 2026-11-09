@@ -2958,6 +2958,10 @@ T('regexpCache', () => { const pats = ['^[^@\\s]+@[^@\\s]+\\.\\w+$', '\\d+', '[a
 // ---- long inputs (stack growth, ticks)
 T('long', () => { const s = 'ab'.repeat(5000) + 'c'; return [ex(/(ab)*c/, s).length, ex(/(?:ab)+?c/, s)[0], 'x'.repeat(20000).replace(/x/g, 'yy').length, ex(/[^c]*c/, s)[0], all(/b/g, s).length, ex(/a.*?c/, s)[0]]; });
 
+T('longRuns', () => { const a = 'ab'.repeat(30), p = '\u{1F600}'; return [ex(/\w+/u, a + p + a)[0].length, ex(/[a-z]+/, a + 'C' + a)[0].length, ex(/[^"]+"/, a + '"' + a)[0].length, ex(/[^x]+/u, a + p + 'x')[0].length,
+  ex(/[a-z\uD800-\uDFFF]+/, a + p + a + '!')[0].length, ex(/[a-z\uD800-\uDFFF]+/u, a + p + a + '!')[0].length, ex(/[ab]{20,25}c/, a + 'c'), ex(/[ab]{20,25}/, a)[0].length, ex(/^[a-z ;]+$/i, 'The Lazy; '.repeat(9)) !== null,
+  ex(/(\d{17,})x/, '1'.repeat(40) + 'x')[1].length, ex(/([^,]*),([^,]*)$/, 'q'.repeat(30) + ',' + 'w'.repeat(30)).slice(2, 4).map(s => s.length), ex(/\s+$/, 'a' + ' '.repeat(50))[0].length]; });
+
 L.join('\n');
 """;
 
@@ -2989,6 +2993,7 @@ matchForms = [["1","22"],["1","1",null],null,1,-1,[[0,"1"],[2,"2"]]]
 legacyStatics = [["1","2","12","x","y"],"9","k9"]
 regexpCache = [[true,null],[true,"1"],[true,"a"]]
 long = [4,0,40000,0,5000,0]
+longRuns = [null,null,null,null,null,null,[35,"bababababababababababababc",0],null,true,41,[30,30],null]
 """;
 
     [Fact]
