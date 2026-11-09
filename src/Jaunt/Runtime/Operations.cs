@@ -398,6 +398,7 @@ internal static class Operations
     {
         if (target.IsNotObject) throw JsErrors.TypeError(realm, "Right-hand side of 'instanceof' is not an object");
         var t = target.AsObjectUnchecked;
+        if (InheritsDefaultHasInstance(realm, t)) return OrdinaryHasInstance(realm, t, v);
         var instOf = t.Get(JsSymbol.HasInstance, target);
         if (!instOf.IsNullOrUndefined)
         {
@@ -408,14 +409,34 @@ internal static class Operations
         return OrdinaryHasInstance(realm, t, v);
     }
 
+    /// <summary>
+    /// Whether a closure's @@hasInstance is %Function.prototype%'s, which is not writable and not configurable: no object
+    /// from it up to %Function.prototype% can hold a symbol key. Anything else on the way takes the general lookup.
+    /// </summary>
+    private static bool InheritsDefaultHasInstance(Realm realm, JsObject t)
+    {
+        if (t is not JsClosure) return false;
+        var fp = realm.FunctionPrototype;
+        for (var p = t; p != null; p = p.Proto)
+        {
+            if (ReferenceEquals(p, fp)) return true;
+            if (p.IsExotic || p.Dict != null || p.Shape.HasSymbolKeys) return false;
+        }
+        return false;
+    }
+
     public static bool OrdinaryHasInstance(Realm realm, JsObject c, in JsValue o)
     {
         if (c is not JsFunctionObject) return false;
         if (c is JsBoundFunction bf) return InstanceOf(realm, o, JsValue.FromObject(bf.Target));
         if (o.IsNotObject) return false;
-        var p = c.Get("prototype");
-        if (p.IsNotObject) throw JsErrors.TypeError(realm, "Function has non-object prototype in instanceof check");
-        var proto = p.AsObjectUnchecked;
+        JsObject? proto = (c as JsClosure)?.PrototypeFast();
+        if (proto == null)
+        {
+            var p = c.Get("prototype");
+            if (p.IsNotObject) throw JsErrors.TypeError(realm, "Function has non-object prototype in instanceof check");
+            proto = p.AsObjectUnchecked;
+        }
         var obj = o.AsObjectUnchecked.GetPrototypeOf();
         while (obj != null)
         {
@@ -488,6 +509,7 @@ internal static class Operations
     public static JsObject GetPrototypeFromConstructor(Realm realm, JsObject? newTarget, JsObject fallback)
     {
         if (newTarget == null) return fallback;
+        if (newTarget is JsClosure nc && nc.PrototypeFast() is { } fast) return fast;
         var p = newTarget.Get("prototype");
         if (p.IsObject) return p.AsObjectUnchecked;
         var fr = GetFunctionRealm(realm, newTarget);

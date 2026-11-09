@@ -680,8 +680,7 @@ internal sealed partial class Vm
         if (!ReferenceEquals(f.Env, env)) f.Env = env;
         f.EnvDepth = 0;
         f.Suspend = SuspendKind.None;
-        var box = c.ThisBox;
-        if (box != null || f.ThisBox != null) f.ThisBox = box;
+        if (c.HasRareParts || f.ThisBox != null) BindRareParts(f, c, t);
         var realm = Realm;
         var calleeRealm = c.Realm;
         if (!ReferenceEquals(realm, calleeRealm))
@@ -694,8 +693,6 @@ internal sealed partial class Vm
         if ((t.Flags & FunctionFlags.Arrow) != 0)
         {
             f.This = c.BoundThis;
-            var nt = c.BoundNewTarget;
-            if (nt.Ref != null) f.NewTarget = nt;
         }
         else
         {
@@ -730,8 +727,7 @@ internal sealed partial class Vm
         if (!ReferenceEquals(f.Env, env)) f.Env = env;
         f.EnvDepth = 0;
         f.Suspend = SuspendKind.None;
-        var box = c.ThisBox;
-        if (box != null || f.ThisBox != null) f.ThisBox = box;
+        if (c.HasRareParts || f.ThisBox != null) BindRareParts(f, c, t);
         var realm = Realm;
         var calleeRealm = c.Realm;
         var flags = FrameFlags.None;
@@ -745,8 +741,6 @@ internal sealed partial class Vm
         if ((t.Flags & FunctionFlags.Arrow) != 0)
         {
             f.This = c.BoundThis;
-            var nt = c.BoundNewTarget;
-            if (nt.Ref != null) f.NewTarget = nt;
         }
         else if (thisIndex < 0)
         {
@@ -770,6 +764,18 @@ internal sealed partial class Vm
             else f.This = CoerceSloppyThis(calleeRealm, tv);
         }
         Sp++;
+    }
+
+    /// <summary>The per-call state of the closures that have rare parts, and clearing what a pooled frame kept from an earlier call. Out of line: frame setup is inlined into the interpreter loop.</summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static void BindRareParts(Frame f, JsClosure c, FunctionTemplate t)
+    {
+        f.ThisBox = c.ThisBox;
+        if ((t.Flags & FunctionFlags.Arrow) != 0)
+        {
+            var nt = c.BoundNewTarget;
+            if (nt.Ref != null) f.NewTarget = nt;
+        }
     }
 
     /// <summary>OrdinaryCallBindThis for a sloppy function and a primitive, null or undefined receiver.</summary>

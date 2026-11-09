@@ -90,6 +90,9 @@ internal sealed partial class Vm
                 obj.CreateDataPropertyOrThrow(key, regs[bp + code[pc + 3]]);
                 return pc + 4;
             }
+            case Op.DefineFieldK:
+                DefineFieldProp(regs[bp + code[pc + 1]], k[code[pc + 2]], regs[bp + code[pc + 3]], ref f.Feedback.Ics[code[pc + 4]]);
+                return pc + 5;
             case Op.DefineAccessor:
                 DefineAccessorOp(regs[bp + code[pc + 1]].AsObjectUnchecked, regs[bp + code[pc + 2]], regs[bp + code[pc + 3]], code[pc + 4]);
                 return pc + 5;

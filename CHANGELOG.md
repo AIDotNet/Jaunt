@@ -8,6 +8,9 @@ counts as public API.
 ### Performance
 
 - Script compilation is about 16% faster and allocates about 11% less, measured under NativeAOT on the benchmark corpus.
+- `Object.assign` into an empty object, `instanceof`, `new` and class fields with constant names are faster.
+- Repeated `eval` of the same source reuses its compiled code, up to a bounded total source length.
+- Closures and environments are smaller.
 
 ## 1.0.1 (2026-11-08)
 

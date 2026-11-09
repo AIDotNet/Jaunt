@@ -61,12 +61,14 @@ internal static class ObjectBuiltins
         {
             var realm = a.Realm;
             var to = Operations.ToObject(realm, a[0]);
-            var keys = new List<PropertyKey>();
+            List<PropertyKey>? keys = null;
             for (int i = 1; i < a.Length; i++)
             {
                 var src = a[i];
                 if (src.IsNullOrUndefined) continue;
+                if (src.IsObject && realm.Vm.TryAssignToEmptyObject(to, src.AsObjectUnchecked)) continue;
                 var from = Operations.ToObject(realm, src);
+                keys ??= new List<PropertyKey>();
                 keys.Clear();
                 from.OwnPropertyKeys(keys);
                 foreach (var k in keys)

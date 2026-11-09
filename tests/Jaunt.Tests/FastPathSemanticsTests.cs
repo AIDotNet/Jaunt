@@ -605,6 +605,167 @@ out.join('\n')
         for (int i = 0; i < expected.Length; i++) Assert.True(expected[i] == got[i], $"line {i}: expected {expected[i]} but got {got[i]}");
     }
 
+    // Closures, environments and objects with their rare parts apart, Object.assign into an empty object, new and instanceof
+    // reading the prototype slot, class fields with a cache, and eval reusing compiled code. Expected output from Node.
+    private const string LayoutAndCachesScript = """
+const out = [];
+const log = (...a) => out.push(JSON.stringify(a));
+const keys = o => Reflect.ownKeys(o).map(String);
+// --- closure and object layout
+{ const f = function (a) { return a; }; f.x = 1; f.y = 2; f.z = 3; log('fnProps', Object.keys(f), f.name, f.length, typeof f.prototype); }
+{ function F() {} delete F.name; log('fnDelete', F.name, Object.keys(F)); Object.defineProperty(F, 'name', { value: 'G' }); log(F.name); }
+{ let o = {}; for (let i = 0; i < 80; i++) o['k' + i] = i; delete o.k5; log('dict', Object.keys(o).length, o.k79, o.k5, 'k5' in o); o.k5 = 1; log(Object.keys(o).at(-1)); }
+{ const o = { a: 1 }; o.b = 2; o.c = 3; o.d = 4; o.e = 5; o.f = 6; o.g = 7; log('grow', o, Object.keys(o)); }
+{ const s = { a: 1, b: 2 }; const c = { ...s, c: 3, d: 4, e: 5 }; const e = { ...s }; e.x = 1; const w = { z: 0, ...s, a: 9 }; log('spread', c, e, w, s); }
+{ function F() { return (() => new.target)(); } log('nt', new F() === undefined, typeof F(), F() === undefined); function G() { const ar = () => new.target; return { v: ar() === G }; } log(new G().v, G().v); }
+{ class B { m() { return 'b'; } static s() { return 'sb'; } } class D extends B { m() { const f = () => super.m(); return f() + 'd'; } static s() { return super.s() + 'd'; } } log('home', new D().m(), D.s()); const o = { __proto__: { h() { return 1; } }, h() { return super.h() + 1; } }; log(o.h()); }
+{ class B { constructor() { this.a = 1; } } class D extends B { constructor() { const f = () => { super(); }; f(); this.b = 2; } } log('thisbox', new D()); }
+// --- with and eval environments
+{ const o = { p: 1 }; with (o) { p = 2; var q = p; } log('with', o, q); function f() { eval('var ev = 1'); return ev; } log(f()); function g(a) { eval('a = 5'); return a; } log(g(1)); function h() { let l = 1; return eval('l + 1'); } log(h()); }
+{ function f() { eval('var x = 1'); return () => x; } log('evalClosure', f()()); const fs = []; for (let i = 0; i < 3; i++) { eval(''); fs.push(() => i); } log(fs.map(g => g())); }
+// --- Object.assign
+{ const s = { a: 1, b: 2 }; const t = Object.assign({}, s); t.c = 3; s.a = 9; log('assign', t, s, Object.assign({}, s, { c: 1 }), Object.assign({}, null, undefined, 'ab', 5, [7])); }
+{ const seen = []; Object.defineProperty(Object.prototype, 'tr', { set(v) { seen.push(v); }, configurable: true }); const r = Object.assign({}, { tr: 1, u: 2 }); delete Object.prototype.tr; log('protoSetter', seen, r, Object.keys(r)); }
+{ Object.defineProperty(Object.prototype, 'ro', { value: 1, writable: false, configurable: true }); let e = 'no'; try { Object.assign({}, { ro: 2 }); } catch (x) { e = x.constructor.name; } delete Object.prototype.ro; log('protoReadonly', e); }
+{ const s = JSON.parse('{"__proto__": {"x": 1}, "y": 2}'); const r = Object.assign({}, s); log('protoKey', Object.keys(r), r.x, Object.getPrototypeOf(r) === Object.prototype); }
+{ const g = { get a() { return 1; }, b: 2 }; log('getterSrc', Object.getOwnPropertyDescriptor(Object.assign({}, g), 'a')); const h = Object.defineProperty({ v: 1 }, 'hid', { value: 2, enumerable: false }); log(Object.keys(Object.assign({}, h)), 'hid' in Object.assign({}, h)); const ro = Object.freeze({ a: 1 }); const c = Object.assign({}, ro); c.a = 2; log(c, Object.isFrozen(c)); const sy = Symbol('s'); log(Object.getOwnPropertySymbols(Object.assign({}, { [sy]: 1 })).length, Object.assign({}, { 1: 'a', 0: 'b' })); }
+{ let e = 'no'; try { Object.assign(Object.preventExtensions({}), { a: 1 }); } catch (x) { e = x.constructor.name; } log('nonExt', e); const n = Object.create(null); log(Object.keys(Object.assign(n, { a: 1 })), Object.getPrototypeOf(n)); class C { set a(v) { this.z = v; } } log(Object.assign(new C(), { a: 1 }).z); const a = []; log(Object.assign(a, { 0: 'x', length: 3 }).length, Object.keys(Object.assign({ k: 1 }, { j: 2 }))); const p = { pp: 1 }; const ch = Object.create(p); ch.own = 1; log(Object.assign({}, ch)); const self = { a: 1 }; log(Object.assign(self, self)); log(Object.assign({}, {}), Object.keys(Object.assign({}, {}, { q: 1 }))); }
+// --- new and the prototype property
+{ function F() {} F.prototype = { k: 1 }; log('proto', new F().k); F.prototype = 5; log(Object.getPrototypeOf(new F()) === Object.prototype); F.prototype = null; log(Object.getPrototypeOf(new F()) === Object.prototype); function G() {} const p0 = G.prototype; log(Object.getPrototypeOf(new G()) === p0, G.prototype.constructor === G); }
+{ function F() {} F.a = 1; delete F.a; for (let i = 0; i < 70; i++) F['k' + i] = i; delete F.k1; F.prototype = { dict: 1 }; log('dictCtor', new F().dict, new F() instanceof F); class K {} log(Object.getOwnPropertyDescriptor(K, 'prototype').writable, new K() instanceof K); const tgt = function () {}; const r = Reflect.construct(function () { return this; }, [], tgt); log(Object.getPrototypeOf(r) === tgt.prototype); const px = new Proxy(function () {}, { get(t, k) { return k === 'prototype' ? { viaProxy: 1 } : t[k]; } }); log(new px().viaProxy, Object.getPrototypeOf(Reflect.construct(function () {}, [], px)).viaProxy); }
+{ function F() {} Object.defineProperty(F, 'prototype', { value: { fixed: 1 }, writable: false }); log('roProto', new F().fixed); F.prototype = {}; log(new F().fixed); const arrow = () => {}; log(arrow.prototype, arrow.hasOwnProperty('prototype')); arrow.prototype = { a: 1 }; arrow.other = 1; log(({}) instanceof Object); let err = 'no'; try { new arrow(); } catch (x) { err = x.constructor.name; } log(err); }
+// --- instanceof
+{ class A {} class B extends A {} log('io', new B() instanceof A, new A() instanceof B, 1 instanceof A, null instanceof Object, ({}) instanceof Object, [] instanceof Array, (() => {}) instanceof Function); }
+{ class E { static [Symbol.hasInstance](v) { return v === 1; } } class D extends E {} log('hasInst', 1 instanceof E, 2 instanceof E, 1 instanceof D, new D() instanceof D); const f = function () {}; Object.defineProperty(f, Symbol.hasInstance, { value: () => true }); log(0 instanceof f); }
+{ const b = function () {}.bind(); function F() {} const bf = F.bind(); log('bound', new F() instanceof bf, new bf() instanceof F); const px = new Proxy(F, {}); log(new F() instanceof px); let e = 'no'; try { ({}) instanceof {}; } catch (x) { e = x.constructor.name; } log(e); e = 'no'; try { ({}) instanceof 5; } catch (x) { e = x.constructor.name; } log(e); e = 'no'; try { const ar = () => {}; ({}) instanceof ar; } catch (x) { e = x.constructor.name; } log(e); }
+{ function F() {} const o = new F(); F.prototype = {}; log('protoChange', o instanceof F, new F() instanceof F); const g = function () {}; Object.setPrototypeOf(g, { [Symbol.hasInstance]: () => 'y' }); log(1 instanceof g); const h = function () {}; Object.setPrototypeOf(h, null); log(Function.prototype[Symbol.hasInstance].call(h, {}), Object.getOwnPropertyDescriptor(Function.prototype, Symbol.hasInstance).writable); let e = 'no'; try { new Object() instanceof h; } catch (x) { e = x.constructor.name; } log(e); const pr = new Proxy({}, { getPrototypeOf() { return F.prototype; } }); log(pr instanceof F); }
+{ function F() {} F.prototype = 5; let e = 'no'; try { ({}) instanceof F; } catch (x) { e = x.constructor.name; } log('badProto', e, 1 instanceof F); }
+// --- class fields
+{ class A { a = 1; b = this.a + 1; 'c d' = 3; 0 = 'zero'; [`x${1}`] = 4; __proto__ = 5; } const o = new A(); log('fields', Object.keys(o), o.b, o['c d'], o[0], o.x1, Object.getOwnPropertyDescriptor(o, '__proto__'), Object.getPrototypeOf(o) === A.prototype); }
+{ class B { constructor(r) { return r; } } class D extends B { f = 1; g = 2; } log('ret', new D({ z: 0 })); const fr = Object.preventExtensions({}); let e = 'no'; try { new D(fr); } catch (x) { e = x.constructor.name; } log(e, Object.keys(fr)); for (let i = 0; i < 2; i++) { log(new D({ z: i })); } e = 'no'; try { new D(Object.freeze({})); } catch (x) { e = x.constructor.name; } log(e); const logp = []; const px = new Proxy({}, { defineProperty(t, k, d) { logp.push(k); return Reflect.defineProperty(t, k, d); } }); new D(px); log(logp); const arr = new D([]); log(Array.isArray(arr), arr.f, arr.length); class Idx extends B { 0 = 'x'; 1 = 'y'; } const ar2 = new Idx([]); log(ar2.length, ar2[1], ar2); log(new Idx({})); const ro = {}; Object.defineProperty(ro, 'f', { value: 0, configurable: false, writable: false }); e = 'no'; try { new D(ro); } catch (x) { e = x.constructor.name; } log(e); const ov = { f: 'old' }; log(new D(ov), Object.getOwnPropertyDescriptor(ov, 'f').writable); }
+{ class S { set a(v) { throw new Error('no setter call'); } } class T extends S { a = 1; } log('fieldNotSet', Object.keys(new T())); class P { static s = 1; static t = P.s + 1; v = 1; } log(P.s, P.t, new P().v, Object.keys(P)); for (let i = 0; i < 12; i++) { class Q { [`k${i % 2}`] = i; n = i; } log(new Q()); } }
+// --- eval reuses compiled code
+{ const fs = []; for (let i = 0; i < 3; i++) fs.push((0, eval)('(function () { return 1; })')); log('evalFresh', fs[0] === fs[1], fs[0]() + fs[1]()); const tags = []; const tag = s => s; for (let i = 0; i < 2; i++) { globalThis.__t = tag; tags.push((0, eval)('__t`x`')); } delete globalThis.__t; log(tags[0] === tags[1]); const rs = []; for (let i = 0; i < 2; i++) rs.push(eval('/a/g')); rs[0].lastIndex = 5; log(rs[0] === rs[1], rs[1].lastIndex); }
+{ function s() { return eval('var v1 = 1; typeof v1 + (function () { return this === undefined; })()'); } function t() { 'use strict'; return eval('var v1 = 1; typeof v1 + (function () { return this === undefined; })()'); } log('evalStrict', s(), s(), t(), t()); function u() { 'use strict'; eval('var leak = 1'); return typeof leak; } function w() { eval('var leak = 1'); return typeof leak; } log(u(), w(), u(), w()); const src = 'with ({}) {}'; const r = []; function a() { return eval(src); } function b() { 'use strict'; try { return eval(src); } catch (e) { return e.constructor.name; } } r.push(a(), b(), a(), b()); log(r); }
+{ class C { m() { return eval('super.toString === Object.prototype.toString'); } } let e = 'no'; const code = 'super.x'; function f() { try { return eval(code); } catch (x) { return x.constructor.name; } } log('evalSuper', new C().m(), new C().m(), f(), f()); function nt() { return eval('new.target === undefined'); } log(nt(), nt()); let e2 = []; for (let i = 0; i < 2; i++) { try { (0, eval)('new.target'); } catch (x) { e2.push(x.constructor.name); } } log(e2); for (let i = 0; i < 2; i++) { try { eval('1 +'); } catch (x) { e2.push(x.constructor.name); } } log(e2); class P { #p = 1; g() { return eval('this.#p'); } } class Q { #q = 2; g() { return eval('this.#q'); } } log(new P().g(), new Q().g()); let e3 = 'no'; try { class R { g() { return eval('this.#p'); } } new R().g(); } catch (x) { e3 = x.constructor.name; } log(e3); }
+{ let n = 0; for (let i = 0; i < 200; i++) n += eval('1 + ' + (i % 90)); log('evalMany', n); const v = []; for (let i = 0; i < 3; i++) { v.push(eval('let q = ' + i + '; q')); let x = i; v.push(eval('x * 2')); } log(v); let big = 'var bb = 0;'; for (let i = 0; i < 3000; i++) big += ' bb += ' + i + ';'; log(eval(big + ' bb'), eval(big + ' bb')); }
+out.join('\n')
+""";
+
+    private const string LayoutAndCachesExpected = """
+["fnProps",["x","y","z"],"f",1,"object"]
+["fnDelete","",[]]
+["G"]
+["dict",79,79,null,false]
+["k5"]
+["grow",{"a":1,"b":2,"c":3,"d":4,"e":5,"f":6,"g":7},["a","b","c","d","e","f","g"]]
+["spread",{"a":1,"b":2,"c":3,"d":4,"e":5},{"a":1,"b":2,"x":1},{"z":0,"a":9,"b":2},{"a":1,"b":2}]
+["nt",false,"undefined",true]
+[true,false]
+["home","bd","sbd"]
+[2]
+["thisbox",{"a":1,"b":2}]
+["with",{"p":2},2]
+[1]
+[5]
+[2]
+["evalClosure",1]
+[[0,1,2]]
+["assign",{"a":1,"b":2,"c":3},{"a":9,"b":2},{"a":9,"b":2,"c":1},{"0":7,"1":"b"}]
+["protoSetter",[1],{"u":2},["u"]]
+["protoReadonly","TypeError"]
+["protoKey",["y"],1,false]
+["getterSrc",{"value":1,"writable":true,"enumerable":true,"configurable":true}]
+[["v"],false]
+[{"a":2},false]
+[1,{"0":"b","1":"a"}]
+["nonExt","TypeError"]
+[["a"],null]
+[1]
+[3,["k","j"]]
+[{"own":1}]
+[{"a":1}]
+[{},["q"]]
+["proto",1]
+[true]
+[true]
+[true,true]
+["dictCtor",1,true]
+[false,true]
+[true]
+[1,1]
+["roProto",1]
+[1]
+[null,false]
+[true]
+["TypeError"]
+["io",true,false,false,false,true,true,true]
+["hasInst",true,false,true,false]
+[true]
+["bound",true,true]
+[true]
+["TypeError"]
+["TypeError"]
+["TypeError"]
+["protoChange",false,true]
+[true]
+[false,false]
+["no"]
+[true]
+["badProto","TypeError",false]
+["fields",["0","a","b","c d","x1","__proto__"],2,3,"zero",4,{"value":5,"writable":true,"enumerable":true,"configurable":true},true]
+["ret",{"z":0,"f":1,"g":2}]
+["TypeError",[]]
+[{"z":0,"f":1,"g":2}]
+[{"z":1,"f":1,"g":2}]
+["TypeError"]
+[["f","g"]]
+[true,1,0]
+[2,"y",["x","y"]]
+[{"0":"x","1":"y"}]
+["TypeError"]
+[{"f":1,"g":2},true]
+["fieldNotSet",["a"]]
+[1,2,1,["s","t"]]
+[{"k0":0,"n":0}]
+[{"k1":1,"n":1}]
+[{"k0":2,"n":2}]
+[{"k1":3,"n":3}]
+[{"k0":4,"n":4}]
+[{"k1":5,"n":5}]
+[{"k0":6,"n":6}]
+[{"k1":7,"n":7}]
+[{"k0":8,"n":8}]
+[{"k1":9,"n":9}]
+[{"k0":10,"n":10}]
+[{"k1":11,"n":11}]
+["evalFresh",false,2]
+[false]
+[false,0]
+["evalStrict","numberfalse","numberfalse","numbertrue","numbertrue"]
+["undefined","number","undefined","number"]
+[[null,"SyntaxError",null,"SyntaxError"]]
+["evalSuper",true,true,"SyntaxError","SyntaxError"]
+[true,true]
+[["SyntaxError","SyntaxError"]]
+[["SyntaxError","SyntaxError","SyntaxError","SyntaxError"]]
+[1,2]
+["SyntaxError"]
+["evalMany",8400]
+[[0,0,1,2,2,4]]
+[4498500,4498500]
+""";
+
+    [Fact]
+    public void LayoutsAssignInstanceofFieldsAndEvalCacheMatchReferenceBehavior()
+    {
+        using var engine = new JsEngine();
+        var got = engine.Evaluate(LayoutAndCachesScript).AsString().Split('\n');
+        var expected = LayoutAndCachesExpected.ReplaceLineEndings("\n").TrimEnd('\n').Split('\n');
+        Assert.Equal(expected.Length, got.Length);
+        for (int i = 0; i < expected.Length; i++) Assert.True(expected[i] == got[i], $"line {i}: expected {expected[i]} but got {got[i]}");
+    }
+
     private const string PagedScript = """
 const out = {};
 const N = 9000;

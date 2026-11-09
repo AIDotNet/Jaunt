@@ -2080,10 +2080,13 @@ internal sealed partial class CodeGen
                 }
                 else
                 {
-                    int k = Temp();
-                    if (pd.Computed) LoadBinding(info.KeyBindings[pd], k, false);
-                    else _fb.Emit(Op.LoadConst, k, _fb.Const(sname!));
-                    _fb.Emit(Op.DefineProp, thisR, k, v);
+                    if (pd.Computed)
+                    {
+                        int k = Temp();
+                        LoadBinding(info.KeyBindings[pd], k, false);
+                        _fb.Emit(Op.DefineProp, thisR, k, v);
+                    }
+                    else _fb.Emit(Op.DefineFieldK, thisR, _fb.Const(sname!), v, _fb.NewIc());
                 }
                 if (st >= 0)
                 {

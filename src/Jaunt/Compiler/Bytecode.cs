@@ -65,6 +65,8 @@ internal enum Op : int
     Debugger,
     /// <summary>Calls a rarely used runtime helper (<see cref="Jaunt.Runtime.ClassIntrinsic"/>): dst, id, args start, count.</summary>
     Intrinsic,
+    /// <summary>A class field with a constant name: this, name, value, inline cache.</summary>
+    DefineFieldK,
     Count_,
 }
 
@@ -109,7 +111,7 @@ internal static class OpInfo
         S(Op.GetProp, R, R, K, C); S(Op.SetProp, R, K, R, C); S(Op.GetElem, R, R, R, C); S(Op.SetElem, R, R, R, C);
         S(Op.DelProp, R, R, K); S(Op.DelElem, R, R, R);
         S(Op.GetSuper, R, R, R, R); S(Op.SetSuper, R, R, R, R); S(Op.LoadSuperBase, R);
-        S(Op.DefineProp, R, R, R); S(Op.DefinePropK, R, K, R, C); S(Op.DefineAccessor, R, R, R, I); S(Op.DefineMethod, R, R, R); S(Op.SetProto, R, R);
+        S(Op.DefineProp, R, R, R); S(Op.DefinePropK, R, K, R, C); S(Op.DefineFieldK, R, K, R, C); S(Op.DefineAccessor, R, R, R, I); S(Op.DefineMethod, R, R, R); S(Op.SetProto, R, R);
         S(Op.CopyDataProps, R, R); S(Op.ObjectRest, R, R, O, N);
         S(Op.NewObject, R, I); S(Op.NewArray, R, I); S(Op.ArrayPush, R, R); S(Op.ArrayPushHole, R); S(Op.ArraySpread, R, R, I);
         foreach (var op in new[] { Op.Add, Op.Sub, Op.Mul, Op.Div, Op.Mod, Op.Exp, Op.BitAnd, Op.BitOr, Op.BitXor, Op.Shl, Op.Shr, Op.UShr,
