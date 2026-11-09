@@ -282,11 +282,11 @@ internal sealed partial class Vm
                                 {
                                     if (ov.Ref is JsArray arr)
                                     {
-                                        double dk = kv.Num;
+                                        double dk = JsValue.LoadNumber(kv);
                                         uint idx = (uint)dk;
                                         if (idx == dk && arr.TryGetDense(idx, out var ev)) { JsValue.Store(ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)), ev); ip = ref Unsafe.Add(ref ip, 5); continue; }
                                     }
-                                    else if (ov.Ref is JsTypedArray ta && TypedGetFast(ta, kv.Num, ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)))) { ip = ref Unsafe.Add(ref ip, 5); continue; }
+                                    else if (ov.Ref is JsTypedArray ta && TypedGetFast(ta, JsValue.LoadNumber(kv), ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)))) { ip = ref Unsafe.Add(ref ip, 5); continue; }
                                 }
                                 // ordinary object with a computed key: cached (shape, key) → slot
                                 ref var ic = ref f.Feedback.Ics[Unsafe.Add(ref ip, 4)];
@@ -318,7 +318,7 @@ internal sealed partial class Vm
                             {
                                 if (kv.IsNumber && ov.Ref is JsArray arr && arr.Dense)
                                 {
-                                    double dk = kv.Num;
+                                    double dk = JsValue.LoadNumber(kv);
                                     uint idx = (uint)dk;
                                     if (idx == dk && idx < arr.Length && idx < (uint)arr.Items.Length && arr.Items[idx].IsNotEmpty)
                                     {
@@ -336,7 +336,7 @@ internal sealed partial class Vm
                                         continue;
                                     }
                                 }
-                                else if (kv.IsNumber && ov.Ref is JsTypedArray ta && TypedSetFast(ta, kv.Num, Unsafe.Add(ref r0, Unsafe.Add(ref ip, 3)))) { ip = ref Unsafe.Add(ref ip, 5); continue; }
+                                else if (kv.IsNumber && ov.Ref is JsTypedArray ta && TypedSetFast(ta, JsValue.LoadNumber(kv), Unsafe.Add(ref r0, Unsafe.Add(ref ip, 3)))) { ip = ref Unsafe.Add(ref ip, 5); continue; }
                                 ref var ic = ref f.Feedback.Ics[Unsafe.Add(ref ip, 4)];
                                 if (ic.Kind == IcKind.KeyedOwnData)
                                 {
@@ -386,7 +386,7 @@ internal sealed partial class Vm
                         {
                             ref var a = ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 2));
                             ref var b = ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 3));
-                            if (a.IsNumber && b.IsNumber) Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = new JsValue(a.Num + b.Num);
+                            if (a.IsNumber && b.IsNumber) JsValue.StoreNumber(ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)), JsValue.LoadNumber(a) + JsValue.LoadNumber(b));
                             else { f.Pc = PcAt(ref code0, ref ip) + 1; Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = AddSlow(a, b); }
                             ip = ref Unsafe.Add(ref ip, 4);
                             continue;
@@ -395,35 +395,35 @@ internal sealed partial class Vm
                         {
                             ref var a = ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 2));
                             ref var b = ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 3));
-                            if (a.IsNumber && b.IsNumber) { Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = new JsValue(a.Num - b.Num); ip = ref Unsafe.Add(ref ip, 4); continue; }
+                            if (a.IsNumber && b.IsNumber) { JsValue.StoreNumber(ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)), JsValue.LoadNumber(a) - JsValue.LoadNumber(b)); ip = ref Unsafe.Add(ref ip, 4); continue; }
                             goto ArithOutOfLine;
                         }
                         case Op.Mul:
                         {
                             ref var a = ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 2));
                             ref var b = ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 3));
-                            if (a.IsNumber && b.IsNumber) { Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = new JsValue(a.Num * b.Num); ip = ref Unsafe.Add(ref ip, 4); continue; }
+                            if (a.IsNumber && b.IsNumber) { JsValue.StoreNumber(ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)), JsValue.LoadNumber(a) * JsValue.LoadNumber(b)); ip = ref Unsafe.Add(ref ip, 4); continue; }
                             goto ArithOutOfLine;
                         }
                         case Op.Div:
                         {
                             ref var a = ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 2));
                             ref var b = ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 3));
-                            if (a.IsNumber && b.IsNumber) { Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = new JsValue(a.Num / b.Num); ip = ref Unsafe.Add(ref ip, 4); continue; }
+                            if (a.IsNumber && b.IsNumber) { JsValue.StoreNumber(ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)), JsValue.LoadNumber(a) / JsValue.LoadNumber(b)); ip = ref Unsafe.Add(ref ip, 4); continue; }
                             goto ArithOutOfLine;
                         }
                         case Op.Mod:
                         {
                             ref var a = ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 2));
                             ref var b = ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 3));
-                            if (a.IsNumber && b.IsNumber) { Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = new JsValue(JsMod(a.Num, b.Num)); ip = ref Unsafe.Add(ref ip, 4); continue; }
+                            if (a.IsNumber && b.IsNumber) { JsValue.StoreNumber(ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)), JsMod(JsValue.LoadNumber(a), JsValue.LoadNumber(b))); ip = ref Unsafe.Add(ref ip, 4); continue; }
                             goto ArithOutOfLine;
                         }
                         case Op.Exp:
                         {
                             ref var a = ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 2));
                             ref var b = ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 3));
-                            if (a.IsNumber && b.IsNumber) { Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = new JsValue(MathBuiltins.Pow(a.Num, b.Num)); ip = ref Unsafe.Add(ref ip, 4); continue; }
+                            if (a.IsNumber && b.IsNumber) { JsValue.StoreNumber(ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)), MathBuiltins.Pow(JsValue.LoadNumber(a), JsValue.LoadNumber(b))); ip = ref Unsafe.Add(ref ip, 4); continue; }
                             goto ArithOutOfLine;
                         }
                         case Op.BitAnd:
@@ -432,8 +432,8 @@ internal sealed partial class Vm
                             ref var b = ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 3));
                             if (a.IsNumber && b.IsNumber)
                             {
-                                int x = Operations.DoubleToInt32(a.Num), y = Operations.DoubleToInt32(b.Num);
-                                Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = new JsValue(x & y);
+                                int x = Operations.NumberBitsToInt32(a.Bits), y = Operations.NumberBitsToInt32(b.Bits);
+                                JsValue.StoreNumber(ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)), x & y);
                                 ip = ref Unsafe.Add(ref ip, 4);
                                 continue;
                             }
@@ -445,8 +445,8 @@ internal sealed partial class Vm
                             ref var b = ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 3));
                             if (a.IsNumber && b.IsNumber)
                             {
-                                int x = Operations.DoubleToInt32(a.Num), y = Operations.DoubleToInt32(b.Num);
-                                Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = new JsValue(x | y);
+                                int x = Operations.NumberBitsToInt32(a.Bits), y = Operations.NumberBitsToInt32(b.Bits);
+                                JsValue.StoreNumber(ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)), x | y);
                                 ip = ref Unsafe.Add(ref ip, 4);
                                 continue;
                             }
@@ -458,8 +458,8 @@ internal sealed partial class Vm
                             ref var b = ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 3));
                             if (a.IsNumber && b.IsNumber)
                             {
-                                int x = Operations.DoubleToInt32(a.Num), y = Operations.DoubleToInt32(b.Num);
-                                Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = new JsValue(x ^ y);
+                                int x = Operations.NumberBitsToInt32(a.Bits), y = Operations.NumberBitsToInt32(b.Bits);
+                                JsValue.StoreNumber(ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)), x ^ y);
                                 ip = ref Unsafe.Add(ref ip, 4);
                                 continue;
                             }
@@ -471,8 +471,8 @@ internal sealed partial class Vm
                             ref var b = ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 3));
                             if (a.IsNumber && b.IsNumber)
                             {
-                                int x = Operations.DoubleToInt32(a.Num), y = Operations.DoubleToInt32(b.Num);
-                                Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = new JsValue(x << (y & 31));
+                                int x = Operations.NumberBitsToInt32(a.Bits), y = Operations.NumberBitsToInt32(b.Bits);
+                                JsValue.StoreNumber(ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)), x << (y & 31));
                                 ip = ref Unsafe.Add(ref ip, 4);
                                 continue;
                             }
@@ -484,8 +484,8 @@ internal sealed partial class Vm
                             ref var b = ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 3));
                             if (a.IsNumber && b.IsNumber)
                             {
-                                int x = Operations.DoubleToInt32(a.Num), y = Operations.DoubleToInt32(b.Num);
-                                Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = new JsValue(x >> (y & 31));
+                                int x = Operations.NumberBitsToInt32(a.Bits), y = Operations.NumberBitsToInt32(b.Bits);
+                                JsValue.StoreNumber(ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)), x >> (y & 31));
                                 ip = ref Unsafe.Add(ref ip, 4);
                                 continue;
                             }
@@ -497,8 +497,8 @@ internal sealed partial class Vm
                             ref var b = ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 3));
                             if (a.IsNumber && b.IsNumber)
                             {
-                                int x = Operations.DoubleToInt32(a.Num), y = Operations.DoubleToInt32(b.Num);
-                                Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = new JsValue((double)((uint)x >> (y & 31)));
+                                int x = Operations.NumberBitsToInt32(a.Bits), y = Operations.NumberBitsToInt32(b.Bits);
+                                JsValue.StoreNumber(ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)), (double)((uint)x >> (y & 31)));
                                 ip = ref Unsafe.Add(ref ip, 4);
                                 continue;
                             }
@@ -545,7 +545,7 @@ internal sealed partial class Vm
                         case Op.Neg:
                         {
                             ref readonly var a = ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 2));
-                            if (a.IsNumber) Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = new JsValue(-a.Num);
+                            if (a.IsNumber) JsValue.StoreNumber(ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)), -JsValue.LoadNumber(a));
                             else { f.Pc = PcAt(ref code0, ref ip) + 1; Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = BigIntOps.Negate(Realm, a); }
                             ip = ref Unsafe.Add(ref ip, 3);
                             continue;
@@ -566,7 +566,7 @@ internal sealed partial class Vm
                         case Op.Inc:
                         {
                             ref readonly var a = ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 2));
-                            if (a.IsNumber) Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = new JsValue(a.Num + 1);
+                            if (a.IsNumber) JsValue.StoreNumber(ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)), JsValue.LoadNumber(a) + 1);
                             else { f.Pc = PcAt(ref code0, ref ip) + 1; Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = BigIntOps.Increment(Realm, a, 1); }
                             ip = ref Unsafe.Add(ref ip, 3);
                             continue;
@@ -574,7 +574,7 @@ internal sealed partial class Vm
                         case Op.Dec:
                         {
                             ref readonly var a = ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 2));
-                            if (a.IsNumber) Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = new JsValue(a.Num - 1);
+                            if (a.IsNumber) JsValue.StoreNumber(ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)), JsValue.LoadNumber(a) - 1);
                             else { f.Pc = PcAt(ref code0, ref ip) + 1; Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = BigIntOps.Increment(Realm, a, -1); }
                             ip = ref Unsafe.Add(ref ip, 3);
                             continue;
@@ -603,13 +603,13 @@ internal sealed partial class Vm
                         case Op.AddI:
                         {
                             ref var a = ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 2));
-                            if (a.IsNumber) { Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = new JsValue(a.Num + Unsafe.Add(ref ip, 3)); ip = ref Unsafe.Add(ref ip, 4); continue; }
+                            if (a.IsNumber) { JsValue.StoreNumber(ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)), JsValue.LoadNumber(a) + Unsafe.Add(ref ip, 3)); ip = ref Unsafe.Add(ref ip, 4); continue; }
                             goto ArithImmOutOfLine;
                         }
                         case Op.SubI:
                         {
                             ref var a = ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 2));
-                            if (a.IsNumber) { Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = new JsValue(a.Num - Unsafe.Add(ref ip, 3)); ip = ref Unsafe.Add(ref ip, 4); continue; }
+                            if (a.IsNumber) { JsValue.StoreNumber(ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)), JsValue.LoadNumber(a) - Unsafe.Add(ref ip, 3)); ip = ref Unsafe.Add(ref ip, 4); continue; }
                             goto ArithImmOutOfLine;
                         }
                         case Op.LtIJmpFalse:
@@ -693,6 +693,98 @@ internal sealed partial class Vm
                             {
                                 if (a.Num >= b.Num) { ip = ref Unsafe.Add(ref ip, 4); continue; }
                                 goto JumpOperand3;
+                            }
+                            goto CompareJmpOutOfLine;
+                        }
+                        case Op.LtIJmpTrue:
+                        {
+                            ref var a = ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1));
+                            if (a.IsNumber)
+                            {
+                                if (a.Num < Unsafe.Add(ref ip, 2)) goto JumpOperand3;
+                                ip = ref Unsafe.Add(ref ip, 4);
+                                continue;
+                            }
+                            goto CompareImmJmpOutOfLine;
+                        }
+                        case Op.LeIJmpTrue:
+                        {
+                            ref var a = ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1));
+                            if (a.IsNumber)
+                            {
+                                if (a.Num <= Unsafe.Add(ref ip, 2)) goto JumpOperand3;
+                                ip = ref Unsafe.Add(ref ip, 4);
+                                continue;
+                            }
+                            goto CompareImmJmpOutOfLine;
+                        }
+                        case Op.GtIJmpTrue:
+                        {
+                            ref var a = ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1));
+                            if (a.IsNumber)
+                            {
+                                if (a.Num > Unsafe.Add(ref ip, 2)) goto JumpOperand3;
+                                ip = ref Unsafe.Add(ref ip, 4);
+                                continue;
+                            }
+                            goto CompareImmJmpOutOfLine;
+                        }
+                        case Op.GeIJmpTrue:
+                        {
+                            ref var a = ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1));
+                            if (a.IsNumber)
+                            {
+                                if (a.Num >= Unsafe.Add(ref ip, 2)) goto JumpOperand3;
+                                ip = ref Unsafe.Add(ref ip, 4);
+                                continue;
+                            }
+                            goto CompareImmJmpOutOfLine;
+                        }
+                        case Op.LtJmpTrue:
+                        {
+                            ref var a = ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1));
+                            ref var b = ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 2));
+                            if (a.IsNumber && b.IsNumber)
+                            {
+                                if (a.Num < b.Num) goto JumpOperand3;
+                                ip = ref Unsafe.Add(ref ip, 4);
+                                continue;
+                            }
+                            goto CompareJmpOutOfLine;
+                        }
+                        case Op.LeJmpTrue:
+                        {
+                            ref var a = ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1));
+                            ref var b = ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 2));
+                            if (a.IsNumber && b.IsNumber)
+                            {
+                                if (a.Num <= b.Num) goto JumpOperand3;
+                                ip = ref Unsafe.Add(ref ip, 4);
+                                continue;
+                            }
+                            goto CompareJmpOutOfLine;
+                        }
+                        case Op.GtJmpTrue:
+                        {
+                            ref var a = ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1));
+                            ref var b = ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 2));
+                            if (a.IsNumber && b.IsNumber)
+                            {
+                                if (a.Num > b.Num) goto JumpOperand3;
+                                ip = ref Unsafe.Add(ref ip, 4);
+                                continue;
+                            }
+                            goto CompareJmpOutOfLine;
+                        }
+                        case Op.GeJmpTrue:
+                        {
+                            ref var a = ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1));
+                            ref var b = ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 2));
+                            if (a.IsNumber && b.IsNumber)
+                            {
+                                if (a.Num >= b.Num) goto JumpOperand3;
+                                ip = ref Unsafe.Add(ref ip, 4);
+                                continue;
                             }
                             goto CompareJmpOutOfLine;
                         }
@@ -982,7 +1074,7 @@ internal sealed partial class Vm
 
     CompareImmJmpOutOfLine:
         f.Pc = PcAt(ref code0, ref ip) + 1;
-        if (CompareImmSlow((Op)ip, Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)), Unsafe.Add(ref ip, 2)))
+        if (CompareImmSlow((Op)ip, Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)), Unsafe.Add(ref ip, 2)) != (Op)ip >= Op.LtJmpTrue)
         {
             ip = ref Unsafe.Add(ref ip, 4);
             goto Dispatch;
@@ -998,8 +1090,7 @@ internal sealed partial class Vm
     CompareJmpOutOfLine:
         f.Pc = PcAt(ref code0, ref ip) + 1;
         {
-            var op = (Op)ip;
-            if (CompareSlow(op == Op.LtJmpFalse ? Op.Lt : op == Op.LeJmpFalse ? Op.Le : op == Op.GtJmpFalse ? Op.Gt : Op.Ge, Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)), Unsafe.Add(ref r0, Unsafe.Add(ref ip, 2))))
+            if (CompareSlow(CompareOf((Op)ip), Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)), Unsafe.Add(ref r0, Unsafe.Add(ref ip, 2))) != (Op)ip >= Op.LtJmpTrue)
             {
                 ip = ref Unsafe.Add(ref ip, 4);
                 goto Dispatch;
@@ -1664,8 +1755,17 @@ internal sealed partial class Vm
     private bool CompareImmSlow(Op op, in JsValue a, int imm)
     {
         var b = new JsValue((double)imm);
-        return CompareSlow(op == Op.LtIJmpFalse ? Op.Lt : op == Op.LeIJmpFalse ? Op.Le : op == Op.GtIJmpFalse ? Op.Gt : Op.Ge, a, b);
+        return CompareSlow(CompareOf(op), a, b);
     }
+
+    /// <summary>The comparison a compare-and-jump instruction makes: Lt, Le, Gt or Ge.</summary>
+    private static Op CompareOf(Op op) => op switch
+    {
+        Op.LtJmpFalse or Op.LtIJmpFalse or Op.LtJmpTrue or Op.LtIJmpTrue => Op.Lt,
+        Op.LeJmpFalse or Op.LeIJmpFalse or Op.LeJmpTrue or Op.LeIJmpTrue => Op.Le,
+        Op.GtJmpFalse or Op.GtIJmpFalse or Op.GtJmpTrue or Op.GtIJmpTrue => Op.Gt,
+        _ => Op.Ge,
+    };
 
     [MethodImpl(MethodImplOptions.NoInlining)]
     private bool CompareSlow(Op op, in JsValue a, in JsValue b)

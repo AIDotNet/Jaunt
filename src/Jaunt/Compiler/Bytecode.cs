@@ -75,6 +75,12 @@ internal enum Op : int
     ArgElem,
     /// <summary>The end of an instance field initializer, which may run on top of its constructor's frame without a result to store (hot returns need no check for that).</summary>
     RetFieldInit,
+    /// <summary>
+    /// The compare-and-jump instructions with the jump taken when the comparison holds (a, b or imm, target): a loop's test at its
+    /// bottom jumps back while it holds, so an iteration spends one dispatch on its control flow instead of a test and a jump.
+    /// </summary>
+    LtJmpTrue, LeJmpTrue, GtJmpTrue, GeJmpTrue,
+    LtIJmpTrue, LeIJmpTrue, GtIJmpTrue, GeIJmpTrue,
     Count_,
 }
 
@@ -131,6 +137,8 @@ internal static class OpInfo
         foreach (var op in new[] { Op.LtJmpFalse, Op.LeJmpFalse, Op.GtJmpFalse, Op.GeJmpFalse, Op.StrictEqJmpFalse, Op.StrictNeJmpFalse }) S(op, R, R, J);
         S(Op.AddI, R, R, I); S(Op.SubI, R, R, I);
         foreach (var op in new[] { Op.LtIJmpFalse, Op.LeIJmpFalse, Op.GtIJmpFalse, Op.GeIJmpFalse }) S(op, R, I, J);
+        foreach (var op in new[] { Op.LtJmpTrue, Op.LeJmpTrue, Op.GtJmpTrue, Op.GeJmpTrue }) S(op, R, R, J);
+        foreach (var op in new[] { Op.LtIJmpTrue, Op.LeIJmpTrue, Op.GtIJmpTrue, Op.GeIJmpTrue }) S(op, R, I, J);
         S(Op.StrictEqKJmpFalse, R, K, J); S(Op.StrictNeKJmpFalse, R, K, J);
         S(Op.Jmp, J); S(Op.JmpTrue, R, J); S(Op.JmpFalse, R, J); S(Op.JmpNullish, R, J); S(Op.JmpNotNullish, R, J);
         S(Op.JmpUndef, R, J); S(Op.JmpNotUndef, R, J);

@@ -82,6 +82,104 @@ internal sealed partial class CodeGen
     }
 
     /// <summary>
+    /// Evaluates <paramref name="test"/> and jumps to <paramref name="trueLabel"/> when it is truthy: the mirror of
+    /// <see cref="Condition"/>, for a loop test placed at the bottom of the loop. Strict (in)equality is exactly negated by its
+    /// counterpart; the relational operators are not (NaN), so they have their own jump-if-true instructions.
+    /// </summary>
+    private void ConditionTrue(Expression test, int trueLabel)
+    {
+        if (test is BinaryExpression be && be is not LogicalExpression && be.Left is not PrivateIdentifier)
+        {
+            Op? op = be.Operator switch
+            {
+                Operator.LessThan => Op.LtJmpTrue,
+                Operator.LessThanOrEqual => Op.LeJmpTrue,
+                Operator.GreaterThan => Op.GtJmpTrue,
+                Operator.GreaterThanOrEqual => Op.GeJmpTrue,
+                Operator.StrictEquality => Op.StrictNeJmpFalse,
+                Operator.StrictInequality => Op.StrictEqJmpFalse,
+                _ => null,
+            };
+            if (op != null)
+            {
+                int m = Mark;
+                Op? imm = be.Operator switch
+                {
+                    Operator.LessThan => Op.LtIJmpTrue,
+                    Operator.LessThanOrEqual => Op.LeIJmpTrue,
+                    Operator.GreaterThan => Op.GtIJmpTrue,
+                    Operator.GreaterThanOrEqual => Op.GeIJmpTrue,
+                    _ => null,
+                };
+                if (imm != null && TryInt32Literal(be.Right, out int k))
+                {
+                    _fb.JumpCmp(imm.Value, Expr(be.Left), k, trueLabel);
+                    ResetTo(m);
+                    return;
+                }
+                if (op is Op.StrictEqJmpFalse or Op.StrictNeJmpFalse && LiteralConstant(be.Right) is { } lit)
+                {
+                    int l = Expr(be.Left);
+                    _fb.JumpCmp(op == Op.StrictEqJmpFalse ? Op.StrictEqKJmpFalse : Op.StrictNeKJmpFalse, l, lit, trueLabel);
+                    ResetTo(m);
+                    return;
+                }
+                var (a, b) = Operands(be.Left, be.Right);
+                _fb.JumpCmp(op.Value, a, b, trueLabel);
+                ResetTo(m);
+                return;
+            }
+        }
+        if (test is LogicalExpression le)
+        {
+            if (le.Operator == Operator.LogicalAnd)
+            {
+                int skip = _fb.NewLabel();
+                Condition(le.Left, skip);
+                ConditionTrue(le.Right, trueLabel);
+                _fb.Mark(skip);
+                return;
+            }
+            if (le.Operator == Operator.LogicalOr)
+            {
+                ConditionTrue(le.Left, trueLabel);
+                ConditionTrue(le.Right, trueLabel);
+                return;
+            }
+        }
+        if (test is UnaryExpression { Operator: Operator.LogicalNot } un)
+        {
+            Condition(un.Argument, trueLabel);
+            return;
+        }
+        int mm = Mark;
+        int r = Expr(test);
+        _fb.JumpIf(Op.JmpTrue, r, trueLabel);
+        ResetTo(mm);
+    }
+
+    /// <summary>
+    /// Whether a loop test can be compiled a second time, in front of the loop, so that entering the loop costs no jump to the
+    /// test at its bottom: only reads of names and properties, literals and operators, nothing that creates a function, a template
+    /// object or a regular expression per site, and nothing that suspends.
+    /// </summary>
+    private static bool CanDuplicateTest(Node n, ref int budget)
+    {
+        if (--budget < 0) return false;
+        switch (n)
+        {
+            case Identifier or NumericLiteral or StringLiteral or BooleanLiteral or NullLiteral: return true;
+            case MemberExpression me when !me.Optional && me.Property is not PrivateIdentifier:
+                return CanDuplicateTest(me.Object, ref budget) && (!me.Computed || CanDuplicateTest(me.Property, ref budget));
+            case LogicalExpression le: return CanDuplicateTest(le.Left, ref budget) && CanDuplicateTest(le.Right, ref budget);
+            case BinaryExpression be when be.Left is not PrivateIdentifier:
+                return CanDuplicateTest(be.Left, ref budget) && CanDuplicateTest(be.Right, ref budget);
+            case UnaryExpression ue when ue.Operator != Operator.Delete: return CanDuplicateTest(ue.Argument, ref budget);
+            default: return false;
+        }
+    }
+
+    /// <summary>
     /// The instruction for <paramref name="be"/> with a literal int32 right operand, when there is one: a function's
     /// <c>n - 1</c> and <c>n &lt; 2</c> would otherwise spend a dispatch and a register to materialize the literal. The right operand
     /// has no effects to order against the left's, and the instruction's slow path sees the same two values.
