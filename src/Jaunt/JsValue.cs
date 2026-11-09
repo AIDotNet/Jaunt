@@ -1,6 +1,7 @@
 using System;
 using System.Globalization;
 using System.Runtime.CompilerServices;
+using System.Runtime.Intrinsics;
 using Jaunt.Runtime;
 
 namespace Jaunt;
@@ -58,6 +59,44 @@ public readonly struct JsValue : IEquatable<JsValue>
     }
 
     internal bool IsTrue => Bits == TrueBits;
+
+    /// <summary>
+    /// The number in <paramref name="v"/> (which must be one), read into a floating-point register directly: the payload is loaded
+    /// as a double and the XOR applied with a vector instruction. <see cref="Num"/> loads it into an integer register and moves it
+    /// across; in a micro-benchmark on an Apple M4, an <c>i++</c> chain through a register's memory took about 19 cycles per step that
+    /// way against 7 on the floating-point side. A payload stored from an integer register and loaded into a floating-point one
+    /// is slow too, so the number fast paths of the interpreter load and store numbers this way.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal static double LoadNumber(in JsValue v)
+    {
+        if (Vector128.IsHardwareAccelerated)
+            return Vector128.Xor(Vector128.CreateScalarUnsafe(Unsafe.As<ulong, double>(ref Unsafe.AsRef(in v.Bits))).AsUInt64(), Vector128.Create(NumberXor)).AsDouble().ToScalar();
+        return v.Num;
+    }
+
+    /// <summary><c>slot = new JsValue(number)</c> with the payload stored from a floating-point register (see <see cref="LoadNumber"/>).</summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal static void StoreNumber(ref JsValue slot, double number)
+    {
+        if (Vector128.IsHardwareAccelerated)
+        {
+            ref var raw = ref Unsafe.As<JsValue, NumberSlot>(ref slot);
+            raw.Ref = null;
+            raw.Payload = Vector128.Xor(Vector128.CreateScalarUnsafe(number).AsUInt64(), Vector128.Create(NumberXor)).AsDouble().ToScalar();
+        }
+        else slot = new JsValue(number);
+    }
+
+    /// <summary>The NaN that numbers hold (<see cref="NaN"/>), as a double.</summary>
+    internal static double CanonicalNaN => BitConverter.Int64BitsToDouble(0x7FF8_0000_0000_0000);
+
+    /// <summary>The layout of <see cref="JsValue"/> with the payload typed as a double, for <see cref="StoreNumber"/>.</summary>
+    private struct NumberSlot
+    {
+        public object? Ref;
+        public double Payload;
+    }
 
     /// <summary>
     /// <c>slot = value</c> that skips the GC write barrier when the value holds no reference: storing a null never needs

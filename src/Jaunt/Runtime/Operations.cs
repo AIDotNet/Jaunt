@@ -175,6 +175,26 @@ internal static class Operations
         return DoubleToInt32Slow(d);
     }
 
+    /// <summary>
+    /// ToInt32 of a number from its <see cref="JsValue.Bits"/>, in integer registers only. The interpreter's registers hold numbers
+    /// as integer bits, and in a micro-benchmark on an Apple M4 a dependent chain such as <c>(s ^ x) &amp; m</c> through <c>fmov</c>,
+    /// <c>fcvtzs</c>, <c>scvtf</c> and back took about 30 cycles per operation against 6 when decoding the IEEE fields here: the integer part of a magnitude
+    /// below 2^63 is the mantissa shifted right, and its low 32 bits, negated for a negative number, are the ToInt32 result.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public static int NumberBitsToInt32(ulong numberBits)
+    {
+        ulong b = numberBits ^ JsValue.NumberXor;
+        int t = (int)((b >> 52) & 0x7FF) - 1023;
+        if ((uint)t <= 62)
+        {
+            // the sign without a branch: hashes and checksums have sign bits no predictor can learn
+            long v = (long)(((b << 11) | (1UL << 63)) >> (63 - t)), s = (long)b >> 63;
+            return unchecked((int)((v ^ s) - s));
+        }
+        return t < 0 ? 0 : DoubleToInt32Slow(BitConverter.Int64BitsToDouble(unchecked((long)b)));
+    }
+
     /// <summary>ToInt32 of a double that is no int: the low 32 bits of the truncated magnitude, from the IEEE fields (a floating-point remainder is far slower).</summary>
     private static int DoubleToInt32Slow(double d)
     {
