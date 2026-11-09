@@ -3,7 +3,19 @@
 Jaunt follows [Semantic Versioning](https://semver.org/) from 1.0.0. See "Versioning" in the [README](README.md) for what
 counts as public API.
 
+## 1.0.1 (2026-11-08)
+
+First release on NuGet. Everything listed under 1.0.0 applies; that tag failed its release checks and was never published.
+
+### Fixed
+
+- `Function.prototype.apply`, `Reflect.apply`, `Reflect.construct` and the other users of `CreateListFromArrayLike` allocated the
+  whole list for the claimed length before any budget check: 1.4 GB for `{ length: 90000000 }`, not charged to
+  `MaxTrackedBytes`, and able to stall the process. A long list now grows as it fills and each growth is charged.
+
 ## 1.0.0 (2026-11-08)
+
+Tagged but not published.
 
 First stable release: a fully managed, NativeAOT-compatible JavaScript engine for .NET 8, .NET 10 and .NET 11.
 

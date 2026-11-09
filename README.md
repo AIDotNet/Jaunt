@@ -4,7 +4,7 @@ A fully managed, **NativeAOT-compatible** JavaScript engine for .NET 8 / .NET 10
 embedded scripts, rules and plugins: low host-boundary cost, shareable compiled code, isolated realms, budgeted
 execution and explicit, reflection-free data mapping.
 
-> Status: `1.0.0` ([changelog](CHANGELOG.md)). Design documents live in [`design/`](design/); the implementation follows the route
+> Status: `1.0.1` ([changelog](CHANGELOG.md)). Design documents live in [`design/`](design/); the implementation follows the route
 > chosen in [`design/01-research.md`](design/01-research.md) — **Acornima parser → Jaunt scope analysis /
 > register bytecode → managed register VM**, with NativeAOT execution of post-publish source as a hard gate.
 > See [`design/07-implementation-status.md`](design/07-implementation-status.md) for the evidence behind each
@@ -90,7 +90,7 @@ servicing releases in `Directory.Build.targets`.
 
 ## Releasing
 
-Pushing a tag such as `v1.0.0` runs [`.github/workflows/release.yml`](.github/workflows/release.yml): the full
+Pushing a tag such as `v1.0.1` runs [`.github/workflows/release.yml`](.github/workflows/release.yml): the full
 verification matrix, then pack and a consumer test, then a push to nuget.org. The tag is the package version.
 Publishing uses [NuGet Trusted Publishing](https://learn.microsoft.com/nuget/nuget-org/trusted-publishing), so no API
 key is stored; the required nuget.org policy and `NUGET_USER` secret are listed at the top of the workflow.

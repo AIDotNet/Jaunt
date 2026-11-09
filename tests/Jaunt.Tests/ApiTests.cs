@@ -273,6 +273,39 @@ public class ApiTests
         Assert.True(sw.ElapsedMilliseconds < 5000, $"took {sw.ElapsedMilliseconds} ms");
     }
 
+    [Theory]
+    [InlineData("Function.prototype.apply.call(Math.max, null, { length: 90000000 })")]
+    [InlineData("Reflect.apply(Math.max, null, { length: 90000000 })")]
+    public void ArgumentListsOfHugeArrayLikesGrowWithTheBudget(string source)
+    {
+        // the list must not be allocated for the claimed length before the first budget check
+        using (var engine = new JsEngine(new JsEngineOptions { Limits = new JsLimits { MaxInstructions = 10_000 } }))
+        {
+            long before = GC.GetAllocatedBytesForCurrentThread();
+            Assert.Throws<JsLimitExceededException>(() => engine.Evaluate(source));
+            long allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+            Assert.True(allocated < 32 * 1024 * 1024, $"allocated {allocated} bytes");
+        }
+        using (var engine = new JsEngine(new JsEngineOptions { Limits = new JsLimits { MaxTrackedBytes = 4 * 1024 * 1024 } }))
+        {
+            var ex = Assert.Throws<JsLimitExceededException>(() => engine.Evaluate(source));
+            Assert.Equal(JsLimitKind.TrackedBytes, ex.Kind);
+        }
+    }
+
+    [Fact]
+    public void ArgumentListsFromArrayLikesKeepTheirValues()
+    {
+        using var engine = new JsEngine();
+        Assert.Equal("70000,69999,3", engine.Evaluate("""
+            const big = { length: 70000 };
+            for (let i = 0; i < 70000; i++) big[i] = i;
+            const seen = Reflect.apply((...a) => a, null, big);
+            [seen.length, Math.max.apply(null, big), Reflect.apply((a, b, c) => c, null, { length: 3, 2: 3 })].join()
+            """).AsString());
+        Assert.Equal(0.0, engine.Evaluate("Reflect.apply((...a) => a.length, null, { length: 0 })").AsNumber());
+    }
+
     [Fact]
     public void RegExpMethodsRejectPrimitiveReceiversSafely()
     {

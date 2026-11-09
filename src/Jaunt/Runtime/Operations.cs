@@ -625,8 +625,14 @@ internal static class Operations
         var o = v.AsObjectUnchecked;
         long len = LengthOfArrayLike(realm, o);
         if (len > realm.MaxArrayLength) throw JsErrors.RangeError(realm, "Too many arguments");
-        var list = new System.Collections.Generic.List<JsValue>((int)len);
-        for (long i = 0; i < len; i++) { list.Add(o.GetIndex((uint)i, v)); realm.Vm.Tick(); }
+        // the length is the script's claim: a long list grows as it fills, so the budget checks and the memory charge come first
+        var list = new System.Collections.Generic.List<JsValue>((int)Math.Min(len, 4096));
+        for (long i = 0; i < len; i++)
+        {
+            if (list.Count == list.Capacity) realm.ChargeBytes(list.Capacity * 24L);   // doubling: the capacity it is about to add
+            list.Add(o.GetIndex((uint)i, v));
+            realm.Vm.Tick();
+        }
         return list;
     }
 }
