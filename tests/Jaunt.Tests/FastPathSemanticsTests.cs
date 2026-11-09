@@ -1890,9 +1890,23 @@ done
     [Fact]
     public void PromiseThenAndJobOrderingMatchReferenceBehavior()
     {
-        using var engine = new JsEngine();
-        engine.Evaluate(PromiseJobsScript);
-        var got = engine.Evaluate("__log.join('\\n')").AsString().Split('\n');
+        // The deep await scenario recurses natively, and test host threads on macOS can be too small for it (CI saw
+        // "Native recursion is too deep" with depth 100 on net8.0). This test is about ordering, so give it a known stack.
+        string[] got = [];
+        Exception? failure = null;
+        var thread = new Thread(() =>
+        {
+            try
+            {
+                using var engine = new JsEngine();
+                engine.Evaluate(PromiseJobsScript);
+                got = engine.Evaluate("__log.join('\\n')").AsString().Split('\n');
+            }
+            catch (Exception ex) { failure = ex; }
+        }, 16 * 1024 * 1024);
+        thread.Start();
+        thread.Join();
+        if (failure is not null) throw new Exception("script failed", failure);
         var expected = PromiseJobsExpected.ReplaceLineEndings("\n").TrimEnd('\n').Split('\n');
         for (int i = 0; i < Math.Min(expected.Length, got.Length); i++) Assert.True(expected[i] == got[i], $"line {i}: expected {expected[i]} but got {got[i]}");
         Assert.Equal(expected.Length, got.Length);

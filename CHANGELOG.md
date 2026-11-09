@@ -5,6 +5,12 @@ counts as public API.
 
 ## Unreleased
 
+## 1.0.2 (2026-11-09)
+
+A performance release. No public API changed. Over the 59 workloads of the benchmark corpus under NativeAOT, wall time is about 5%
+lower than 1.0.1 (geometric mean, Apple M4, two passes measured separately: −2.5% and −2.7%). Details and the method are in
+[docs/benchmarks.md](docs/benchmarks.md).
+
 ### Performance
 
 - Script compilation is about 16% faster and allocates about 11% less, measured under NativeAOT on the benchmark corpus.
@@ -16,6 +22,11 @@ counts as public API.
 - `arguments.length` and `arguments[i]` read from the call frame when the object cannot be observed. Rest and spread allocate their exact size.
 - Class field initializers run in the interpreter loop rather than a nested one. Closures allocate less.
 - `typeof x === 'name'` ends at a reference comparison, and bitwise operators keep their fast path for values outside the int32 range.
+
+### Hosting
+
+- The README now recommends `OptimizationPreference=Speed` for NativeAOT hosts: about 2% faster overall and 6% faster to compile
+  scripts on the benchmark corpus, for about 0.3 MB of binary size. The sample AOT host uses it.
 
 ## 1.0.1 (2026-11-08)
 
