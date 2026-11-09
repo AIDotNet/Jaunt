@@ -168,8 +168,10 @@ internal static class Operations
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static int DoubleToInt32(double d)
     {
-        int i = (int)d;
-        if (i == d) return i;
+        // Truncating to 64 bits gives the ToInt32 result in the low word for every |d| < 2^63, fractions and NaN (0) included, with no
+        // conversion back to compare: only the two saturated results need the slow path.
+        long l = (long)d;
+        if (unchecked((ulong)(l + long.MaxValue)) < ulong.MaxValue - 1) return unchecked((int)l);
         return DoubleToInt32Slow(d);
     }
 
