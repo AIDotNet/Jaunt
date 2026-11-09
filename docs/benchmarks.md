@@ -584,3 +584,46 @@ method and module function). Making objects and environments smaller on its own 
 `samples/Jaunt.AotHost` now publishes with `Speed`, so NativeAOT figures from here on are not directly comparable with earlier ones.
 
 Verified: unit tests 629/629 plain and poisoned, one Node-generated comparison of 101 lines, test262 100,167/100,169, NativeAOT `verify`.
+
+## Eighth pass: slow operations, and a static PGO experiment (2026-11-09)
+
+Compared with the previous commit, both on `OptimizationPreference=Speed`, alternating under NativeAOT on an Apple M4. Times are per
+operation with the empty loop subtracted, over three rounds:
+
+| Operation | Before | After | V8 jitless |
+| --- | ---: | ---: | ---: |
+| `promise.then` | 150 ns | 74 ns | 44 ns |
+| `/re/.test(s)` | 125 ns | 88 ns | 42 ns |
+| `arguments.length` | 48 ns | 14 ns | 17 ns |
+| rest parameter | 42 ns | 34 ns | 16 ns |
+| array spread | 43 ns | 34 ns | 18 ns |
+| object spread | 43 ns | 30 ns | 11 ns |
+| `new F(a, b)` | 38 ns | 34 ns | 20 ns |
+| class, no fields | 30 ns | 27 ns | 15 ns |
+| class with two constant-name fields | 70 ns | 46 ns | 31 ns |
+| derived class | 64 ns | 52 ns | 37 ns |
+| closure creation | 50 ns | 30 ns | 29 ns |
+| `typeof x === 'name'` | 5.3 ns | 2.5 ns | 1.5 ns |
+| bitwise operators | 12.0 ns | 12.3 ns | 4.0 ns |
+
+Most of the `promise.then` gain comes from the job queue, and only bursts of over 4096 queued jobs benefit from that, as this
+micro-benchmark does. `async/promise-chains` is the more realistic figure.
+
+Over the 59 workloads, three rounds, the geometric mean of wall time is −2.7%, of allocation −2.5% and of first call −5.0%; compile time
+is unchanged and the binary size grew by 48 bytes. 17 workloads improved by more than 3% and none got worse by that much in this run:
+`promise-chains` −26%, `crc-base64` −11%, `closures` −10%, `regex` −10%, `sha256` −10%, `string-hash-codec` −7%. `compute/nqueens` is
++1 to +3%. `apps/graph-algos` is unsettled: under +1% in that run, but +3.3% over seven rounds on its own, so a small regression is possible.
+The `crc-base64` and `sha256` gains come from `ToInt32`, because those values leave the int32 range.
+
+Tried and reverted, no gain on real workloads: immediate forms of bitwise operators and `BitNot` in the main loop (literals in loops are
+already hoisted), a payload-only number store (`bitops` −7%, `mandelbrot` +6%), and rewriting `JsMod`.
+
+**Static PGO is not adopted.** `dotnet-pgo` 10.0.14-servicing.26522.126 from the `dotnet10-transport` feed produced a profile that ILC
+accepted through `--mibc`, with data reaching `RunLoop`. Trained and measured on the same workloads, excluding the two below, wall time was
+−7.2% over 57 workloads, compile −14.6%, first call −9.9% and size +4.0%. However, that build reported `advanced/proxy-reflect` at about
+10,000 times its real wall time, while CPU time and time measured from outside the process stayed normal, and it ran for 45 minutes on
+input the normal build finished. `compute/nbody` was also bimodal. Neither fault was explained, and whether scripts can get wrong results
+was not tested. Treat the gain as real but the build as untrustworthy until those are understood.
+
+Verified on the merged result: unit tests 634/634 plain and poisoned, test262 100,167/100,169, NativeAOT `verify`, and a script of 49 cases
+plus promise job order crossing the changed features that matched the previous build exactly and Node except for the wording of one error message.
