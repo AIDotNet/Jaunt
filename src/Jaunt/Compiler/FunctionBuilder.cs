@@ -68,10 +68,24 @@ internal sealed class FunctionBuilder
     {
         if (_stringConsts.TryGetValue(s, out int i)) return i;
         i = _constants.Count;
-        _constants.Add(new JsValue(s));
+        _constants.Add(new JsValue(TypeofNameOrSelf(s)));
         _stringConsts[s] = i;
         return i;
     }
+
+    /// <summary>The object the Typeof instruction produces for such a name, so <c>typeof x === 'number'</c> usually ends at the reference test of strict equality instead of comparing characters.</summary>
+    private static string TypeofNameOrSelf(string s) => s switch
+    {
+        "undefined" => "undefined",
+        "object" => "object",
+        "boolean" => "boolean",
+        "number" => "number",
+        "string" => "string",
+        "symbol" => "symbol",
+        "bigint" => "bigint",
+        "function" => "function",
+        _ => s,
+    };
 
     public int ConstValue(JsValue v)
     {
