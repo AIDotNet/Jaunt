@@ -519,3 +519,29 @@ private fields, methods, accessors, `#x in o`, frozen objects, proxies, missing 
 100,167/100,169 (the two Apple ICU locale-data differences, nothing skipped), NativeAOT `verify` gate all PASS on
 ILCompiler 10.0.14, and under NativeAOT 58/59 workloads match Node (strings/unicode-text is the known
 InvariantGlobalization mismatch).
+
+## Sixth pass: compile time (2026-11-08)
+
+Before this pass Jaunt compiled the 59 workloads (64 KB) in 2.26 ms under NativeAOT, against 1.63 ms for both QuickJS 2026-06-04 and
+MoeJS v0.1.0-alpha.11, on an Apple M4. More than half of that was the parser. This pass changes Jaunt's own stages and hooks; the
+parser is untouched. A/B of the same harness, alternating builds, three rounds:
+
+| Compile time, NativeAOT | Before | After | Δ |
+| --- | ---: | ---: | ---: |
+| 59 workloads, sum of medians | 2263 µs | 1894 µs | −16% |
+| Allocation, same corpus | 2815 KB | 2505 KB | −11% |
+| 12 KB script | 510 µs | 440 µs | −14% |
+| 64 KB script | 3252 µs | 2758 µs | −15% |
+| 256 KB script | 17756 µs | 14351 µs | −19% |
+| 1 MB script | 76.5 ms | 77.7 ms | within its noise (68–93 ms) |
+
+* **Analysis results on the AST nodes.** Resolved references, scopes and function records were three dictionaries keyed by node. They
+  now ride on `Node.UserData`; a plain binding is stored as the `Binding` itself, with no allocation.
+* **Fewer parser hook calls.** Nodes are no longer counted by type to size those dictionaries. The per-token budget hook is only
+  installed for sources over 256 KB. Below that, nodes check the budget; a run of tokens without nodes (`[,,,`) lasted 9.4 ms at
+  most, and a 15 MB one still stops at a 20 ms compile timeout.
+* **Stack probe every 16 levels** in the analyzer and code generator instead of on every node.
+* **The verifier walks the code once**, instead of a second time to find the last instruction.
+
+The parser is now about 60% of compile time, and the remaining gap to QuickJS (about 16%) is mostly there. Verified: unit tests 628/628
+plain and poisoned, test262 100,167/100,169, NativeAOT `verify` on net10.0.

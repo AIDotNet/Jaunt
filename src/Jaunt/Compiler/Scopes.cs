@@ -167,6 +167,67 @@ internal struct ResolvedRef
     public bool NeedsTdzCheck;
     /// <summary>Resolved at run time by name (inside with, after sloppy direct eval, or in eval code).</summary>
     public bool Dynamic;
+
+    // Every identifier of a compilation is resolved once and read at least once: the result rides on the node instead of in a
+    // table. The usual result, a plain binding, is the Binding itself and allocates nothing, as is an unresolved global.
+    private sealed class Box { public ResolvedRef Value; }
+    private static readonly Box s_global = new();
+
+    public static void Set(Identifier id, in ResolvedRef r)
+    {
+        if (r.NeedsTdzCheck || r.Dynamic) id.UserData = new Box { Value = r };
+        else id.UserData = (object?)r.Binding ?? s_global;
+    }
+
+    public static bool TryGet(Identifier id, out ResolvedRef r)
+    {
+        var u = id.UserData;
+        if (u is Binding b) { r = new ResolvedRef { Binding = b }; return true; }
+        if (u is Box x) { r = x.Value; return true; }
+        r = default;
+        return false;
+    }
+
+    public static ResolvedRef Get(Identifier id) =>
+        TryGet(id, out var r) ? r : throw new InvalidOperationException($"Jaunt internal error: identifier '{id.Name}' was not analyzed.");
+}
+
+/// <summary>
+/// What the analysis attaches to a syntax node that owns a scope or a function, carried on the node itself: the AST lives for
+/// one compilation and is never shared. A function node's scope is its <see cref="FunctionInfo.Scope"/>.
+/// </summary>
+internal static class NodeTable
+{
+    public static void SetFunction(Node node, FunctionInfo function) => node.UserData = function;
+
+    public static void SetScope(Node node, Scope scope)
+    {
+        if (node.UserData is FunctionInfo f)
+        {
+            if (!ReferenceEquals(f.Scope, scope)) throw new InvalidOperationException("Jaunt internal error: a function node with a scope of its own.");
+            return;
+        }
+        node.UserData = scope;
+    }
+
+    public static bool TryGetFunction(Node node, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out FunctionInfo? function)
+    {
+        function = node.UserData as FunctionInfo;
+        return function != null;
+    }
+
+    public static bool TryGetScope(Node node, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out Scope? scope)
+    {
+        var u = node.UserData;
+        scope = u as Scope ?? (u as FunctionInfo)?.Scope;
+        return scope != null;
+    }
+
+    public static FunctionInfo Function(Node node) =>
+        node.UserData as FunctionInfo ?? throw new InvalidOperationException("Jaunt internal error: a function node was not analyzed.");
+
+    public static Scope Scope(Node node) =>
+        TryGetScope(node, out var s) ? s : throw new InvalidOperationException("Jaunt internal error: a scope node was not analyzed.");
 }
 
 /// <summary>Thrown for unsupported features and early errors detected by Jaunt itself.</summary>
@@ -194,19 +255,13 @@ internal sealed class ScopeAnalyzer
 {
     private Scope _scope = null!;
     private FunctionInfo _func = null!;
-    private readonly Dictionary<Node, Scope> _scopes;
-    private readonly Dictionary<Node, FunctionInfo> _functions;
-    private readonly Dictionary<Identifier, ResolvedRef> _refs;
     private readonly ModuleRecordInfo? _module;
     private int _depth;
     private readonly int _maxDepth;
     private readonly Action? _checkpoint;
 
-    public ScopeAnalyzer(Dictionary<Node, Scope> scopes, Dictionary<Node, FunctionInfo> functions, Dictionary<Identifier, ResolvedRef> refs, ModuleRecordInfo? module, int maxDepth, Action? checkpoint)
+    public ScopeAnalyzer(ModuleRecordInfo? module, int maxDepth, Action? checkpoint)
     {
-        _scopes = scopes;
-        _functions = functions;
-        _refs = refs;
         _module = module;
         _maxDepth = maxDepth;
         _checkpoint = checkpoint;
@@ -215,7 +270,8 @@ internal sealed class ScopeAnalyzer
     private void Enter(Node node)
     {
         if (++_depth > _maxDepth) throw new CompileError("NestingTooDeep", "Maximum syntax nesting depth exceeded.", node);
-        System.Runtime.CompilerServices.RuntimeHelpers.EnsureSufficientExecutionStack();
+        // the probe leaves room for far more than 16 levels; a recursion that goes deep crosses every multiple of 16
+        if ((_depth & 15) == 0) System.Runtime.CompilerServices.RuntimeHelpers.EnsureSufficientExecutionStack();
     }
 
     private void Leave() => _depth--;
@@ -290,8 +346,8 @@ internal sealed class ScopeAnalyzer
         var fi = new FunctionInfo { Node = program, IsEvalTop = true, IsArrow = true, Strict = strict };
         var scope = new Scope { Kind = ScopeKind.Function, Function = fi, Named = true, ForceEnv = true, Barrier = true };
         fi.Scope = scope;
-        _functions[program] = fi;
-        _scopes[program] = scope;
+        NodeTable.SetFunction(program, fi);
+        NodeTable.SetScope(program, scope);
         _func = fi;
         _scope = scope;
         HoistVarDeclarations(program.Body, scope, fi);
@@ -319,8 +375,8 @@ internal sealed class ScopeAnalyzer
         var fi = new FunctionInfo { Node = program, IsScriptTop = !isModule, IsModuleTop = isModule, Strict = isModule || program.Strict };
         var scope = new Scope { Kind = isModule ? ScopeKind.Module : ScopeKind.Script, Function = fi };
         fi.Scope = scope;
-        _functions[program] = fi;
-        _scopes[program] = scope;
+        NodeTable.SetFunction(program, fi);
+        NodeTable.SetScope(program, scope);
         _func = fi;
         _scope = scope;
         MarkEvalFunction(program, scope, fi);
@@ -682,7 +738,7 @@ internal sealed class ScopeAnalyzer
     private Scope PushScope(ScopeKind kind, Node owner)
     {
         var s = new Scope { Kind = kind, Parent = _scope, Function = _func };
-        _scopes[owner] = s;
+        NodeTable.SetScope(owner, s);
         _scope = s;
         return s;
     }
@@ -700,7 +756,7 @@ internal sealed class ScopeAnalyzer
             while (ef.IsArrow && !ef.IsEvalTop && ef.Parent != null) ef = ef.Parent;
             if (ef.IsEvalTop) EvalContainsArguments = true;
         }
-        var r = default(ResolvedRef);   // a struct: stored into _refs on every exit below
+        var r = default(ResolvedRef);   // a struct: stored on the identifier on every exit below
         bool crossed = false;
         bool dynamic = false;
         for (var s = _scope; s != null; s = s.Parent)
@@ -726,7 +782,7 @@ internal sealed class ScopeAnalyzer
                 if (b.HasTdz) b.NeedsTdz = true;
                 s.Named = true;
                 r.Dynamic = true;
-                _refs[id] = r;
+                ResolvedRef.Set(id, r);
                 return;
             }
             if (s.Function != _func) crossed = true;
@@ -741,12 +797,12 @@ internal sealed class ScopeAnalyzer
                     b.NeedsTdz = true;
                 }
             }
-            _refs[id] = r;
+            ResolvedRef.Set(id, r);
             return;
         }
         r.Binding = null;
         r.Dynamic = dynamic || _evalCode;
-        _refs[id] = r;
+        ResolvedRef.Set(id, r);
     }
 
     // ------------------------------------------------------------------ functions
@@ -757,10 +813,10 @@ internal sealed class ScopeAnalyzer
         var parentFunc = _func;
         var parentScope = _scope;
         var fi = new FunctionInfo { Node = node, Parent = parentFunc, IsArrow = isArrow, Strict = parentFunc.Strict || strictBody };
-        _functions[node] = fi;
+        NodeTable.SetFunction(node, fi);
         var scope = new Scope { Kind = ScopeKind.Function, Parent = parentScope, Function = fi };
         fi.Scope = scope;
-        _scopes[node] = scope;
+        NodeTable.SetScope(node, scope);
         _func = fi;
         _scope = scope;
         MarkEvalFunction(node, scope, fi);
@@ -792,7 +848,7 @@ internal sealed class ScopeAnalyzer
                 // parameter expressions: closures in the parameter list must not see body declarations
                 target = new Scope { Kind = ScopeKind.Block, Parent = scope, Function = fi };
                 if (scope.Barrier) { target.Barrier = true; target.Named = true; target.ForceEnv = true; }
-                _scopes[block] = target;
+                NodeTable.SetScope(block, target);
                 fi.BodyScope = target;
             }
             HoistVarDeclarations(block.Body, target, fi);
@@ -1074,7 +1130,7 @@ internal sealed class ScopeAnalyzer
                 case MethodDefinition md:
                     if (md.Computed) VisitExpression(md.Key);
                     VisitFunction(md.Value, null, md.Value.Params, md.Value.Body, false, false, true, isMethod: true);
-                    if (md.Kind == PropertyKind.Constructor) _functions[md.Value].HasSuperCall = superClass != null;
+                    if (md.Kind == PropertyKind.Constructor) NodeTable.Function(md.Value).HasSuperCall = superClass != null;
                     break;
                 case PropertyDefinition or AccessorProperty:
                     var pd = (ClassProperty)el;
@@ -1083,7 +1139,7 @@ internal sealed class ScopeAnalyzer
                     {
                         if (pd.Static)
                         {
-                            if (staticInit == null) { staticInit = BeginSyntheticFunction(body); staticInit.IsFieldInit = true; _scopes[pd] = staticInit.Scope; _func = outerFunc; _scope = outerScope; }
+                            if (staticInit == null) { staticInit = BeginSyntheticFunction(body); staticInit.IsFieldInit = true; NodeTable.SetScope(pd, staticInit.Scope); _func = outerFunc; _scope = outerScope; }
                             _func = staticInit; _scope = staticInit.Scope;
                         }
                         else
@@ -1098,8 +1154,8 @@ internal sealed class ScopeAnalyzer
                 case StaticBlock sb:
                 {
                     var fi = BeginSyntheticFunction(sb);
-                    _functions[sb] = fi;
-                    _scopes[sb] = fi.Scope;
+                    NodeTable.SetFunction(sb, fi);
+                    NodeTable.SetScope(sb, fi.Scope);
                     HoistVarDeclarations(sb.Body, fi.Scope, fi);
                     DeclareLexical(sb.Body, fi.Scope, topLevelFunctionsAreVar: true);
                     VisitStatements(sb.Body);
@@ -1108,8 +1164,8 @@ internal sealed class ScopeAnalyzer
                 }
             }
         }
-        if (fieldInit != null) _functions[GetFieldInitKey(body, false)] = fieldInit;
-        if (staticInit != null) _functions[GetFieldInitKey(body, true)] = staticInit;
+        if (fieldInit != null) NodeTable.SetFunction(GetFieldInitKey(body, false), fieldInit);
+        if (staticInit != null) NodeTable.SetFunction(GetFieldInitKey(body, true), staticInit);
         PopScope();
         Leave();
     }
@@ -1235,9 +1291,9 @@ internal sealed class ScopeAnalyzer
         var fake = new Identifier(hashName);
         _privateRefs[pid] = fake;
         Resolve(fake);
-        var r = _refs[fake];
+        var r = ResolvedRef.Get(fake);
         r.NeedsTdzCheck = false;
-        _refs[fake] = r;
+        ResolvedRef.Set(fake, r);
         if (r.Binding == null)
         {
             // eval code may use private names of the classes enclosing the eval call (checked when the eval runs)

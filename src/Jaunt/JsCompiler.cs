@@ -306,14 +306,14 @@ public static class JsCompiler
         public readonly Parser Parser;
         private readonly int _slot;
         private bool _inUse;
-        public int Tokens, Nodes, Idents, Funcs, ScopeNodes;
+        public int Tokens, Nodes;
         private string _name = "";
         private int _maxNodes;
         private long _deadline;
         private CancellationToken _ct;
         private Jaunt.Runtime.Vm? _vm;
 
-        private ParseSession(int slot, (bool NewTarget, bool Super, bool SuperCall, bool CheckPrivate) o)
+        private ParseSession(int slot, (bool NewTarget, bool Super, bool SuperCall, bool CheckPrivate) o, bool checkTokens)
         {
             _slot = slot;
             Parser = new Parser(new ParserOptions
@@ -327,32 +327,27 @@ public static class JsCompiler
                 CheckPrivateFields = o.CheckPrivate,
                 RegExpParseMode = RegExpParseMode.Validate,
                 // Acornima guards its own recursion (StackGuard → InsufficientExecutionStackException)
-                OnToken = (in Token _) => { if ((++Tokens & 1023) == 0) CheckBudget(_name, _deadline, _ct, _vm); },
+                // A hook call per token is measurable, so only a source long enough for a run of tokens without nodes (`[,,,`) to outlast the budget gets one
+                OnToken = checkTokens ? (in Token _) => { if ((++Tokens & 1023) == 0) CheckBudget(_name, _deadline, _ct, _vm); } : null,
                 OnNode = (Node n, in OnNodeContext _) =>
                 {
-                    // counts used to pre-size the analysis maps (avoids repeated dictionary growth)
-                    switch (n.Type)
-                    {
-                        case NodeType.Identifier: Idents++; break;
-                        case NodeType.FunctionDeclaration or NodeType.FunctionExpression or NodeType.ArrowFunctionExpression
-                            or NodeType.StaticBlock or NodeType.ClassDeclaration or NodeType.ClassExpression:
-                            Funcs++; ScopeNodes++; break;
-                        case NodeType.BlockStatement or NodeType.ForStatement or NodeType.ForInStatement or NodeType.ForOfStatement
-                            or NodeType.SwitchStatement or NodeType.CatchClause:
-                            ScopeNodes++; break;
-                    }
+                    if ((Nodes & 1023) == 0) CheckBudget(_name, _deadline, _ct, _vm);
                     if (++Nodes > _maxNodes)
                         throw new JsCompileException("TooManyNodes", $"Source exceeds the AST node budget of {_maxNodes}.", _name, 0, 0);
                 },
             });
         }
 
-        public static ParseSession Rent((bool NewTarget, bool Super, bool SuperCall, bool CheckPrivate) o)
+        /// <summary>Above this length a source's parser also checks the budget by tokens; below it, a run of tokens without nodes lasts a few milliseconds at most.</summary>
+        private const int TokenCheckedSourceLength = 256 * 1024;
+
+        public static ParseSession Rent((bool NewTarget, bool Super, bool SuperCall, bool CheckPrivate) o, int sourceLength)
         {
-            int slot = (o.NewTarget ? 1 : 0) | (o.Super ? 2 : 0) | (o.SuperCall ? 4 : 0) | (o.CheckPrivate ? 8 : 0);
-            var cache = s_cache ??= new ParseSession?[16];
+            bool checkTokens = sourceLength > TokenCheckedSourceLength;
+            int slot = (o.NewTarget ? 1 : 0) | (o.Super ? 2 : 0) | (o.SuperCall ? 4 : 0) | (o.CheckPrivate ? 8 : 0) | (checkTokens ? 16 : 0);
+            var cache = s_cache ??= new ParseSession?[32];
             var s = cache[slot];
-            if (s == null || s._inUse) s = new ParseSession(slot, o);   // re-entrant compile: use a private parser
+            if (s == null || s._inUse) s = new ParseSession(slot, o, checkTokens);   // re-entrant compile: use a private parser
             else cache[slot] = null;
             s._inUse = true;
             return s;
@@ -361,7 +356,7 @@ public static class JsCompiler
         public void Begin(string name, int maxNodes, long deadline, CancellationToken ct, Jaunt.Runtime.Vm? vm)
         {
             _name = name; _maxNodes = maxNodes; _deadline = deadline; _ct = ct; _vm = vm;
-            Tokens = Nodes = Idents = Funcs = ScopeNodes = 0;
+            Tokens = Nodes = 0;
         }
 
         public void Return()
@@ -372,7 +367,7 @@ public static class JsCompiler
             _name = "";
             // a parser that just handled a huge source keeps a large string pool: let it go instead of caching it
             if (Nodes > 100_000) return;
-            var cache = s_cache ??= new ParseSession?[16];
+            var cache = s_cache ??= new ParseSession?[32];
             cache[_slot] ??= this;
         }
 
@@ -398,7 +393,7 @@ public static class JsCompiler
             throw new JsCompileException("SourceTooLarge", $"Source length {source.Length} exceeds the limit of {options.MaxSourceLength}.", name, 0, 0);
 
         long deadline = options.Timeout is { } to ? Stopwatch.GetTimestamp() + (long)(to.TotalSeconds * Stopwatch.Frequency) : long.MaxValue;
-        var session = ParseSession.Rent(eval is { } e0 ? (e0.AllowNewTarget, e0.AllowSuper, e0.AllowSuperCall, false) : (false, false, false, true));
+        var session = ParseSession.Rent(eval is { } e0 ? (e0.AllowNewTarget, e0.AllowSuper, e0.AllowSuperCall, false) : (false, false, false, true), source.Length);
         session.Begin(name, options.MaxNodes, deadline, ct, vm);
         var parser = session.Parser;
         Program program;
@@ -420,7 +415,6 @@ public static class JsCompiler
         {
             session.Return();
         }
-        int idents = session.Idents, funcs = session.Funcs, scopeNodes = session.ScopeNodes;
 
         var script = new ScriptTemplate
         {
@@ -437,14 +431,11 @@ public static class JsCompiler
             catch (CompileError ce) { throw new JsCompileException(ce.Code, ce.Message, name, ce.Line, ce.Column, ce); }
             script.Module = module;
         }
-        var scopes = new Dictionary<Node, Jaunt.Compiler.Scope>(scopeNodes + 1);
-        var functions = new Dictionary<Node, FunctionInfo>(funcs + 1);
-        var refs = new Dictionary<Identifier, ResolvedRef>(idents);
         int counter = 0;
         Action checkpoint = () => { if ((++counter & 255) == 0) ParseSession.CheckBudget(name, deadline, ct, vm); };
         try
         {
-            var analyzer = new ScopeAnalyzer(scopes, functions, refs, module, options.MaxNestingDepth, checkpoint)
+            var analyzer = new ScopeAnalyzer(module, options.MaxNestingDepth, checkpoint)
             {
                 // a direct eval needs the identifier "eval" (possibly written with \u escapes) in the source
                 MayContainEval = source.Contains("eval", StringComparison.Ordinal) || source.Contains("\\u", StringComparison.Ordinal),
@@ -452,7 +443,7 @@ public static class JsCompiler
             if (eval is { } ev)
             {
                 analyzer.AnalyzeEval(program, script.Strict);
-                var egen = new CodeGen(script, source, scopes, functions, refs, analyzer, options.MaxNestingDepth, checkpoint);
+                var egen = new CodeGen(script, source, analyzer, options.MaxNestingDepth, checkpoint);
                 script.Body = egen.CompileEval(program, ev.AllowNewTarget, ev.InFieldInit);
                 script.EvalContainsArguments = analyzer.EvalContainsArguments;
                 if (analyzer.EvalPrivateNames != null) script.EvalPrivateNames = new List<string>(analyzer.EvalPrivateNames).ToArray();
@@ -460,7 +451,7 @@ public static class JsCompiler
             }
             var fi = analyzer.AnalyzeProgram(program, isModule);
             if (options.Strict || forceStrict) fi.Strict = true;
-            var gen = new CodeGen(script, source, scopes, functions, refs, analyzer, options.MaxNestingDepth, checkpoint);
+            var gen = new CodeGen(script, source, analyzer, options.MaxNestingDepth, checkpoint);
             script.Body = gen.CompileProgram(program, isModule);
             if (isModule) ResolveExportSlots(module!);
         }

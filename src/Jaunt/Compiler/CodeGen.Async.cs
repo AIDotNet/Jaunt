@@ -42,7 +42,7 @@ internal sealed partial class CodeGen
         _fb.Position(f);
         int m = Mark;
         int iter = Temp(), next = Temp(), flag = Temp(), res = Temp(), val = Temp();
-        Scope? outer = _scopes.ContainsKey(f) ? EnterScope(f, pushEnv: false) : null;
+        Scope? outer = NodeTable.TryGetScope(f, out _) ? EnterScope(f, pushEnv: false) : null;
         int src = ForHeadExpr(f.Right, outer);
         _fb.Position(f.Right);
         _fb.Emit(Op.GetAsyncIterator, iter, src);

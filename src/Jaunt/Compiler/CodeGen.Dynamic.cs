@@ -48,7 +48,7 @@ internal sealed partial class CodeGen
         return new ScopeLayout { Names = names, Flags = flags, IsVarScope = varScope };
     }
 
-    private bool IsDynamicRef(Identifier id) => _refs[id] is { Binding: null, Dynamic: true } || _refs[id].Binding?.IsEvalDynamic == true;
+    private bool IsDynamicRef(Identifier id) => ResolvedRef.Get(id) is { Binding: null, Dynamic: true } || ResolvedRef.Get(id).Binding?.IsEvalDynamic == true;
 
     /// <summary>Resolves a dynamic identifier reference once (before the right-hand side is evaluated).</summary>
     private int EmitResolveRef(Identifier id)
@@ -114,7 +114,7 @@ internal sealed partial class CodeGen
         _fb.Position(w);
         int m = Mark;
         int o = Expr(w.Object);
-        var s = _scopes[w];
+        var s = NodeTable.Scope(w);
         FinalizeEnvLayout(s);
         if (_completionReg >= 0) _fb.Emit(Op.LoadUndef, _completionReg);
         _fb.Emit(Op.PushWith, o);
@@ -133,7 +133,7 @@ internal sealed partial class CodeGen
     /// <summary>Compiles eval code (direct or indirect). The body runs with the caller's environment, this and new.target.</summary>
     public FunctionTemplate CompileEval(Program program, bool allowNewTarget, bool inFieldInit)
     {
-        var fi = _functions[program];
+        var fi = NodeTable.Function(program);
         _evalAllowNewTarget = allowNewTarget;
         _evalInFieldInit = inFieldInit;
         var t = new FunctionTemplate

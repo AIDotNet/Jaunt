@@ -151,6 +151,15 @@ public class HostBoundaryTests
     }
 
     [Fact]
+    public void CompileTimeoutStopsALongRunOfTokensWithoutNodes()
+    {
+        // array holes make tokens and no nodes: only the token check of a long source's parser can see this run
+        var src = "[" + new string(',', 15 * 1024 * 1024) + "];";
+        var ex = Assert.Throws<JsCompileException>(() => JsCompiler.CompileScript(src, new JsCompileOptions { Timeout = TimeSpan.FromMilliseconds(1) }));
+        Assert.Equal("CompileTimeout", ex.Code);
+    }
+
+    [Fact]
     public void AnInterruptAsSoonAsTheExecutionBeginsIsNeverLost()
     {
         // the interrupter fires in the moment the engine turns "executing", before the execution's budget has started;
