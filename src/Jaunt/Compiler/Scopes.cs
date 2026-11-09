@@ -39,6 +39,8 @@ internal sealed class Binding
 
     /// <summary>Parameter of a function with a non-simple parameter list: in TDZ until its initializer ran.</summary>
     public bool ParamTdz;
+    /// <summary>The arguments binding of a function with <see cref="FunctionInfo.ArgumentsElided"/>.</summary>
+    public bool ArgumentsElided;
     /// <summary>Top-level var/function of sloppy eval code: lives in the caller's variable environment (name lookup).</summary>
     public bool IsEvalDynamic;
     public bool HasTdz => IsLexical || ParamTdz;
@@ -155,6 +157,21 @@ internal sealed class FunctionInfo
     public bool IsFieldInit;
     /// <summary>Sloppy function with a simple parameter list whose arguments object aliases the parameters.</summary>
     public bool MappedArguments;
+    /// <summary>
+    /// A reference to the arguments binding other than a plain read of <c>arguments.length</c> or <c>arguments[key]</c>, a
+    /// <c>var arguments</c>, or a direct eval that could name it: the object has to exist from the start.
+    /// </summary>
+    public bool ArgumentsEscapes;
+    /// <summary>Some read needs the argument values, not only their count.</summary>
+    public bool ArgumentsIndexed;
+    /// <summary>
+    /// No arguments object is created on entry: its only uses are answered from the frame (Op.ArgCount, Op.ArgLength, Op.ArgElem).
+    /// Parameters stay in registers. When ArgumentsIndexed is set the binding's register starts as undefined and holds the object
+    /// if a read that is not a plain element of the argument list (a key on Object.prototype, say) needed it; user code can only
+    /// reach it from there through an accessor's receiver, and such an object could not alias registers, so a function with
+    /// aliased parameters (mapped, with parameters) is only elided when it reads nothing but the length.
+    /// </summary>
+    public bool ArgumentsElided;
     public bool IsEvalTop;
     /// <summary>Sloppy eval code: names of top-level var / function declarations (declared in the caller's var env).</summary>
     public List<string>? EvalVarNames;
@@ -319,6 +336,7 @@ internal sealed class ScopeAnalyzer
     {
         var fn = _func;
         while (fn.IsArrow && !fn.IsEvalTop && fn.Parent != null) fn = fn.Parent;
+        fn.ArgumentsEscapes = true;
         if (!fn.IsScriptTop && !fn.IsModuleTop && !fn.IsSynthetic && !fn.IsArrow && !fn.IsEvalTop && fn.Node is not null
             && fn.Scope.Lookup("arguments") == null)
         {
@@ -787,6 +805,7 @@ internal sealed class ScopeAnalyzer
             }
             if (s.Function != _func) crossed = true;
             if (crossed || s.Function != _func) b.Captured = true;
+            if (b.Kind == BindingKind.Arguments && !_argumentsMemberRead) s.Function.ArgumentsEscapes = true;
             r.Binding = b;
             if ((b.HasTdz && !isDeclaration) || b.Kind == BindingKind.Import)
             {
@@ -864,6 +883,7 @@ internal sealed class ScopeAnalyzer
                 }
                 else fi.ArgumentsBinding ??= scope.Declare("arguments", BindingKind.Arguments, 0);
                 fi.UsesArguments = true;
+                fi.ArgumentsEscapes = true;
             }
         }
         if (isExpressionName && id != null && scope.Lookup(id.Name) == null)
@@ -878,7 +898,14 @@ internal sealed class ScopeAnalyzer
             foreach (var st in b2.Body) VisitStatement(st);
         }
         else VisitExpression((Expression)body);
-        if (fi.UsesArguments && fi.ArgumentsBinding != null && !fi.Strict && simpleParams && !isArrow)
+        bool mapped = !fi.Strict && simpleParams && !isArrow;
+        if (fi.UsesArguments && fi.ArgumentsBinding != null && CanElideArguments(fi, node, mapped && parameters.Count > 0))
+        {
+            fi.ArgumentsElided = fi.ArgumentsBinding.ArgumentsElided = true;
+            fi.MappedArguments = mapped;
+            if (!simpleParams) foreach (var p in parameters) if (p is RestElement) fi.ArgumentsIndexed = true;   // the frame keeps the whole list anyway
+        }
+        else if (fi.UsesArguments && fi.ArgumentsBinding != null && mapped)
         {
             // mapped arguments object (10.4.4): parameters live in the environment so the object can alias them
             fi.MappedArguments = true;
@@ -888,6 +915,14 @@ internal sealed class ScopeAnalyzer
         _func = parentFunc;
         _scope = parentScope;
         Leave();
+    }
+
+    private static bool CanElideArguments(FunctionInfo fi, Node node, bool aliasesParameters)
+    {
+        if (fi.ArgumentsEscapes || fi.ArgumentsBinding!.Captured || fi.HasDirectEval) return false;
+        if (fi.Scope.Named || fi.Scope.Barrier || fi.BodyScope is { Named: true }) return false;   // bindings may live in a named environment
+        if (node is IFunction { Generator: true } or IFunction { Async: true }) return false;
+        return !(fi.ArgumentsIndexed && aliasesParameters);
     }
 
     private FunctionInfo BeginSyntheticFunction(Node owner)
@@ -1101,7 +1136,7 @@ internal sealed class ScopeAnalyzer
     {
         Enter(node);
         // class decorators are evaluated in the enclosing scope, before the class scope exists
-        foreach (var dec in CodeGen.ClassDecorators(node)) VisitExpression(dec.Expression);
+        foreach (var dec in CodeGen.ClassDecorators(node)) { MarkNotRead(dec.Expression); VisitExpression(dec.Expression); }
         var cs = PushScope(ScopeKind.Class, node);
         if (id != null) cs.Declare(id.Name, BindingKind.ClassInner, node.End);
         // private names
@@ -1124,7 +1159,7 @@ internal sealed class ScopeAnalyzer
         foreach (var el in body.Body)
         {
             // element decorators are evaluated in the class scope, interleaved with the computed keys
-            foreach (var dec in CodeGen.ElementDecorators(el)) VisitExpression(dec.Expression);
+            foreach (var dec in CodeGen.ElementDecorators(el)) { MarkNotRead(dec.Expression); VisitExpression(dec.Expression); }
             switch (el)
             {
                 case MethodDefinition md:
@@ -1209,8 +1244,8 @@ internal sealed class ScopeAnalyzer
                 VisitExpression(asp.Right);
                 break;
             case RestElement r: VisitPattern(r.Argument, isDeclaration); break;
-            case MemberExpression me when !isDeclaration: VisitExpression(me); break;
-            case Expression e when !isDeclaration: VisitExpression(e); break;
+            case MemberExpression me when !isDeclaration: MarkNotRead(me); VisitExpression(me); break;
+            case Expression e when !isDeclaration: MarkNotRead(e); VisitExpression(e); break;
             default: throw new CompileError("InvalidPattern", "Invalid destructuring target.", node);
         }
     }
@@ -1228,7 +1263,7 @@ internal sealed class ScopeAnalyzer
             case ThisExpression: _func.UsesThis = true; break;
             case Super: break;
             case TemplateLiteral tl: foreach (var e in tl.Expressions) VisitExpression(e); break;
-            case TaggedTemplateExpression tt: VisitExpression(tt.Tag); foreach (var e in tt.Quasi.Expressions) VisitExpression(e); break;
+            case TaggedTemplateExpression tt: MarkNotRead(tt.Tag); VisitExpression(tt.Tag); foreach (var e in tt.Quasi.Expressions) VisitExpression(e); break;
             case ArrayExpression ae: foreach (var e in ae.Elements) VisitExpression(e); break;
             case ObjectExpression oe:
                 foreach (var p in oe.Properties)
@@ -1247,16 +1282,20 @@ internal sealed class ScopeAnalyzer
             case FunctionExpression fe: VisitFunction(fe, fe.Id, fe.Params, fe.Body, false, true, fe.Body.Strict); break;
             case ArrowFunctionExpression af: VisitFunction(af, null, af.Params, af.Body, true, false, af.Body is FunctionBody fb && fb.Strict); break;
             case ClassExpression ce: VisitClass(ce, ce.Id, ce.SuperClass, ce.Body); break;
-            case UnaryExpression ue: VisitExpression(ue.Argument); break;
+            case UnaryExpression ue:
+                if (ue is UpdateExpression || ue.Operator == Acornima.Operator.Delete) MarkNotRead(ue.Argument);
+                VisitExpression(ue.Argument);
+                break;
             case BinaryExpression be: VisitExpression(be.Left); VisitExpression(be.Right); break;
             case AssignmentExpression ae:
-                if (ae.Left is Expression le && ae.Left is not ArrayPattern && ae.Left is not ObjectPattern) VisitExpression(le);
+                if (ae.Left is Expression le && ae.Left is not ArrayPattern && ae.Left is not ObjectPattern) { MarkNotRead(le); VisitExpression(le); }
                 else VisitPattern(ae.Left, isDeclaration: false);
                 VisitExpression(ae.Right);
                 break;
             case ConditionalExpression c: VisitExpression(c.Test); VisitExpression(c.Consequent); VisitExpression(c.Alternate); break;
             case CallExpression call:
                 if (call.Callee is Identifier { Name: "eval" } && !call.Optional) MarkEvalSite();
+                MarkNotRead(call.Callee);
                 VisitExpression(call.Callee);
                 foreach (var a in call.Arguments) VisitExpression(a);
                 break;
@@ -1265,7 +1304,14 @@ internal sealed class ScopeAnalyzer
                 foreach (var a in ne.Arguments) VisitExpression(a);
                 break;
             case MemberExpression me:
-                VisitExpression(me.Object);
+                if (me.Object is Identifier { Name: "arguments" } argsId && !me.Optional && !ReferenceEquals(me, _notRead) && (me.Computed || me.Property is Identifier { Name: "length" }))
+                {
+                    _argumentsMemberRead = true;
+                    Resolve(argsId);
+                    _argumentsMemberRead = false;
+                    if (me.Computed && ResolvedRef.Get(argsId).Binding is { Kind: BindingKind.Arguments } ab) ab.Scope.Function.ArgumentsIndexed = true;
+                }
+                else VisitExpression(me.Object);
                 if (me.Computed) VisitExpression(me.Property);
                 else if (me.Property is PrivateIdentifier pid) ResolvePrivate(pid);
                 break;
@@ -1282,6 +1328,18 @@ internal sealed class ScopeAnalyzer
                 throw new CompileError("Unsupported", $"Unsupported expression '{node.Type}'.", node);
         }
         Leave();
+    }
+
+    /// <summary>Set while resolving the object of a plain <c>arguments.length</c> or <c>arguments[key]</c> read.</summary>
+    private bool _argumentsMemberRead;
+    /// <summary>The last expression seen in a position where a member expression is more than a read of its value.</summary>
+    private Node? _notRead;
+
+    /// <summary>Assignment target, delete, ++/--, callee or tag (whose receiver is the object), destructuring target, decorator.</summary>
+    private void MarkNotRead(Node? e)
+    {
+        while (e is ParenthesizedExpression p) e = p.Expression;
+        _notRead = e;
     }
 
     private void ResolvePrivate(PrivateIdentifier pid)
