@@ -5,6 +5,22 @@ counts as public API.
 
 ## Unreleased
 
+### Performance
+
+- Number arithmetic, comparisons and bitwise operators keep numbers in floating-point registers, and `ToInt32` decodes the bits
+  with integer instructions. Loops test their condition at the bottom.
+- Regular expressions run on Jaunt's own engine, which now skips start positions with a literal prefix or first-character set,
+  makes loops atomic where backtracking cannot help, and moves the next start past a failed leading loop. Patterns such as
+  `/\s+$/`, `/\w+@/` and `/(\w+)@/` stay linear on long input. `test` and global `match` allocate less.
+
+### Changed
+
+- `JsLimits.MaxInstructions` counts one work unit fewer per loop entry, because a loop that runs n times now takes n − 1 back edges.
+
+### Fixed
+
+- A `u` or `v` regular expression whose `lastIndex` falls inside a surrogate pair now starts the search at the pair, as in other engines.
+
 ## 1.0.2 (2026-11-09)
 
 A performance release. No public API changed. Over the 59 workloads of the benchmark corpus under NativeAOT, wall time is about 5%

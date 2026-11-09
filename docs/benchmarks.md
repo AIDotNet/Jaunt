@@ -627,3 +627,46 @@ was not tested. Treat the gain as real but the build as untrustworthy until thos
 
 Verified on the merged result: unit tests 634/634 plain and poisoned, test262 100,167/100,169, NativeAOT `verify`, and a script of 49 cases
 plus promise job order crossing the changed features that matched the previous build exactly and Node except for the wording of one error message.
+
+## Ninth pass: integer paths and the regex engine (2026-11-09)
+
+Compared with Jaunt 1.0.2, both on `OptimizationPreference=Speed`, alternating under NativeAOT on an Apple M4.
+
+**Numbers.** `JsValue` has no int32 tag: every number is a double. Measured with a latency micro-benchmark, the cost was not the
+arithmetic but moving each value between the integer and floating-point register files: about 30 cycles per step of a bitwise chain,
+and 19 cycles for `i++` through integer registers against 7 through floating-point ones. Number handlers now load and store the payload
+through floating-point registers, `ToInt32` decodes the bits with integer instructions and no branch on the sign, and loops test their
+condition at the bottom. Bitwise operators went from 12.3 to 10.5 ns. The x64 effect was reasoned about, not measured.
+
+**Regex.** Almost every pattern in the workloads ran on .NET's `System.Text.RegularExpressions`, which is an interpreter under
+NativeAOT, with Jaunt's engine as the fallback. Jaunt's engine now skips start positions by literal prefix or first-character set,
+uses an ASCII bitmap and vectorised search for class loops, makes a greedy loop atomic when what follows cannot start with a character
+it accepts, moves the next start past a failed leading loop, and flattens nested repeats without captures. With that, every pattern it
+can compile runs on it. The first version without the last three steps made `/\s+$/`, `/\w+@/` and `/\d+x/` quadratic, taking over
+5 s on 1 MB of input where 1.0.2 took 1 ms; V8 is also quadratic on those. The final version is linear on all 30 probe rows, including
+`/(\w+)@/` and `/(?<=x)x+y/`, which time out on 1.0.2. Catastrophic patterns such as `/(a+)+$/` still stop on Timeout, Interrupt and
+MaxInstructions.
+
+| Workload | Change, 7 rounds unless noted |
+| --- | ---: |
+| `strings/regex` | −24% |
+| `apps/template-markdown` | −15% (3 rounds) |
+| `compute/spectral-norm` | −15.5% |
+| `compute/game-of-life` | −11% (3 rounds) |
+| `compute/mandelbrot` | −10% (3 rounds) |
+| `apps/graph-algos` | −8.7% (3 rounds) |
+| `compute/int-loop` | −5% |
+| `compute/nqueens` | −5% |
+| `objects/prototype-chain` | +2 to +4.5% |
+| `apps/raytracer` | +3.7% |
+| `compute/fib` | +3.4% |
+
+Over all 59 workloads in one 3-round run the geometric mean of wall time is −0.85%, with allocation down on the regex workloads.
+`prototype-chain`, `raytracer` and `fib` got slower in builds that do not touch the paths they use: `fib` has no loops and still moved
++4% from adding eight handlers to `RunLoop`, and `prototype-chain` moved in a build with only the regex changes. A rebuild of unchanged
+main matched 1.0.2 within 0.8%, so this is not machine drift. Machine-code layout is the likely cause, not established.
+
+Still open: `/[xz]{2}/i` is about 48% slower than on .NET, which searches for both sets at once; and nested quantifiers with captures,
+such as `(a+)+$`, remain exponential, as in V8, bounded by the limits.
+
+Verified on the merged result: unit tests 636/636 plain and poisoned, test262 100,167/100,169, NativeAOT `verify`.
