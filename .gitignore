@@ -11,3 +11,6 @@ tools/unicode/.cache/
 *.rej
 __pycache__/
 *.pyc
+
+# design notes stay local
+/design/
