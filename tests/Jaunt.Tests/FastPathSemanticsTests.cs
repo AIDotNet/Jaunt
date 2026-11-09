@@ -2895,4 +2895,106 @@ fieldsAndCallbacks = [2,4,6]
         Assert.Equal(expected.Length, got.Length);
         for (int i = 0; i < expected.Length; i++) Assert.True(expected[i] == got[i], $"line {i}: expected {expected[i]} but got {got[i]}");
     }
+
+    // regex engine fast paths: literal prefixes and first-character sets, simple loops (follow characters, atomic,
+    // lazy), sticky and anchored searches, empty matches, surrogates, lookbehind, ignore case; expected output from Node
+    private const string RegexEngineScript = """
+const L = [];
+const T = (name, fn) => { let r; try { r = fn(); } catch (e) { r = 'threw ' + (e && e.constructor ? e.constructor.name : typeof e); } const j = JSON.stringify(r); let o = ''; for (const ch of j ?? 'undefined') { const c = ch.charCodeAt(0); o += ch.length === 1 && c >= 32 && c < 127 ? ch : ch.split('').map(x => '\\u' + x.charCodeAt(0).toString(16)).join(''); } L.push(name + ' = ' + o); };
+const ex = (re, s, li) => { if (li !== undefined) re.lastIndex = li; const m = re.exec(s); return m ? [m.index, ...m, re.lastIndex] : [null, re.lastIndex]; };
+const all = (re, s) => [...s.matchAll(re)].map(m => [m.index, ...m]);
+
+// ---- literal prefixes: present but failing, overlapping, sticky
+T('prefixFails', () => [ex(/abc\d/, 'abcx abcy abc7'), ex(/abc\d/, 'abcx'), ex(/took (\d+)ms/, 'took x took 12 took 3ms')]);
+T('overlap', () => [all(/aa/g, 'aaaaa'), all(/aba/g, 'abababa'), 'aaaa'.replace(/aa/g, '-'), 'ababa'.split(/aba/)]);
+T('stickyPrefix', () => { const re = /foo/y; return [ex(re, 'xfoofoo', 0), ex(re, 'xfoofoo', 1), ex(re, 'xfoofoo', 4), ex(re, 'xfoofoo', 7), re.test('foo'), re.lastIndex]; });
+T('stickySet', () => { const re = /\d+/y; return [ex(re, 'ab12cd34', 0), ex(re, 'ab12cd34', 2), ex(re, 'ab12cd34', 3), ex(re, 'ab12cd34', 6)]; });
+T('stickyAnchored', () => { const re = /^a/y, g = /^a/g; return [ex(re, 'aa', 0), ex(re, 'aa', 1), ex(g, 'aa', 0), ex(g, 'aa', 1), ex(/^a/gm, 'b\na', 1)]; });
+T('globalTest', () => { const re = /o/g, r = []; while (re.test('foo boo')) r.push(re.lastIndex); return r; });
+T('prefixAfterLook', () => [all(/(?<=user=)u\d+/g, 'user=u1 xu2 user=u33'), all(/(?=a)ab/g, 'aab ab'), all(/\bab/g, 'ab cab ab'), all(/(?<!\$)\d+/g, '$12 34')]);
+
+// ---- empty matches with g advance (code units, or code points with u)
+T('emptyAdvance', () => ['abc'.replace(/x*/g, '-'), 'a\u{1F600}b'.replace(/(?:)/gu, '-'), 'a\u{1F600}b'.replace(/(?:)/g, '-').length, 'a\u{1F600}b'.split(/(?:)/u), 'a\u{1F600}b'.split(''), 'ab cd'.replace(/\b/g, '|'), all(/a?/g, 'baa'), all(/\d*/g, 'a12b')]);
+T('emptyLastIndex', () => { const re = /x*/g; return [ex(re, 'ab', 0), ex(re, 'ab', 1), ex(re, 'ab', 2), ex(re, 'ab', 3)]; });
+
+// ---- surrogates
+T('surrogates', () => [ex(/\uDE00/, '\u{1F600}'), ex(/\uDE00/u, '\u{1F600}'), ex(/\uDE00/u, 'a\uDE00'), ex(/\uD83D/, '\u{1F600}'), ex(/\uD83D/u, '\u{1F600}'), ex(/\uD83D/u, '\uD83Dx'),
+  all(/[\uD800-\uDFFF]/gu, '\u{1F600}\uD800x\uDC00'), all(/[\uD800-\uDFFF]/g, '\u{1F600}x'), all(/[\u{1F600}-\u{1F602}]/gu, 'x\u{1F601}y\u{1F603}'), all(/[^\u{1F600}]/gu, '\u{1F600}a\u{1F601}'),
+  all(/[^a]/gu, 'a\u{1F600}'), all(/[^a]/g, 'a\u{1F600}'), all(/\u{1F600}+/gu, '\u{1F600}\u{1F600}x\u{1F600}'), all(/\S+/gu, 'a\u{1F600} b')]);
+T('unicodeLastIndex', () => { const r = []; for (let i = 0; i < 4; i++) { const re = /./gu; re.lastIndex = i; const m = re.exec('\u{1F600}x\u{1F601}'); r.push(m ? [m.index, m[0].length, re.lastIndex] : null); } return r; });
+T('unicodeLastIndexSticky', () => { const r = []; for (let i = 0; i < 3; i++) { const re = /./uy; re.lastIndex = i; const m = re.exec('\u{1F600}x'); r.push(m ? [m.index, m[0].length, re.lastIndex] : null); } return r; });
+
+// ---- first-character sets
+T('firstSets', () => [all(/cat|dog/g, 'a dog and a cat'), all(/(?:x|y)+z/g, 'xxa yxz z'), all(/[aeiou]\w/g, 'quiet echo'), all(/[^"]+/g, '"a"b""c'), all(/\d\.\d/g, '1.2 x 3.4.5'),
+  'a b　c  d﻿e'.split(/\s+/), all(/\s/g, 'a b '), all(/[^\x00-\x7f]+/g, 'abé中c\u{1F600}'), all(/[à-ÿ]/g, 'café naïve'),
+  all(/(a)|b/g, 'cab'), all(/(?:)|a/g, 'ba'), all(/a{0}b/g, 'ab'), all(/(\w)\1/g, 'aabbcd'), all(/[^\s\S]/g, 'abc')]);
+
+// ---- simple loops: follow characters, atomic loops, lazy loops
+T('greedyFollow', () => [all(/"[^"]*"/g, 'x "ab" "" "c'), ex(/(\w+)@/, 'abc def@x'), all(/[\w.+-]+@[\w-]+\.[a-z]{2,}/g, 'a@b.co, bad@, x.y+z@ex-ample.org; q@r.io'), ex(/a+a/, 'aaaa'), ex(/(a*)(a)/, 'aaa'),
+  ex(/(\d+)(\d)/, '12345'), ex(/(a+)ab/, 'aaab'), ex(/x(.*)x/, 'x1x2x3'), ex(/(.*)b/, 'abcbd'), ex(/([a-c]*)c/, 'abcabc'), ex(/(\w*)(\w)/, 'ab'), ex(/(a{2,3})a/, 'aaaa'), ex(/(a{2,3})a/, 'aa')]);
+T('eolAtomic', () => [ex(/(.*)$/, 'ab\ncd'), all(/(.*)$/gm, 'ab\ncd'), ex(/([^x]*)$/, 'ab\ncd'), all(/^(\d*)$/gm, '12\nx\n34'), ex(/a(\s*)$/m, 'a  \nb'), ex(/(\w+)$/, 'ab cd'), ex(/(a*)$/, 'aab')]);
+T('lazyFollow', () => [ex(/a(.*?)b/, 'a1b2b'), all(/\{\{([\s\S]*?)\}\}/g, '{{a}} {{b\n}} {{c'), ex(/x([a-z]{0,3}?)y/, 'xaby xabcdy'), ex(/x([a-z]{0,2}?)y/, 'xabcy'), ex(/(a+?)a/, 'aaa'),
+  ex(/<(.+?)>/, '<<a>>'), ex(/(\d*?)5/, '12345'), ex(/(.*?)$/, 'abc'), ex(/a([^b]*?)c/, 'axxbc axc'), ex(/\{\{#each (\w+)\}\}([\s\S]*?)\{\{\/each\}\}/, '{{#each r}}<li>{{x}}</li>{{/each}}'), ex(/(a{1,2}?)b/, 'aaab')]);
+T('nestedLoops', () => [ex(/(?:(a)|b)+/, 'ab'), ex(/(a|ab)(c|bcd)(d*)/, 'abcd'), ex(/((a)|b)+c/, 'abac'), ex(/(?:a+b)+c/, 'aabab abc'), ex(/(\w+\s*)+$/, 'ab cd'), ex(/(x+x+)+y/, 'xxxxxxxxxxy')]);
+
+// ---- lookbehind with loops (right-to-left)
+T('lookbehind', () => [all(/(?<=\$)\d+(\.\d+)?/g, '$1.50 $2 3.0'), all(/(?<=a\d+)x/g, 'a12x bx a9x'), all(/(?<![a-z])\d+/g, 'a1 2 b33'), ex(/(?<=(\d+)(\d+))$/, '1053'), ex(/(?<=\1(a))b/, 'aab'), all(/(?<=^|,)\w+/g, 'a,b,,c')]);
+
+// ---- ignore case and flags
+T('ignoreCase', () => [ex(/k/i, 'K'), ex(/K/iu, 'K'), ex(/K/i, 'k'), ex(/K/iu, 'K'), all(/[a-z]+/gi, 'ABC def'), ex(/hello/i, 'say HeLLo'), ex(/[^a]/i, 'Ab'), ex(/\w/iu, 'ſ'), ex(/\W/iu, 'ſ'),
+  ex(/ß/i, 'ẞ'), ex(/ß/iu, 'ẞ'), all(/[k-l]+/giu, 'KKL'), ex(/(a)\1/i, 'aA'), ex(/s+/i, 'Ssſ')]);
+T('flags', () => [all(/a.c/gs, 'a\nc abc'), all(/a.c/g, 'a\nc abc'), all(/^\w/gm, 'ab\ncd\r\nef'), all(/\w$/gm, 'ab\ncd'), all(/\Bb/g, 'ab b'), ex(/(?<y>\d{4})-(?<m>\d\d)/d, 'on 2024-05').indices]);
+
+// ---- replace / split / match / matchAll / search with the fast paths
+T('replaceForms', () => ['2024-05-06'.replace(/(?<y>\d+)-(?<m>\d+)/, '$<m>/$<y> [$&] [$`] [$\']'), 'aXbXc'.replace(/X/g, (m, i, s) => i), 'a-b'.replace(/(-)/, '$1$1$2'), 'abc'.replace(/(?<n>b)/, (...a) => JSON.stringify(a[a.length - 1])),
+  'x'.replace(/y/g, 'z'), '<a & b>'.replace(/&/g, '&amp;').replace(/</g, '&lt;'), 'aaa'.replaceAll(/a/g, (m, i) => i)]);
+T('splitForms', () => ['a1b22c'.split(/\d+/), 'a1b22c'.split(/(\d)/), 'a1b2c'.split(/\d/, 2), ''.split(/x/), ''.split(/(?:)/), 'abc'.split(/(?:)/), 'a,b'.split(/(?=,)/), 'one  two\tthree\n'.split(/\s+/)]);
+T('matchForms', () => ['a1b22'.match(/\d+/g), 'a1b22'.match(/(\d)(\d)?/), 'xyz'.match(/\d/g), 'xay'.search(/a/), 'xay'.search(/q/), [...'a1b2'.matchAll(/[a-z](\d)/g)].map(m => [m.index, m[1]])]);
+T('legacyStatics', () => { /(\d)(\d)/.test('x12y'); const a = [RegExp.$1, RegExp.$2, RegExp.lastMatch, RegExp.leftContext, RegExp.rightContext]; /z/.test('q'); 'k9'.replace(/(\d)/, 'n'); return [a, RegExp.$1, RegExp.input]; });
+T('regexpCache', () => { const pats = ['^[^@\\s]+@[^@\\s]+\\.\\w+$', '\\d+', '[a-f]+']; return pats.map(p => [new RegExp(p).test('u1@e.com'), new RegExp(p, 'g').exec('zz1@a.bc 77')?.[0]]); });
+
+// ---- long inputs (stack growth, ticks)
+T('long', () => { const s = 'ab'.repeat(5000) + 'c'; return [ex(/(ab)*c/, s).length, ex(/(?:ab)+?c/, s)[0], 'x'.repeat(20000).replace(/x/g, 'yy').length, ex(/[^c]*c/, s)[0], all(/b/g, s).length, ex(/a.*?c/, s)[0]]; });
+
+L.join('\n');
+""";
+
+    private const string RegexEngineExpected = """
+prefixFails = [[10,"abc7",0],[null,0],[15,"took 3ms","3",0]]
+overlap = [[[0,"aa"],[2,"aa"]],[[0,"aba"],[4,"aba"]],"--",["","ba"]]
+stickyPrefix = [[null,0],[1,"foo",4],[4,"foo",7],[null,0],true,3]
+stickySet = [[null,0],[2,"12",4],[3,"2",4],[6,"34",8]]
+stickyAnchored = [[0,"a",1],[null,0],[0,"a",1],[null,0],[2,"a",3]]
+globalTest = [2,3,6,7]
+prefixAfterLook = [[[5,"u1"],[17,"u33"]],[[1,"ab"],[4,"ab"]],[[0,"ab"],[7,"ab"]],[[2,"2"],[4,"34"]]]
+emptyAdvance = ["-a-b-c-","-a-\ud83d\ude00-b-",9,["a","\ud83d\ude00","b"],["a","\ud83d","\ude00","b"],"|ab| |cd|",[[0,""],[1,"a"],[2,"a"],[3,""]],[[0,""],[1,"12"],[3,""],[4,""]]]
+emptyLastIndex = [[0,"",0],[1,"",1],[2,"",2],[null,0]]
+surrogates = [[1,"\ude00",0],[null,0],[1,"\ude00",0],[0,"\ud83d",0],[null,0],[0,"\ud83d",0],[[2,"\ud800"],[4,"\udc00"]],[[0,"\ud83d"],[1,"\ude00"]],[[1,"\ud83d\ude01"]],[[2,"a"],[3,"\ud83d\ude01"]],[[1,"\ud83d\ude00"]],[[1,"\ud83d"],[2,"\ude00"]],[[0,"\ud83d\ude00\ud83d\ude00"],[5,"\ud83d\ude00"]],[[0,"a\ud83d\ude00"],[4,"b"]]]
+unicodeLastIndex = [[0,2,2],[0,2,2],[2,1,3],[3,2,5]]
+unicodeLastIndexSticky = [[0,2,2],[0,2,2],[2,1,3]]
+firstSets = [[[2,"dog"],[12,"cat"]],[[4,"yxz"]],[[1,"ui"],[3,"et"],[6,"ec"]],[[1,"a"],[3,"b"],[6,"c"]],[[0,"1.2"],[6,"3.4"]],["a","b","c","d","e"],[[1,"\u2028"],[3,"\ua0"]],[[2,"\ue9\u4e2d"],[5,"\ud83d\ude00"]],[[3,"\ue9"],[7,"\uef"]],[[1,"a","a"],[2,"b",null]],[[0,""],[1,""],[2,""]],[[1,"b"]],[[0,"aa","a"],[2,"bb","b"]],[]]
+greedyFollow = [[[2,"\"ab\""],[7,"\"\""]],[4,"def@","def",0],[[0,"a@b.co"],[14,"x.y+z@ex-ample.org"],[34,"q@r.io"]],[0,"aaaa",0],[0,"aaa","aa","a",0],[0,"12345","1234","5",0],[0,"aaab","aa",0],[0,"x1x2x","1x2",0],[0,"abcb","abc",0],[0,"abcabc","abcab",0],[0,"ab","a","b",0],[0,"aaaa","aaa",0],[null,0]]
+eolAtomic = [[3,"cd","cd",0],[[0,"ab","ab"],[2,"",""],[3,"cd","cd"],[5,"",""]],[0,"ab\ncd","ab\ncd",0],[[0,"12","12"],[5,"34","34"]],[0,"a  ","  ",0],[3,"cd","cd",0],[3,"","",0]]
+lazyFollow = [[0,"a1b","1",0],[[0,"{{a}}","a"],[6,"{{b\n}}","b\n"]],[0,"xaby","ab",0],[null,0],[0,"aa","a",0],[0,"<<a>","<a",0],[0,"12345","1234",0],[0,"abc","abc",0],[6,"axc","x",0],[0,"{{#each r}}<li>{{x}}</li>{{/each}}","r","<li>{{x}}</li>",0],[1,"aab","aa",0]]
+nestedLoops = [[0,"ab",null,0],[0,"abcd","a","bcd","",0],[0,"abac","a","a",0],[6,"abc",0],[0,"ab cd","cd",0],[0,"xxxxxxxxxxy","xxxxxxxxxx",0]]
+lookbehind = [[[1,"1.50",".50"],[7,"2",null]],[[3,"x"],[10,"x"]],[[3,"2"],[7,"3"]],[4,"","1","053",0],[2,"b","a",0],[[0,"a"],[2,"b"],[5,"c"]]]
+ignoreCase = [[null,0],[0,"\u212a",0],[null,0],[0,"K",0],[[0,"ABC"],[4,"def"]],[4,"HeLLo",0],[1,"b",0],[0,"\u17f",0],[null,0],[null,0],[0,"\u1e9e",0],[[0,"K\u212aL"]],[0,"aA","a",0],[0,"Ss",0]]
+flags = [[[0,"a\nc"],[4,"abc"]],[[4,"abc"]],[[0,"a"],[3,"c"],[7,"e"]],[[1,"b"],[4,"d"]],[[1,"b"]],null]
+replaceForms = ["05/2024 [2024-05] [] [-06]-06","a1b3c","a--$2b","a{\"n\":\"b\"}c","x","&lt;a &amp; b>","012"]
+splitForms = [["a","b","c"],["a","1","b","2","","2","c"],["a","b"],[""],[],["a","b","c"],["a",",b"],["one","two","three",""]]
+matchForms = [["1","22"],["1","1",null],null,1,-1,[[0,"1"],[2,"2"]]]
+legacyStatics = [["1","2","12","x","y"],"9","k9"]
+regexpCache = [[true,null],[true,"1"],[true,"a"]]
+long = [4,0,40000,0,5000,0]
+""";
+
+    [Fact]
+    public void RegexEngineFastPathsMatchReferenceBehavior()
+    {
+        using var engine = new JsEngine();
+        var got = engine.Evaluate(RegexEngineScript).AsString().Split('\n');
+        var expected = RegexEngineExpected.ReplaceLineEndings("\n").TrimEnd('\n').Split('\n');
+        Assert.Equal(expected.Length, got.Length);
+        for (int i = 0; i < expected.Length; i++) Assert.True(expected[i] == got[i], $"line {i}: expected {expected[i]} but got {got[i]}");
+    }
 }

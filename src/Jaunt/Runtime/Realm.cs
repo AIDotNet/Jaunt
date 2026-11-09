@@ -464,8 +464,8 @@ internal sealed partial class Realm
 
     /// <summary>Shared time-budget callback for the native regex engine (one delegate per realm, not one per match).</summary>
     internal Action? RegexTick;
-    /// <summary>Backtracking stacks of the native regex engine, kept between matches (null while a search uses them).</summary>
-    internal Regex.JsRegex.MatcherStacks? RegexStacks;
+    /// <summary>Matcher of the native regex engine (its stacks and buffers), kept between searches (null while a search uses it).</summary>
+    internal Regex.JsRegex.Matcher? RegexMatcher;
 
     public void ChargeBytes(long bytes)
     {
