@@ -151,6 +151,38 @@ internal sealed partial class Vm
     }
 
     /// <summary>
+    /// Object.assign into an empty plain object from a plain object of default data properties: the target takes the source's
+    /// layout and a copy of its slots. Set would behave differently only for a key that %Object.prototype% holds as an accessor
+    /// or a read-only property (<c>__proto__</c> is one), so those are checked. No user code can run. False changes nothing.
+    /// </summary>
+    internal bool TryAssignToEmptyObject(JsObject to, JsObject from)
+    {
+        if (to.GetType() != typeof(JsObject) || from.GetType() != typeof(JsObject) || !to.Extensible || to.Dict != null || from.Dict != null) return false;
+        var ts = to.Shape;
+        var shape = from.Shape;
+        if (ts.Count != 0 || ts.IsUnique || shape.IsUnique || shape.HasSpecialProps || shape.HasIndexKeys || shape.HasSymbolKeys) return false;
+        var realm = Realm;
+        if (ts.Role != ProtoRole.RealmObjectPrototype || shape.Role != ProtoRole.RealmObjectPrototype || !ReferenceEquals(to.Realm, realm) || !ReferenceEquals(from.Realm, realm)) return false;
+        int n = shape.Count;
+        if (n == 0) return true;
+        var flags = shape.Flags;
+        var keys = shape.Keys;
+        var op = realm.ObjectPrototype;
+        for (int i = 0; i < n; i++)
+        {
+            if (flags[i] != PropFlags.Default) return false;
+            if (op.FindOwn(keys[i], out var pf) >= 0 && (pf & (PropFlags.Accessor | PropFlags.Writable)) != PropFlags.Writable) return false;
+        }
+        var copy = new JsValue[n];
+        Array.Copy(from.Slots, copy, n);
+        to.Slots = copy;
+        to.Shape = shape;
+        realm.ChargeProperties(n);
+        Tick(n + 1);
+        return true;
+    }
+
+    /// <summary>
     /// Object spread / rest from an ordinary shaped object whose properties are all plain data properties in insertion
     /// order (no accessors, index or symbol keys): nothing observable runs, so the keys and values are read straight from
     /// the shape and slots. An empty target with the same prototype takes the source's shape and a copy of its slots.
@@ -692,6 +724,17 @@ internal sealed partial class Vm
             ic.NewShape = obj.Shape;
             ic.Slot = shape.Count;
         }
+    }
+
+    /// <summary>
+    /// A class field with a constant name: <see cref="DefineLiteralProp"/> for an ordinary extensible instance. Unlike a
+    /// literal's target, <c>this</c> can be anything a base constructor returned, so anything else takes CreateDataProperty.
+    /// </summary>
+    private void DefineFieldProp(in JsValue target, in JsValue keyValue, in JsValue value, ref IcEntry ic)
+    {
+        var obj = target.AsObjectUnchecked;
+        if (obj.GetType() == typeof(JsObject) && obj.Extensible) DefineLiteralProp(target, keyValue, value, ref ic);
+        else obj.CreateDataPropertyOrThrow(new PropertyKey(keyValue.AsStringUnchecked), value);
     }
 
     private void DefineAccessorOp(JsObject obj, JsValue keyValue, JsValue fnValue, int flags)

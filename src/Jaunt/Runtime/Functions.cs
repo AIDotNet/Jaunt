@@ -10,12 +10,16 @@ internal sealed class Env
 {
     public readonly JsValue[] Slots;
     public readonly Env? Parent;
+    /// <summary>What only scopes that <c>with</c> or direct eval reach have: every closure over a loop or call allocates an Env, the rest stay small.</summary>
+    private DynamicParts? _dynamic;
+    private sealed class DynamicParts { public ScopeLayout? Layout; public JsObject? WithObject; public Dictionary<string, JsValue>? EvalVars; }
+
     /// <summary>Slot names, present only for scopes that direct eval / with may inspect by name.</summary>
-    public ScopeLayout? Layout;
+    public ScopeLayout? Layout { get => _dynamic?.Layout; set { if (value != null || _dynamic != null) (_dynamic ??= new()).Layout = value; } }
     /// <summary>Object environment record of a <c>with</c> statement.</summary>
-    public JsObject? WithObject;
+    public JsObject? WithObject { get => _dynamic?.WithObject; set { if (value != null || _dynamic != null) (_dynamic ??= new()).WithObject = value; } }
     /// <summary>Variables created by sloppy direct eval in this function's variable environment.</summary>
-    public Dictionary<string, JsValue>? EvalVars;
+    public Dictionary<string, JsValue>? EvalVars { get => _dynamic?.EvalVars; set { if (value != null || _dynamic != null) (_dynamic ??= new()).EvalVars = value; } }
 
     public Env(Env? parent, int size, int lexStart)
     {
@@ -174,13 +178,23 @@ internal sealed class JsClosure : JsFunctionObject
     public readonly Env? Env;
     public readonly Feedback Feedback;
     public JsValue BoundThis;
-    public ThisBox? ThisBox;
-    public JsValue BoundNewTarget;
     public JsObject? HomeObject;
-    public JsClosure? FieldInit;
+    public ModuleInstance? Module;
     public bool IsDerived;
     public bool IsClassConstructor;
-    public ModuleInstance? Module;
+    /// <summary>What only classes with fields, derived constructors' arrows and arrows in a constructed function have (methods and module functions are common: their parts stay fields).</summary>
+    private RareParts? _rare;
+    public bool HasRareParts => _rare != null;
+    private sealed class RareParts { public ThisBox? ThisBox; public JsValue BoundNewTarget; public JsClosure? FieldInit; }
+
+    public ThisBox? ThisBox { get => _rare?.ThisBox; set { if (value != null || _rare != null) (_rare ??= new()).ThisBox = value; } }
+    /// <summary>new.target of an arrow's enclosing function: undefined unless that function was constructed, the only case stored.</summary>
+    public JsValue BoundNewTarget
+    {
+        get { var r = _rare; return r != null ? r.BoundNewTarget : default; }
+        set { if (value.Ref != null || _rare != null) (_rare ??= new()).BoundNewTarget = value; }
+    }
+    public JsClosure? FieldInit { get => _rare?.FieldInit; set { if (value != null || _rare != null) (_rare ??= new()).FieldInit = value; } }
 
     public JsClosure(Realm realm, FunctionTemplate t, Env? env, Feedback fb, JsObject proto)
         : base(realm, realm.FunctionShapeFor(proto), t.IsConstructor || t.IsGenerator ? 3 : 2)   // the third slot is for "prototype"
@@ -193,6 +207,22 @@ internal sealed class JsClosure : JsFunctionObject
         Slots[1] = new JsValue(t.Name);
         IsClassConstructor = t.IsClassConstructor;
         IsDerived = t.IsDerived;
+    }
+
+    /// <summary>
+    /// The value of the "prototype" property when it is the third slot of the function layout and holds an object, else null
+    /// (take the general path). <c>new</c> and <c>instanceof</c> read it each time, and it is the same layout almost always.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal JsObject? PrototypeFast()
+    {
+        var shape = Shape;
+        if (shape.Count > 2 && ReferenceEquals(shape.Keys[2].Value, "prototype"))
+        {
+            ref readonly var v = ref Slots[2];
+            if (v.IsObject) return v.AsObjectUnchecked;
+        }
+        return null;
     }
 
     /// <summary>The object an ordinary function's "prototype" property starts with.</summary>

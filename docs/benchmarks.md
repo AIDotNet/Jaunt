@@ -471,7 +471,8 @@ result array are large-object-heap allocations and the LOH budget triggers gen2.
 
 Raising the LOH threshold to 1 MB removes almost every gen2 collection in allocation-heavy scripts without a
 downside in these workloads; a larger gen0 helps short-lived object churn but hurts higher-order, so it is not a
-general recommendation.
+general recommendation. These figures are from CoreCLR at that time; a later measurement under NativeAOT found no effect
+from either setting (see "Seventh pass").
 
 Verified: unit tests 578/578 plain and poisoned, 17 new `FastPathSemanticsTests` cases (Map/Set deletion and insertion
 during iteration, compaction under a live iterator, −0/NaN keys, rope and mixed-type keys, clear during iteration, a
@@ -545,3 +546,40 @@ parser is untouched. A/B of the same harness, alternating builds, three rounds:
 
 The parser is now about 60% of compile time, and the remaining gap to QuickJS (about 16%) is mostly there. Verified: unit tests 628/628
 plain and poisoned, test262 100,167/100,169, NativeAOT `verify` on net10.0.
+
+## Seventh pass: slow operations against V8 jitless, and NativeAOT settings (2026-11-09)
+
+Single-operation micro-benchmarks against `node --jitless` (V8 13.6) showed that property access, calls, `for-of` and destructuring
+were already level or ahead, and that a few operations lagged. Times are per operation under NativeAOT on an Apple M4:
+
+| Operation | Before | After | V8 jitless |
+| --- | ---: | ---: | ---: |
+| `Object.assign({}, plain)` | 166 ns | 46 ns | 31 ns |
+| `x instanceof F` | 21 ns | 11 ns | 8 ns |
+| class with two constant-name fields | 95 ns | 69 ns | 31 ns |
+| `new F(a, b)` | 45 ns | 41 ns | 20 ns |
+
+Over the 59 workloads, three rounds alternating with the previous build on default settings, the geometric mean of wall time is
+−2.5% and of allocation −2.9%. Ten workloads improved by more than 3%: `dynamic-code` −47%, `alloc-shapes` −25%,
+`prototype-chain` −7.5%, `mini-interpreter` −6.3%, `classes-inheritance` −4.4% among them. The `dynamic-code` figure is a best case,
+because that workload evaluates the same strings on every call; distinct strings gain nothing, and `new Function` does not use the
+cache. `compute/nqueens` got 7.3% slower (0.90 to 0.96 ms) in these default-settings builds, though it does not use the changed
+paths. The cause is not established.
+
+Tried and reverted: moving `Dict` out of `JsObject` (saved 8 bytes, slowed `graph-algos` and `async-await`), growing slots by half and
+reserving room in object spread (no stable gain), and moving `HomeObject` and `Module` out of closures (an extra allocation for every
+method and module function). Making objects and environments smaller on its own hardly changed wall time.
+
+**NativeAOT settings**, measured on the host, three rounds alternating:
+
+| Setting | Effect |
+| --- | --- |
+| `OptimizationPreference=Speed` | wall −2.0%, 19 workloads better and 2 worse by more than 3%; compile −6%, first call +2%, 6.8 to 7.1 MB; `nqueens` 0.96 to 0.88 ms, `graph-algos` +3.8%, `event-loop-scheduler` +3.1% |
+| `IlcInstructionSet=apple-m1` | within ±2% on 8 workloads, except `closures` +4% |
+| `[SkipLocalsInit]` on `RunLoop` | no stable gain |
+| `DOTNET_gcConcurrent=0` | `higher-order` −9%, `map-set` −5%, others about ±1.4% on 6 allocation-heavy workloads |
+| `DOTNET_GCgen0size`, `DOTNET_GCgen0MaxBudget`, `DOTNET_GCLOHThreshold` | within about ±2% on those workloads |
+
+`samples/Jaunt.AotHost` now publishes with `Speed`, so NativeAOT figures from here on are not directly comparable with earlier ones.
+
+Verified: unit tests 629/629 plain and poisoned, one Node-generated comparison of 101 lines, test262 100,167/100,169, NativeAOT `verify`.

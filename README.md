@@ -88,6 +88,19 @@ dotnet run -c Release --project tools/Jaunt.Test262 -- artifacts/test262
 The SDK used for the stable channel is pinned in `global.json`; NativeAOT/runtime packs are pinned to patched
 servicing releases in `Directory.Build.targets`.
 
+## Publishing with NativeAOT
+
+Jaunt is a library, so these are settings of your application's project. For hosts that care about script throughput:
+
+```xml
+<PublishAot>true</PublishAot>
+<OptimizationPreference>Speed</OptimizationPreference>
+```
+
+On the benchmark corpus `Speed` was about 2% faster overall and about 6% faster at compiling scripts, for about 0.3 MB of
+binary size and about 2% on the first call. Measurements and the GC settings that were tried are in
+[`docs/benchmarks.md`](docs/benchmarks.md).
+
 ## Releasing
 
 Pushing a tag such as `v1.0.1` runs [`.github/workflows/release.yml`](.github/workflows/release.yml): the full

@@ -1539,6 +1539,8 @@ internal sealed partial class Vm
     [MethodImpl(MethodImplOptions.NoInlining)]
     private JsObject ConstructPrototype(JsClosure c)
     {
+        var fast = c.PrototypeFast();
+        if (fast != null) return fast;
         var proto = c.Get("prototype");
         return proto.IsObject ? proto.AsObjectUnchecked : Operations.GetPrototypeFromConstructor(Realm, c, Realm.ObjectPrototype);
     }

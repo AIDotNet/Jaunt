@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Threading;
 using Jaunt.Compiler;
 
 namespace Jaunt.Runtime;
@@ -349,6 +350,26 @@ internal sealed partial class Vm
     // ------------------------------------------------------------------ eval
 
     /// <summary>PerformEval (19.2.1.1). <paramref name="caller"/> is null for indirect eval.</summary>
+    // Compiled eval code by source and compile flags: code that evaluates the same string again skips the parser. A template
+    // is immutable and holds no realm state, and each evaluation gets its own feedback, so template objects and regular
+    // expressions stay per evaluation. Bounded by the total length of the cached sources: over the limit, it starts over.
+    private readonly Dictionary<(string Source, int Flags), ScriptTemplate> _evalCache = new();
+    private int _evalCacheChars;
+    private const int MaxEvalCacheChars = 256 * 1024, MaxEvalCacheSourceLength = 8 * 1024;
+
+    private ScriptTemplate CompileEvalCached(string source, bool strictCaller, bool allowNewTarget, bool allowSuper, CancellationToken ct, bool inFieldInit, bool allowSuperCall, Vm vm)
+    {
+        if (source.Length > MaxEvalCacheSourceLength)
+            return JsCompiler.CompileEval(source, strictCaller, allowNewTarget, allowSuper, ct, inFieldInit, allowSuperCall, vm);
+        int flags = (strictCaller ? 1 : 0) | (allowNewTarget ? 2 : 0) | (allowSuper ? 4 : 0) | (inFieldInit ? 8 : 0) | (allowSuperCall ? 16 : 0);
+        if (_evalCache.TryGetValue((source, flags), out var cached)) return cached;
+        var t = JsCompiler.CompileEval(source, strictCaller, allowNewTarget, allowSuper, ct, inFieldInit, allowSuperCall, vm);
+        if (_evalCacheChars + source.Length > MaxEvalCacheChars) { _evalCache.Clear(); _evalCacheChars = 0; }
+        _evalCache[(source, flags)] = t;
+        _evalCacheChars += source.Length;
+        return t;
+    }
+
     internal JsValue PerformEval(JsValue x, Frame? caller, bool strictCaller, bool allowNewTarget, int flags = 0)
     {
         var realm = Realm;
@@ -359,7 +380,7 @@ internal sealed partial class Vm
         try
         {
             bool inDerivedCtor = caller != null && (caller.ThisBox != null || (caller.Callee.IsDerived && (caller.Flags & FrameFlags.Construct) != 0));
-            t = JsCompiler.CompileEval(x.AsStringUnchecked, strictCaller, allowNewTarget, allowSuper: home != null, Token, inFieldInit: (flags & 8) != 0, allowSuperCall: inDerivedCtor, vm: this);
+            t = CompileEvalCached(x.AsStringUnchecked, strictCaller, allowNewTarget, allowSuper: home != null, Token, inFieldInit: (flags & 8) != 0, allowSuperCall: inDerivedCtor, vm: this);
         }
         catch (JsCompileException ce)
         {
