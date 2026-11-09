@@ -832,7 +832,6 @@ internal sealed partial class Vm
         if (_sortScratch != null && _sortScratch.Length > 1 << 12) _sortScratch = null;   // an idle engine keeps at most 64 KB of sort scratch
         // a compacting GC may have moved the chunk to 8 mod 16; it is empty now, and is rarely moved again once it is old
         if (_chunkIndex == 0 && !IsAligned(_chunk)) _chunks[0] = _chunk = NewChunk(_chunk.Length);
-        TrimJobs();
         _freeCoroutineFrames = null;
         _freeCoroutineFrameCount = 0;
         var pool = _frames;   // Sp is 0 here: every slot holds a pooled frame (or nothing)

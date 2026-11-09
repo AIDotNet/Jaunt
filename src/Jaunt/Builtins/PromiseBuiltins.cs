@@ -103,8 +103,18 @@ internal static class PromiseBuiltins
             if (realm.IsPristinePromise(p))
             {
                 // SpeciesConstructor yields %Promise%, and nothing else can reach the derived promise's resolving functions
-                var derived = new JsPromise(realm);
-                p.AddReaction(new ThenReaction(a[0].Ref as JsFunctionObject, a[1].Ref as JsFunctionObject, derived));
+                JsFunctionObject? onFulfilled = a[0].Ref as JsFunctionObject, onRejected = a[1].Ref as JsFunctionObject;
+                JsPromise derived;
+                if (onFulfilled != null && onRejected != null)
+                {
+                    derived = new JsPromise(realm);
+                    p.AddReaction(new ThenReaction(onFulfilled, onRejected, derived));
+                }
+                else
+                {
+                    derived = new JsPromise(realm, onFulfilled ?? onRejected, onRejected != null);
+                    p.AddDerived(derived);
+                }
                 return JsValue.FromObject(derived);
             }
             var c = Operations.SpeciesConstructorDefault(realm, p, realm.PromiseConstructor);

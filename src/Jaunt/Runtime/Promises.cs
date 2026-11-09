@@ -98,7 +98,8 @@ internal abstract class Job
 /// </summary>
 internal abstract class PromiseReaction : Job
 {
-    public PromiseReaction? Next;
+    /// <summary>The next <see cref="PromiseReaction"/> or then-derived <see cref="JsPromise"/> of the list.</summary>
+    public object? Next;
 }
 
 /// <summary>The reaction pair of one <c>then</c> call: the handlers (null when not callable) and the derived promise.</summary>
@@ -213,11 +214,72 @@ internal sealed class CallbackJob : Job
 /// <summary>Promise instance (ECMA-262 27.2).</summary>
 internal sealed class JsPromise : JsObject
 {
-    public PromiseState State;
-    public bool IsHandled;
+    private const byte StateMask = 3, HandledBit = 4, HandlerRejectsBit = 8;
+    /// <summary>State, [[PromiseIsHandled]] and <see cref="HandlerRejectsBit"/>, together in the byte left free after the object header fields.</summary>
+    private byte _bits;
+    public PromiseState State
+    {
+        [MethodImpl(MethodImplOptions.AggressiveInlining)] get => (PromiseState)(_bits & StateMask);
+        [MethodImpl(MethodImplOptions.AggressiveInlining)] set => _bits = (byte)((_bits & ~StateMask) | (byte)value);
+    }
+    public bool IsHandled
+    {
+        [MethodImpl(MethodImplOptions.AggressiveInlining)] get => (_bits & HandledBit) != 0;
+        [MethodImpl(MethodImplOptions.AggressiveInlining)] set { if (value) _bits |= HandledBit; else _bits = (byte)(_bits & ~HandledBit); }
+    }
     public JsValue Result;
-    /// <summary>While pending: the reactions, most recently added first.</summary>
-    private PromiseReaction? _reactions;
+    /// <summary>While pending: the reactions (<see cref="PromiseReaction"/> or then-derived promise), most recently added first.</summary>
+    private object? _reactions;
+    /// <summary>
+    /// A promise made by an unobservable <c>then</c> with at most one handler doubles as that call's reaction, one object
+    /// instead of two (nothing else can resolve it): this is the link in the list of the promise <c>then</c> was called on,
+    /// and <see cref="Result"/>, unused while pending and read by nothing else then, holds the handler until the job runs.
+    /// </summary>
+    private object? _nextReaction;
+
+    /// <summary>The derived promise of an unobservable <c>then</c> with at most one handler, which runs on rejection when <paramref name="onRejected"/>.</summary>
+    public JsPromise(Realm realm, JsFunctionObject? handler, bool onRejected) : this(realm)
+    {
+        if (handler != null) Result = JsValue.FromObject(handler);
+        if (onRejected) _bits = HandlerRejectsBit;
+    }
+
+    /// <summary>The job of a promise made by the constructor above.</summary>
+    public void RunAsReaction(bool fulfilled, in JsValue argument)
+    {
+        var handler = Unsafe.As<JsFunctionObject>(Result.Ref);
+        JsValue result;
+        bool ok;
+        if (handler == null || fulfilled == ((_bits & HandlerRejectsBit) != 0))
+        {
+            result = argument;
+            ok = fulfilled;
+        }
+        else
+        {
+            try
+            {
+                result = handler.Call(JsValue.Undefined, new ReadOnlySpan<JsValue>(in argument));
+                ok = true;
+            }
+            catch (JsThrowException ex)
+            {
+                result = ex.Value;
+                ok = false;
+            }
+        }
+        Result = default;
+        if (ok) ResolveWith(result);
+        else RejectWith(result);
+    }
+
+    private static object? NextOf(object reaction) => reaction is JsPromise p ? p._nextReaction : Unsafe.As<PromiseReaction>(reaction).Next;
+
+    private static void SetNext(object reaction, object? next)
+    {
+        if (reaction is JsPromise p) p._nextReaction = next;
+        else Unsafe.As<PromiseReaction>(reaction).Next = next;
+    }
 
     public JsPromise(Realm realm) : base(realm, realm.PromiseInstanceShape, 0) { }
     public JsPromise(Realm realm, JsObject proto) : base(realm, proto) { }
@@ -288,34 +350,39 @@ internal sealed class JsPromise : JsObject
     }
 
     /// <summary>TriggerPromiseReactions: schedules the reactions in the order they were added.</summary>
-    private void Trigger(PromiseReaction reactions, bool fulfilled, in JsValue value)
+    private void Trigger(object reactions, bool fulfilled, in JsValue value)
     {
         _reactions = null;
-        PromiseReaction? ordered = null;
-        for (PromiseReaction? r = reactions; r != null;)
+        object? ordered = null;
+        for (object? r = reactions; r != null;)
         {
-            var next = r.Next;
-            r.Next = ordered;
+            var next = NextOf(r);
+            SetNext(r, ordered);
             ordered = r;
             r = next;
         }
         var vm = Realm.Vm;
         while (ordered != null)
         {
-            var next = ordered.Next;
-            ordered.Next = null;
+            var next = NextOf(ordered);
+            SetNext(ordered, null);
             vm.EnqueueJob(ordered, fulfilled, value);
             ordered = next;
         }
     }
 
     /// <summary>PerformPromiseThen (27.2.5.4.1).</summary>
-    public void AddReaction(PromiseReaction reaction)
+    public void AddReaction(PromiseReaction reaction) => AddReactionObject(reaction);
+
+    /// <summary>PerformPromiseThen with a promise that is its own reaction (see <see cref="_nextReaction"/>).</summary>
+    public void AddDerived(JsPromise derived) => AddReactionObject(derived);
+
+    private void AddReactionObject(object reaction)
     {
         switch (State)
         {
             case PromiseState.Pending:
-                reaction.Next = _reactions;
+                SetNext(reaction, _reactions);
                 _reactions = reaction;
                 break;
             case PromiseState.Fulfilled:
@@ -364,14 +431,30 @@ internal sealed partial class Vm
 {
     private struct JobEntry
     {
-        public Job Job;
+        /// <summary>A <see cref="Job"/> or a promise that is its own reaction.</summary>
+        public object Job;
         public JsValue Argument;
         public bool Fulfilled;
     }
 
-    /// <summary>Ring buffer of pending jobs (the capacity is a power of two).</summary>
-    private JobEntry[] _jobs = Array.Empty<JobEntry>();
+    /// <summary>
+    /// A block of the job queue. Blocks double up to <see cref="MaxJobChunk"/> entries, which keeps them out of the large
+    /// object heap (a buffer there is costly to allocate and brings on full collections), and a burst of jobs never copies
+    /// the ones already queued. An idle engine holds two blocks at most, 128 KB.
+    /// </summary>
+    private sealed class JobChunk(int size)
+    {
+        public readonly JobEntry[] Entries = new JobEntry[size];
+        public JobChunk? Next;
+    }
+
+    private const int MaxJobChunk = 2048;
+    private JobChunk? _jobHeadChunk;
+    private JobChunk? _jobTailChunk;
+    /// <summary>The largest block consumed since the queue last needed one, reused by the next.</summary>
+    private JobChunk? _spareJobChunk;
     private int _jobHead;
+    private int _jobTail;
     private int _jobCount;
     public int MaxPendingJobs = 1_000_000;
 
@@ -379,28 +462,45 @@ internal sealed partial class Vm
 
     public void EnqueueJob(Job job) => EnqueueJob(job, false, default);
 
-    public void EnqueueJob(Job job, bool fulfilled, in JsValue argument)
+    public void EnqueueJob(object job, bool fulfilled, in JsValue argument)
     {
         int count = _jobCount;
         if (count >= MaxPendingJobs)
             throw new JsTerminationException(TerminationKind.PendingJobs, $"Pending job queue exceeded its limit of {MaxPendingJobs}.", count + 1, MaxPendingJobs);
-        var jobs = _jobs;
-        if (count == jobs.Length) jobs = GrowJobs();
-        ref var e = ref jobs[(_jobHead + count) & (jobs.Length - 1)];
+        var chunk = _jobTailChunk;
+        int tail = _jobTail;
+        if (chunk == null || tail == chunk.Entries.Length)
+        {
+            chunk = AddJobChunk(chunk);
+            tail = 0;
+        }
+        ref var e = ref chunk.Entries[tail];
         e.Job = job;
         e.Argument = argument;
         e.Fulfilled = fulfilled;
+        _jobTail = tail + 1;
         _jobCount = count + 1;
     }
 
     [MethodImpl(MethodImplOptions.NoInlining)]
-    private JobEntry[] GrowJobs()
+    private JobChunk AddJobChunk(JobChunk? last)
     {
-        var old = _jobs;
-        var jobs = new JobEntry[Math.Max(old.Length * 2, 16)];
-        for (int i = 0; i < _jobCount; i++) jobs[i] = old[(_jobHead + i) & (old.Length - 1)];
+        var chunk = _spareJobChunk;
+        if (chunk != null) _spareJobChunk = null;
+        else chunk = new JobChunk(last == null ? 16 : Math.Min(last.Entries.Length * 2, MaxJobChunk));
+        if (last == null) _jobHeadChunk = chunk;
+        else last.Next = chunk;
+        return _jobTailChunk = chunk;
+    }
+
+    /// <summary>Moves past a consumed block.</summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private void AdvanceJobHead(JobChunk chunk)
+    {
         _jobHead = 0;
-        return _jobs = jobs;
+        _jobHeadChunk = chunk.Next;
+        chunk.Next = null;
+        if (_spareJobChunk == null || _spareJobChunk.Entries.Length < chunk.Entries.Length) _spareJobChunk = chunk;
     }
 
     /// <summary>Runs ready microtasks until the queue is empty (each job is budgeted).</summary>
@@ -427,16 +527,23 @@ internal sealed partial class Vm
             {
                 // notified waiters, and (every 64 jobs) timed-out ones while a job loop keeps the queue busy
                 if (_wakePending != 0 || (_asyncWaiters is { Count: > 0 } && (++n & 63) == 0)) ProcessAsyncWaiters();
-                var jobs = _jobs;
-                ref var e = ref jobs[_jobHead];
+                var chunk = _jobHeadChunk!;
+                int head = _jobHead;
+                ref var e = ref chunk.Entries[head];
                 var job = e.Job;
                 var argument = e.Argument;
                 bool fulfilled = e.Fulfilled;
                 e = default;
-                _jobHead = (_jobHead + 1) & (jobs.Length - 1);
-                _jobCount--;
+                if (--_jobCount == 0)
+                {
+                    _jobHead = 0;
+                    _jobTail = 0;
+                }
+                else if (++head == chunk.Entries.Length) AdvanceJobHead(chunk);
+                else _jobHead = head;
                 Tick();
-                job.Run(Realm, fulfilled, argument);
+                if (job is JsPromise derived) derived.RunAsReaction(fulfilled, argument);
+                else Unsafe.As<Job>(job).Run(Realm, fulfilled, argument);
             }
             // Atomics.waitAsync waiters: notified by another agent, or timed out without a host timer
             if (_asyncWaiters is not { Count: > 0 }) break;
@@ -524,14 +631,11 @@ internal sealed partial class Vm
 
     public void ClearJobs()
     {
-        _jobs = Array.Empty<JobEntry>();
+        _jobHeadChunk = null;
+        _jobTailChunk = null;
+        _spareJobChunk = null;
         _jobHead = 0;
+        _jobTail = 0;
         _jobCount = 0;
-    }
-
-    /// <summary>An idle engine does not keep the buffer of a burst of jobs.</summary>
-    private void TrimJobs()
-    {
-        if (_jobCount == 0 && _jobs.Length > 1 << 12) ClearJobs();
     }
 }
