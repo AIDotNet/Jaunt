@@ -405,7 +405,10 @@ internal sealed partial class CodeGen
     private int ArrayLiteral(ArrayExpression ae, int dst)
     {
         int d = Dst(dst);
-        _fb.Emit(Op.NewArray, d, ae.Elements.Count);
+        // up to the first spread: that one sizes the store once it knows the length
+        int leading = 0;
+        foreach (var el in ae.Elements) { if (el is SpreadElement) break; leading++; }
+        _fb.Emit(Op.NewArray, d, leading);
         int remaining = ae.Elements.Count;
         foreach (var el in ae.Elements)
         {
@@ -430,14 +433,19 @@ internal sealed partial class CodeGen
     private int ObjectLiteral(ObjectExpression oe, int dst)
     {
         int d = Dst(dst);
-        _fb.Emit(Op.NewObject, d, Math.Min(oe.Properties.Count, Jaunt.Runtime.Shape.MaxShapeProperties));   // slots to start with
+        // slots to start with, up to the first spread: an empty target takes a copy of the source's slots instead
+        int leading = 0;
+        foreach (var p in oe.Properties) { if (p is SpreadElement) break; leading++; }
+        _fb.Emit(Op.NewObject, d, Math.Min(leading, Jaunt.Runtime.Shape.MaxShapeProperties));
+        int remaining = oe.Properties.Count;
         foreach (var p in oe.Properties)
         {
             int m = Mark;
+            remaining--;
             if (p is SpreadElement sp)
             {
                 int v = Expr(sp.Argument);
-                _fb.Emit(Op.CopyDataProps, d, v);
+                _fb.Emit(Op.CopyDataProps, d, v, remaining);   // room for the properties that follow
                 ResetTo(m);
                 continue;
             }
@@ -873,6 +881,20 @@ internal sealed partial class CodeGen
     private int Member(MemberExpression me, int dst)
     {
         int m = Mark;
+        if (me.Object is Identifier oid && ResolvedRef.TryGet(oid, out var oref) && oref.Binding is { ArgumentsElided: true } elided)
+        {
+            int da = dst >= 0 ? dst : Temp();
+            if (me.Computed)
+            {
+                int key = Expr(me.Property);
+                _fb.Position(me);
+                _fb.Emit(Op.ArgElem, da, key, elided.Register);
+            }
+            else if (elided.Register >= 0) _fb.Emit(Op.ArgLength, da, elided.Register);
+            else _fb.Emit(Op.ArgCount, da);
+            ResetTo(Math.Max(m, da + 1));
+            return da;
+        }
         if (me.Object is Super)
         {
             int d0 = Dst(dst);
@@ -940,7 +962,9 @@ internal sealed partial class CodeGen
     private int SpreadArguments(in NodeList<Expression> args)
     {
         int arr = Temp();
-        _fb.Emit(Op.NewArray, arr, args.Count);
+        int leading = 0;
+        foreach (var a in args) { if (a is SpreadElement) break; leading++; }
+        _fb.Emit(Op.NewArray, arr, leading);
         int remaining = args.Count;
         foreach (var a in args)
         {
@@ -2105,7 +2129,7 @@ internal sealed partial class CodeGen
             }
             ResetTo(m);
         }
-        _fb.Emit(Op.RetUndef);
+        _fb.Emit(isStatic ? Op.RetUndef : Op.RetFieldInit);
         var result = EndFunction(t);
         (_fb, _func, _scope, _control, _envDepth, _completionReg, _optionalExit, _template, _tryCatchDepth) = saved;
         return result;

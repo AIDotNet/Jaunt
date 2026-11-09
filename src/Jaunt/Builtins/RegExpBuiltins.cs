@@ -156,8 +156,8 @@ internal static class RegExpBuiltins
         {
             var realm = a.Realm;
             var s = Operations.ToString(realm, a[0]);
-            if (a.This.Ref is JsRegExp re && IsPristineExec(realm, re))
-                return JsValue.FromBool(ExecMatch(realm, re, s) != null);
+            if (a.This.Ref is JsRegExp re && IsExecPristine(realm, re))
+                return JsValue.FromBool(ExecTest(realm, re, s));
             return JsValue.FromBool(!RegExpExec(realm, a.This, s).IsNull);
         });
         r.Method(proto, "toString", 0, static (in NativeArgs a) =>
@@ -291,7 +291,7 @@ internal static class RegExpBuiltins
             if (lim == 0) return JsValue.FromObject(res);
             if (s.Length == 0)
             {
-                var m0 = SafeMatch(realm, re, s, 0);
+                var m0 = SafeMatch(realm, re.Program, s, 0);
                 if (!m0.Success) res.Push(new JsValue(s));
                 else RecordLegacy(realm, m0, re.GroupCount);   // the splitter is a %RegExp% instance of this realm
                 return JsValue.FromObject(res);
@@ -301,7 +301,7 @@ internal static class RegExpBuiltins
             bool unicode = re.Unicode;
             while (q < s.Length)
             {
-                var m = SafeMatch(realm, re, s, q);
+                var m = SafeMatch(realm, re.Program, s, q);
                 if (!m.Success || m.Index >= s.Length) break;
                 RecordLegacy(realm, m, re.GroupCount);
                 int e = m.Index + m.Length;
@@ -501,8 +501,22 @@ internal static class RegExpBuiltins
 
     private static JsRegExp FromEntry(Realm realm, RegExpProgram entry, string pattern, string flags, JsObject? proto)
     {
-        var re = new JsRegExp(realm, proto ?? realm.RegExpPrototype, entry);
-        re.AddOwnProperty("lastIndex", JsValue.Zero, PropFlags.Writable);
+        var defaultProto = realm.RegExpPrototype;
+        proto ??= defaultProto;
+        var re = new JsRegExp(realm, proto, entry);
+        // the usual instance goes straight to its one-property layout: no transition lookup, a one-slot array
+        if (ReferenceEquals(proto, defaultProto) && realm.RegExpInstanceShape is { } shape)
+        {
+            realm.ChargeProperty();
+            re.Slots = new JsValue[1];
+            re.Slots[0] = JsValue.Zero;
+            re.Shape = shape;
+        }
+        else
+        {
+            re.AddOwnProperty("lastIndex", JsValue.Zero, PropFlags.Writable);
+            if (ReferenceEquals(proto, defaultProto) && realm.BulkObjects == null && re.Dict == null) realm.RegExpInstanceShape = re.Shape;
+        }
         re.LastIndexInSlot0 = true;
         return re;
     }
@@ -513,6 +527,12 @@ internal static class RegExpBuiltins
         public bool Success;
         public int[] Caps = Array.Empty<int>();
         public string Input = "";
+        /// <summary>
+        /// Set on the realm's <see cref="Realm.LegacyTestMatch"/> when <c>test</c> found the bounds but not the captures of a
+        /// pattern that has some: searching this program from <see cref="LazyStart"/> again finds the same match, with captures.
+        /// </summary>
+        public RegExpProgram? LazyProgram;
+        public int LazyStart;
         public int Index => Caps[0];
         public int Length => Caps[1] - Caps[0];
         public string Value => Input.Substring(Caps[0], Caps[1] - Caps[0]);
@@ -534,7 +554,7 @@ internal static class RegExpBuiltins
         return false;
     }
 
-    private static RegexMatch SafeMatch(Realm realm, JsRegExp re, string s, int start)
+    private static RegexMatch SafeMatch(Realm realm, RegExpProgram re, string s, int start)
     {
         realm.Vm.Tick(Math.Max(1, (s.Length - start) / 256));
         var native = re.Native;
@@ -542,34 +562,50 @@ internal static class RegExpBuiltins
             native = re.NativeIgnoreCase;
         if (native != null)
         {
-            var m = new JsRegex.Matcher(native, s, realm.RegexTick ??= () => realm.Vm.Tick(64));
-            if (!m.Search(start, sticky: false)) return s_noMatch;
-            return new RegexMatch { Success = true, Caps = m.Caps, Input = s };
+            // the stacks are taken for the duration of the search; if it ends by throwing, the next one allocates new ones
+            var stacks = realm.RegexStacks;
+            realm.RegexStacks = null;
+            var m = new JsRegex.Matcher(native, s, realm.RegexTick ??= () => realm.Vm.Tick(64), stacks ??= new JsRegex.MatcherStacks());
+            bool found = m.Search(start, sticky: false);
+            if (m.TryReturnStacks(stacks)) realm.RegexStacks = stacks;
+            return found ? new RegexMatch { Success = true, Caps = m.Caps, Input = s } : s_noMatch;
         }
-        System.Text.RegularExpressions.Match dm;
-        try { dm = re.Regex!.Match(s, start); }
+        try
+        {
+            // no capture groups: only the bounds are needed, and asking for just those allocates no Match
+            if (Math.Max(re.Groups, re.DotnetMaxGroup) == 0)
+                return Bounds(re.Regex!, s, start, out int index, out int length)
+                    ? new RegexMatch { Success = true, Caps = new[] { index, index + length }, Input = s }
+                    : s_noMatch;
+            return FromDotnetMatch(re, re.Regex!.Match(s, start), s);
+        }
         catch (System.Text.RegularExpressions.RegexMatchTimeoutException)
         {
-            realm.Vm.CheckTimeLimits();
-            if (re.SliceFallback is { } fb) return FallbackMatch(realm, re, fb, s, start);
-            // a pattern only .NET can run (the native engine rejected it, e.g. nesting too deep): with an execution
-            // deadline the match may use the time that is left (then exceeding it is that Timeout); without one the 5 s
-            // cap is a catchable RangeError, not an engine fault
-            if (!realm.Vm.HasDeadline)
-                throw JsErrors.RangeError(realm, $"Regular expression evaluation exceeded {s_longMatchTimeout.TotalSeconds:0} s");
-            var remaining = realm.Vm.RemainingTime;
-            try
-            {
-                if (remaining <= TimeSpan.Zero) throw new System.Text.RegularExpressions.RegexMatchTimeoutException();
-                dm = new SysRegex(re.Regex!.ToString(), re.Regex.Options, remaining).Match(s, start);
-            }
-            catch (System.Text.RegularExpressions.RegexMatchTimeoutException)
-            {
-                throw new JsTerminationException(TerminationKind.Timeout, "Regular expression evaluation exceeded its time budget.");
-            }
+            return AfterSliceTimeout(realm, re, s, start);
         }
+    }
+
+    /// <summary>
+    /// The first match at or after <paramref name="start"/>, as <c>Regex.Match(s, start)</c> would find it, without a Match
+    /// object (the captures are not available). May throw RegexMatchTimeoutException.
+    /// </summary>
+    private static bool Bounds(SysRegex regex, string s, int start, out int index, out int length)
+    {
+        var e = regex.EnumerateMatches(s.AsSpan(), start);
+        if (e.MoveNext())
+        {
+            index = e.Current.Index;
+            length = e.Current.Length;
+            return true;
+        }
+        index = length = 0;
+        return false;
+    }
+
+    private static RegexMatch FromDotnetMatch(RegExpProgram re, System.Text.RegularExpressions.Match dm, string s)
+    {
         if (!dm.Success) return s_noMatch;
-        int top = Math.Max(re.GroupCount, re.DotnetMaxGroup);
+        int top = Math.Max(re.Groups, re.DotnetMaxGroup);
         var caps = new int[(top + 1) * 2];
         caps[0] = dm.Index; caps[1] = dm.Index + dm.Length;   // group 0 is the match itself: no GroupCollection needed
         for (int g = 1; g <= top; g++)
@@ -581,12 +617,34 @@ internal static class RegExpBuiltins
         return new RegexMatch { Success = true, Caps = caps, Input = s };
     }
 
+    /// <summary>A .NET-backend match used up its time slice: redo it where the execution budget applies.</summary>
+    private static RegexMatch AfterSliceTimeout(Realm realm, RegExpProgram re, string s, int start)
+    {
+        realm.Vm.CheckTimeLimits();
+        if (re.SliceFallback is { } fb) return FallbackMatch(realm, re, fb, s, start);
+        // a pattern only .NET can run (the native engine rejected it, e.g. nesting too deep): with an execution
+        // deadline the match may use the time that is left (then exceeding it is that Timeout); without one the 5 s
+        // cap is a catchable RangeError, not an engine fault
+        if (!realm.Vm.HasDeadline)
+            throw JsErrors.RangeError(realm, $"Regular expression evaluation exceeded {s_longMatchTimeout.TotalSeconds:0} s");
+        var remaining = realm.Vm.RemainingTime;
+        try
+        {
+            if (remaining <= TimeSpan.Zero) throw new System.Text.RegularExpressions.RegexMatchTimeoutException();
+            return FromDotnetMatch(re, new SysRegex(re.Regex!.ToString(), re.Regex.Options, remaining).Match(s, start), s);
+        }
+        catch (System.Text.RegularExpressions.RegexMatchTimeoutException)
+        {
+            throw new JsTerminationException(TerminationKind.Timeout, "Regular expression evaluation exceeded its time budget.");
+        }
+    }
+
     /// <summary>A .NET-backend match redone on the native engine (budgeted), captures in the .NET group numbering.</summary>
-    private static RegexMatch FallbackMatch(Realm realm, JsRegExp re, JsRegex native, string s, int start)
+    private static RegexMatch FallbackMatch(Realm realm, RegExpProgram re, JsRegex native, string s, int start)
     {
         var m = new JsRegex.Matcher(native, s, () => realm.Vm.Tick(64));
         if (!m.Search(start, sticky: false)) return s_noMatch;
-        int top = Math.Max(re.GroupCount, re.DotnetMaxGroup);
+        int top = Math.Max(re.Groups, re.DotnetMaxGroup);
         var caps = new int[(top + 1) * 2];
         Array.Fill(caps, -1);
         caps[0] = m.Caps[0];
@@ -645,6 +703,7 @@ internal static class RegExpBuiltins
         return JsValue.FromObject(arr);
     }
 
+    private const int ExecKeyIndex = 0;
     private static readonly string[] s_pristineKeys = { "exec", "flags", "global", "ignoreCase", "multiline", "dotAll", "unicode", "unicodeSets", "sticky", "hasIndices" };
 
     private static void FindPristineSlots(Realm realm)
@@ -687,6 +746,20 @@ internal static class RegExpBuiltins
 
     private static bool IsPristineExec(Realm realm, JsRegExp re) => IsRegExpPristine(realm, re);
 
+    /// <summary>
+    /// <see cref="IsRegExpPristine"/> for an operation whose only observable read is <c>exec</c> (RegExp.prototype.test):
+    /// an unmodified instance, with the original <c>exec</c> on %RegExp.prototype%.
+    /// </summary>
+    private static bool IsExecPristine(Realm realm, JsRegExp re)
+    {
+        if (!ReferenceEquals(re.Proto, realm.RegExpPrototype) || re.Dict != null || re.Shape.Count != 1) return false;
+        if (realm.RegExpPristineEpoch != realm.ProtoEpoch) FindPristineSlots(realm);
+        var slots = realm.RegExpPristineSlots;
+        var refs = realm.RegExpPristineRefs;
+        if (slots == null || refs == null || slots[ExecKeyIndex] < 0) return false;
+        return ReferenceEquals(realm.RegExpPrototype.ReadSlot(slots[ExecKeyIndex]).Ref, refs[ExecKeyIndex]);
+    }
+
     /// <summary>RegExpExec (22.2.7.1).</summary>
     public static JsValue RegExpExec(Realm realm, JsValue r, string s)
     {
@@ -728,7 +801,7 @@ internal static class RegExpBuiltins
                 return null;
             }
         }
-        var m = SafeMatch(realm, re, s, (int)lastIndex);
+        var m = SafeMatch(realm, re.Program, s, (int)lastIndex);
         if (!m.Success || (sticky && m.Index != lastIndex))
         {
             if (global || sticky) re.SetOrThrow("lastIndex", JsValue.Zero);
@@ -742,6 +815,80 @@ internal static class RegExpBuiltins
             else { realm.LegacyInvalid = true; realm.LegacyMatch = null; realm.LegacyInput = null; }
         }
         return m;
+    }
+
+    /// <summary>
+    /// <c>re.test(s)</c> with the original <c>exec</c> (see <see cref="IsExecPristine"/>, which also means lastIndex is a plain
+    /// own data slot, so reading it twice is not observable): the bookkeeping of <see cref="ExecMatch"/> without a Match, a
+    /// RegexMatch or a captures array. Legacy static properties are recorded as bounds; captures, if read, are found again.
+    /// </summary>
+    private static bool ExecTest(Realm realm, JsRegExp re, string s)
+    {
+        var liv = re.GetLastIndex();
+        var p = re.Program;
+        // anything else, including an object lastIndex whose conversion could run code, takes the general path
+        if (p.Regex == null || p.Native != null || !liv.IsNumber || (p.Groups > 0 && realm.LegacyCapturesRead))
+            return ExecMatch(realm, re, s) != null;
+        bool global = p.Global, sticky = p.Sticky;
+        int start = 0;
+        if (global || sticky)
+        {
+            long lastIndex = liv.Num >= 0 && liv.Num <= int.MaxValue ? (long)liv.Num : Operations.ToLength(realm, liv);
+            if (lastIndex > s.Length)
+            {
+                re.SetOrThrow("lastIndex", JsValue.Zero);
+                return false;
+            }
+            start = (int)lastIndex;
+        }
+        if (p.NativeIgnoreCase != null && s.AsSpan(start).ContainsAnyExceptInRange((char)0, (char)127))
+            return ExecMatch(realm, re, s) != null;
+        realm.Vm.Tick(Math.Max(1, (s.Length - start) / 256));
+        int index, length;
+        RegexMatch? full = null;
+        try
+        {
+            if (!Bounds(p.Regex, s, start, out index, out length)) index = -1;
+        }
+        catch (System.Text.RegularExpressions.RegexMatchTimeoutException)
+        {
+            full = AfterSliceTimeout(realm, p, s, start);
+            index = full.Success ? full.Index : -1;
+            length = full.Success ? full.Length : 0;
+        }
+        if (index < 0 || (sticky && index != start))
+        {
+            if (global || sticky) re.SetOrThrow("lastIndex", JsValue.Zero);
+            return false;
+        }
+        if (global || sticky) re.SetOrThrow("lastIndex", new JsValue(index + length));
+        if (ReferenceEquals(re.Realm, realm))
+        {
+            if (!re.LegacyFeatures) { realm.LegacyInvalid = true; realm.LegacyMatch = null; realm.LegacyInput = null; }
+            else if (full != null) RecordLegacy(realm, full, p.Groups);
+            else
+            {
+                var m = realm.LegacyTestMatch ??= new RegexMatch { Success = true, Caps = new int[2] };
+                m.Caps[0] = index;
+                m.Caps[1] = index + length;
+                m.Input = s;
+                m.LazyProgram = p.Groups > 0 ? p : null;
+                m.LazyStart = start;
+                RecordLegacy(realm, m, p.Groups);
+            }
+        }
+        return true;
+    }
+
+    /// <summary>The captures of a match recorded by <c>test</c>. Programs are pure, so the same search finds the same match.</summary>
+    private static RegexMatch MaterializeLegacyCaptures(Realm realm, RegexMatch m)
+    {
+        realm.LegacyCapturesRead = true;   // this code reads captures: from now on test records them as it matches
+        var full = SafeMatch(realm, m.LazyProgram!, m.Input, m.LazyStart);
+        m.LazyProgram = null;
+        if (!full.Success) return m;
+        realm.LegacyMatch = full;
+        return full;
     }
 
     private static JsValue BuildExecResult(Realm realm, JsRegExp re, RegexMatch m, string s)
@@ -853,6 +1000,7 @@ internal static class RegExpBuiltins
         if (realm.LegacyInvalid) throw JsErrors.TypeError(realm, "RegExp legacy static properties are unavailable after a match by a RegExp subclass");
         var m = realm.LegacyMatch;
         if (m == null) return JsValue.EmptyString;
+        if (m.LazyProgram != null && slot is (>= 1 and <= 9) or LegacyLastParen) m = MaterializeLegacyCaptures(realm, m);
         string s = m.Input;
         JsValue Cap(int g) => m.Group(g) is { IsString: true } v ? v : JsValue.EmptyString;
         return slot switch

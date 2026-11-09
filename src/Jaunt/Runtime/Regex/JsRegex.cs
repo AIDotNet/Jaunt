@@ -267,7 +267,7 @@ internal sealed class JsRegex
 
     // ------------------------------------------------------------------ matcher
 
-    private struct Choice
+    internal struct Choice
     {
         public int Kind;   // 0 plain, 1 greedy simple loop, 2 lazy simple loop
         public int Pc;
@@ -275,6 +275,14 @@ internal sealed class JsRegex
         public int Undo;
         public int Count;
         public int LoopPc; // simple loop op address (bounds + matcher)
+    }
+
+    /// <summary>The backtracking stacks of a <see cref="Matcher"/>, kept between matches. Their contents never outlive a search.</summary>
+    public sealed class MatcherStacks
+    {
+        internal int[] UndoSlot = new int[64];
+        internal int[] UndoOld = new int[64];
+        internal Choice[] Choices = new Choice[64];
     }
 
     /// <summary>Per-match mutable state (not thread-safe; one instance per execution).</summary>
@@ -285,21 +293,37 @@ internal sealed class JsRegex
         private readonly Action? _tick;
         public readonly int[] Caps;
         private readonly int[] _regs;
-        private int[] _undoSlot = new int[64];
-        private int[] _undoOld = new int[64];
+        private int[] _undoSlot;
+        private int[] _undoOld;
         private int _undoCount;
-        private Choice[] _choices = new Choice[64];
+        private Choice[] _choices;
         private int _choiceCount;
         private int _steps;
 
-        public Matcher(JsRegex re, string input, Action? tick)
+        public Matcher(JsRegex re, string input, Action? tick, MatcherStacks? stacks = null)
         {
+            stacks ??= new MatcherStacks();
+            _undoSlot = stacks.UndoSlot;
+            _undoOld = stacks.UndoOld;
+            _choices = stacks.Choices;
             _re = re;
             _s = input;
             _tick = tick;
             Caps = new int[re.CaptureCount * 2];
             _regs = new int[Math.Max(1, re._regCount)];
         }
+
+        /// <summary>Stores the stacks, which may have grown, in <paramref name="stacks"/> for the next match; false when they are too large to keep.</summary>
+        public bool TryReturnStacks(MatcherStacks stacks)
+        {
+            if (_choices.Length > MaxKeptStack || _undoSlot.Length > MaxKeptStack) return false;
+            stacks.UndoSlot = _undoSlot;
+            stacks.UndoOld = _undoOld;
+            stacks.Choices = _choices;
+            return true;
+        }
+
+        private const int MaxKeptStack = 4096;
 
         /// <summary>RegExpBuiltinExec matcher loop: tries positions from <paramref name="start"/>. Caps hold [start,end) pairs.</summary>
         public bool Search(int start, bool sticky)

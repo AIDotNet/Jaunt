@@ -187,7 +187,7 @@ internal sealed partial class Vm
     /// order (no accessors, index or symbol keys): nothing observable runs, so the keys and values are read straight from
     /// the shape and slots. An empty target with the same prototype takes the source's shape and a copy of its slots.
     /// </summary>
-    private bool TryCopyPlainDataProperties(JsObject target, JsObject so, ReadOnlySpan<JsValue> excluded)
+    private bool TryCopyPlainDataProperties(JsObject target, JsObject so, ReadOnlySpan<JsValue> excluded, int reserve)
     {
         if (so.GetType() != typeof(JsObject) || so.Dict != null) return false;
         var shape = so.Shape;
@@ -206,7 +206,7 @@ internal sealed partial class Vm
                 {
                     if (n > 0)
                     {
-                        var copy = new JsValue[n];
+                        var copy = new JsValue[n + reserve];
                         Array.Copy(slots, copy, n);
                         target.Slots = copy;
                         target.Shape = shape;
@@ -730,10 +730,11 @@ internal sealed partial class Vm
     /// A class field with a constant name: <see cref="DefineLiteralProp"/> for an ordinary extensible instance. Unlike a
     /// literal's target, <c>this</c> can be anything a base constructor returned, so anything else takes CreateDataProperty.
     /// </summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
     private void DefineFieldProp(in JsValue target, in JsValue keyValue, in JsValue value, ref IcEntry ic)
     {
-        var obj = target.AsObjectUnchecked;
-        if (obj.GetType() == typeof(JsObject) && obj.Extensible) DefineLiteralProp(target, keyValue, value, ref ic);
+        var obj = Unsafe.As<JsObject>(target.Ref!);
+        if (obj.GetType() == typeof(JsObject) && obj.Extensible && !obj.IsPrototypeObject) DefineLiteralProp(target, keyValue, value, ref ic);
         else obj.CreateDataPropertyOrThrow(new PropertyKey(keyValue.AsStringUnchecked), value);
     }
 
@@ -774,15 +775,17 @@ internal sealed partial class Vm
         }
         string name = key.Value is JsSymbol sym ? (sym.Description == null ? "" : "[" + sym.Description + "]") : (string)key.Value;
         if (prefix != null) name = prefix + " " + name;
+        (fn as JsClosure)?.UnshareSlots();
         int idx = fn.FindOwn("name", out _);
         if (idx >= 0) fn.WriteSlot(idx, new JsValue(name));
         else fn.DefineOwnProperty("name", PropertyDescriptor.Data(new JsValue(name), PropFlags.Configurable));
     }
 
-    internal void CopyDataProperties(JsObject target, in JsValue source, ReadOnlySpan<JsValue> excluded)
+    /// <param name="reserve">Properties the caller is about to add (the rest of an object literal), when the target takes a copy of the source's slots.</param>
+    internal void CopyDataProperties(JsObject target, in JsValue source, ReadOnlySpan<JsValue> excluded, int reserve = 0)
     {
         if (source.IsNullOrUndefined) return;
-        if (source.IsObject && source.Ref is JsObject so && TryCopyPlainDataProperties(target, so, excluded)) return;
+        if (source.IsObject && source.Ref is JsObject so && TryCopyPlainDataProperties(target, so, excluded, reserve)) return;
         var from = Operations.ToObject(Realm, source);
         var keys = new List<PropertyKey>();
         from.OwnPropertyKeys(keys);
@@ -831,8 +834,8 @@ internal sealed partial class Vm
         return pf.Construct(args, nt);
     }
 
-    /// <summary>The second half of super(...): binds this to the result of the parent and initializes the instance fields.</summary>
-    private void SuperBind(Frame f, JsValue result)
+    /// <summary>The second half of super(...): binds this to the result of the parent; returns the field initializer of the class, for the caller to run.</summary>
+    private JsClosure? SuperBind(Frame f, JsValue result)
     {
         var ctor = f.Callee;
         var box = f.ThisBox;
@@ -841,7 +844,7 @@ internal sealed partial class Vm
         if (bound) throw JsErrors.ReferenceError(Realm, "Super constructor may only be called once");
         f.This = result;
         if (box != null) box.Value = result;
-        if (ctor.FieldInit != null) ctor.FieldInit.Call(result, ReadOnlySpan<JsValue>.Empty);
+        return ctor.FieldInit;
     }
 
     private void ClassCreate(Frame f, JsValue[] regs, int bp, int ctorDst, int protoDst, int fi, int superReg, int hasHeritage)
@@ -964,6 +967,33 @@ internal sealed partial class Vm
         cooked.AddOwnProperty("raw", JsValue.FromObject(raw), PropFlags.None);
         ObjectBuiltins.SetIntegrityLevel(realm, cooked, frozen: true);
         return cooked;
+    }
+
+    /// <summary>
+    /// <c>arguments[key]</c> in a function with an elided arguments object (<see cref="FunctionInfo.ArgumentsElided"/>). An index
+    /// in the argument list reads it; an index past the end misses unless %Object.prototype% holds it. For any other key the real
+    /// object is created, once, in <paramref name="holder"/> and asked: it can be reached from an accessor's receiver afterwards.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private JsValue ArgumentsElement(Frame f, in JsValue key, ref JsValue holder)
+    {
+        if (!holder.IsObject)
+        {
+            var args = f.Args!;
+            if (key.IsNumber)
+            {
+                double d = key.Num;
+                int i = (int)d;
+                if (i == d && i >= 0)
+                {
+                    if (i < args.Length) return args[i];
+                    if (Realm.ObjectPrototype.FindOwn(PropertyKey.FromIndex((uint)i), out _) < 0) return JsValue.Undefined;
+                }
+            }
+            // a mapped object here has no parameters to alias (see FunctionInfo.ArgumentsElided)
+            holder = JsValue.FromObject((f.T.Flags & FunctionFlags.MappedArguments) != 0 ? CreateMappedArgumentsObject(f, Array.Empty<int>()) : CreateArgumentsObject(f));
+        }
+        return GetElemSlow(holder, key);
     }
 
     private JsObject CreateMappedArgumentsObject(Frame f, int[] paramSlots)

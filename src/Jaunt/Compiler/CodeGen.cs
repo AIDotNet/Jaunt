@@ -247,6 +247,9 @@ internal sealed partial class CodeGen
         t.ParamCount = paramRegs;
         if ((t.Flags & FunctionFlags.HasRest) != 0) t.RestIndex = paramRegs;
         if (fi.UsesArguments || (t.Flags & FunctionFlags.HasRest) != 0) t.Flags |= FunctionFlags.NeedsArgsArray;
+        if (fi.ArgumentsElided && !fi.ArgumentsIndexed) t.Flags |= FunctionFlags.ArgcOnly;
+        if ((t.Flags & FunctionFlags.HasRest) != 0 && !fi.UsesArguments) t.Flags |= FunctionFlags.RestOnlyArgs;
+        if (fi.MappedArguments) t.Flags |= FunctionFlags.MappedArguments;
         for (int i = 0; i < paramRegs; i++) _fb.AllocReg();
 
         FinalizeEnvLayout(scope);
@@ -273,7 +276,7 @@ internal sealed partial class CodeGen
             StoreBinding(fi.FuncNameBinding, r, init: true, null);
             Release(r);
         }
-        if (fi.ArgumentsBinding != null)
+        if (fi.ArgumentsBinding != null && !fi.ArgumentsElided)
         {
             int r = Temp();
             if (fi.MappedArguments)
@@ -359,6 +362,7 @@ internal sealed partial class CodeGen
         foreach (var b in scope.Ordered)
         {
             if (b.Captured) continue;
+            if (b.ArgumentsElided && !scope.Function.ArgumentsIndexed) continue;   // no slow path that could need the object
             if (b.Kind == BindingKind.Param && b.ParamIndex >= 0 && simpleParams) { b.Register = b.ParamIndex; continue; }
             b.Register = _fb.AllocReg();
         }
@@ -457,6 +461,7 @@ internal sealed partial class CodeGen
 
     private int LoadBinding(Binding b, int dst, bool tdz)
     {
+        if (b.ArgumentsElided) throw new InvalidOperationException("Elided arguments object read as a value.");   // ScopeAnalyzer allows only the forms Member handles
         if (b.IsEvalDynamic)
         {
             if (dst < 0) dst = Temp();

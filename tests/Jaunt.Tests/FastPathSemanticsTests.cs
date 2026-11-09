@@ -1340,4 +1340,1559 @@ JSON.stringify(out);
             Assert.True(p.Value.ToString() == g.ToString(), $"{p.Name}: expected {p.Value} got {g}");
         }
     }
+
+    private const string RegExpTestPrelude = """
+const o=[];const S=()=>[RegExp.$1,RegExp.$2,RegExp['$+'],RegExp.lastMatch,RegExp['$`'],RegExp["$'"],RegExp.input].join(',');const T=f=>{try{return String(f())}catch(e){return e.name}};
+""";
+
+    private const string RegExpTestSnippets = """
+o.push(/\d+/.test('abc123'), S()); o.push(/z/.test('abc123'), S()); o.push(/(\d)(\d)/.test('abc123'), S()); o.push(/(z)/.test('q'), S());
+o.push(/(a)|(b)/.test('xb'), S(), /(a)|(b)/.test('xa'), S()); o.push(/(a)(b)?/.test('a'), S());
+o.push(/(a)(b)(c)(d)(e)(f)(g)(h)(i)(j)(k)/.test('abcdefghijk'), RegExp.$9, RegExp['$+'], RegExp.lastParen, RegExp.lastMatch);
+o.push(/(?<y>\d{4})-(?<m>\d\d)/.test('on 2024-05!'), S(), RegExp.$3);
+o.push(/(?<a>x)|(?<a>y)/.test('y'), S()); o.push(/(?:(a)|b)+/.test('ab'), S(), RegExp.$1 === '');
+o.push(/(?<=(a))b/.test('zab'), S()); o.push(/(\w)\1/.test('xaab'), S()); o.push(/\p{Nd}+/u.test('x٣'), S()); o.push(/(\p{Nd})/u.test('x٣'), S());
+const g = /(\d)/g; for (let i = 0; i < 5; i++) o.push(g.test('1a2b3'), g.lastIndex, RegExp.$1, RegExp['$`']);
+const g2 = /(\d)/g; o.push(g2.test('1a2'), g2.lastIndex); o.push(g2.test('1a2'), g2.lastIndex); o.push(RegExp.$1, RegExp.$2, RegExp.lastMatch); o.push(g2.test('zz'), g2.lastIndex, S());
+const y = /(b)/y; o.push(y.test('abc'), y.lastIndex, S()); y.lastIndex = 1; o.push(y.test('abc'), y.lastIndex, S()); o.push(y.test('abc'), y.lastIndex, S());
+const y2 = /b/y; y2.lastIndex = 1; o.push(y2.test('abc'), y2.lastIndex, S()); o.push(y2.test('abc'), y2.lastIndex); const gy = /b/gy; gy.lastIndex = 1; o.push(gy.test('abb'), gy.lastIndex, gy.test('abb'), gy.lastIndex, gy.test('abb'), gy.lastIndex);
+const b = /b/g; for (const li of [5, 1.5, -1, NaN, Infinity, '1', null, undefined, true, 2 ** 40]) { b.lastIndex = li; o.push(T(() => b.test('abcb')), b.lastIndex); }
+const c = /a/g; const log = []; c.lastIndex = { valueOf() { log.push('valueOf'); return 2; } }; o.push(c.test('aaaa'), c.lastIndex, log.length); const d = /a/; d.lastIndex = { valueOf() { log.push('nong'); return 9; } }; o.push(d.test('a'), typeof d.lastIndex, log.join());
+const e = /a/g; e.lastIndex = { valueOf() { return Symbol(); } }; o.push(T(() => e.test('a')));  const f = /a/; f.lastIndex = { valueOf() { throw new RangeError('x'); } }; o.push(T(() => f.test('a')));
+const h = /a/g; h.lastIndex = { valueOf() { h.compile('b', 'g'); return 0; } }; o.push(h.test('ab'), h.lastIndex, h.source, S());
+const n = /(a)/; n.lastIndex = { valueOf() { n.compile('(b)'); return 0; } }; o.push(n.test('ab'), n.source, S());
+const u = /(a)/; o.push(u.test('xa')); u.compile('(b)'); o.push(S(), u.test('xa'), u.test('xb'), S());
+const v = /(a)/; v.test('xa'); const w = /(q)/; o.push(w.test('zz'), S(), /(r)/.exec('r')[0], S(), /n/.test('n'), S());
+/(a)/.test('a'); RegExp.input = 'over'; o.push(RegExp.input, RegExp.$_, RegExp.$1, RegExp.lastMatch); /(z)/.test('z'); o.push(RegExp.input, RegExp.$_, RegExp.$1);
+/(a)/.test('a'); RegExp.$_ = 5; o.push(RegExp.input); /b/.test('b'); o.push(RegExp.input, RegExp.$1, RegExp.lastMatch);
+o.push(RegExp.$1, RegExp.lastMatch, RegExp.input, RegExp['$+']); o.push(/()/.test(''), S()); o.push(/(x*)/.test('aa'), S(), RegExp['$`'], RegExp["$'"]);
+/(\d)/.test('a1'); const s1 = RegExp.$1; /(\d)/.test('a2'); const s2 = RegExp.$1; /\d/.test('a3'); const s3 = RegExp.$1; /(x)/.test('zx'); o.push(s1, s2, s3, RegExp.$1, RegExp.lastMatch, RegExp['$`']);
+o.push('a1b2'.replace(/(\d)/g, m => { /(x)/.test('zxz'); return RegExp.$1 + RegExp.lastMatch; }), S()); o.push('a1'.replace(/(\d)/, () => RegExp.$1), S()); o.push(/(q)/.test('q') && 'p1'.split(/(\d)/).length, S());
+o.push(/k/i.test('K'), /K/i.test('k'), /k/i.test('K'), /(k)/i.test('é K'), S(), /é/i.test('É'), S()); const ig = /k/gi; ig.lastIndex = 1; o.push(ig.test('kék'), ig.lastIndex, S());
+const P = RegExp.prototype, orig = P.exec; const r = /a/; const out = () => [r.test('a'), r.test('b')]; o.push(out()); P.exec = function (s) { o.push('patched', s); return orig.call(this, s); }; o.push(out(), S()); P.exec = function () { return null; }; o.push(out()); P.exec = function () { return { 0: 'x' }; }; o.push(out()); P.exec = function () { return 1; }; o.push(T(() => r.test('a'))); P.exec = function () { return undefined; }; o.push(T(() => r.test('a'))); P.exec = 5; o.push(out()); P.exec = null; o.push(out()); P.exec = orig; o.push(out());
+const P2 = RegExp.prototype, orig2 = P2.exec, desc = Object.getOwnPropertyDescriptor(P2, 'exec'); const r2 = /(a)/g; Object.defineProperty(P2, 'exec', { get() { o.push('get'); return orig2; }, configurable: true }); o.push(r2.test('a'), r2.lastIndex, RegExp.$1); Object.defineProperty(P2, 'exec', desc); o.push(r2.test('a'), r2.lastIndex); delete P2.exec; o.push(/(b)/.test('b'), S(), T(() => /b/.exec)); Object.defineProperty(P2, 'exec', desc); o.push(/c/.test('c'), S());
+const P3 = RegExp.prototype, orig3 = P3.exec; delete P3.exec; P3.zzz = 1; P3.exec = orig3; o.push(/(b)/.test('b'), S()); P3.exec = function () { return null; }; o.push(/(b)/.test('b')); delete P3.zzz; o.push(/(c)/.test('c')); P3.exec = orig3; o.push(/(d)/.test('d'), S());
+const i1 = /a/; i1.exec = function () { o.push('own'); return null; }; o.push(i1.test('a'), /a/.test('a')); const i2 = /a/; i2.extra = 1; o.push(i2.test('a'), i2.extra, S()); const i3 = /a/; Object.defineProperty(i3, 'exec', { get() { o.push('ga'); return () => ({}); } }); o.push(i3.test('z'));
+const q1 = /a/; Object.setPrototypeOf(q1, null); o.push(T(() => RegExp.prototype.test.call(q1, 'a')));
+const q2 = /a/; Object.setPrototypeOf(q2, { exec() { return null; } }); o.push(RegExp.prototype.test.call(q2, 'a')); const q3 = /a/; Object.setPrototypeOf(q3, Object.create(RegExp.prototype)); o.push(q3.test('a'), S());
+class A extends RegExp {} const a = new A('b(c)', 'g'); o.push(a.test('xbc'), a.lastIndex, a.test('xbc'), a.lastIndex, a instanceof A);
+class B extends RegExp { exec(s) { o.push('B.exec', s); return super.exec(s); } } const bb = new B('(z)'); o.push(bb.test('z'), bb.test('y'));
+class C extends RegExp { get lastIndex() { return 1; } } const cc = new C('b', 'g'); o.push(cc.test('ab'), cc.lastIndex);
+class D extends RegExp { exec() { return null; } } const dd = new D('a'); Object.setPrototypeOf(dd, RegExp.prototype); o.push(dd.test('a'), dd.lastIndex);
+const T1 = RegExp.prototype.test; o.push(T(() => T1.call(1, 'a')), T(() => T1.call({}, 'a')), T(() => T1.call(Object.create(RegExp.prototype), 'a')), T1.call({ exec() { return {}; } }, 'a'), T1.call({ exec() { return null; } }, 'a'), T(() => T1.call({ exec: 1 }, 'a')));
+o.push(/undefined/.test(), /null/.test(null), /1/.test(1), /x/.test({ toString() { return 'x'; } }), T(() => /x/.test(Symbol()))); const log2 = []; const r3 = /a/g; r3.lastIndex = { valueOf() { log2.push('li'); return 0; } }; r3.test({ toString() { log2.push('str'); return 'a'; } }); o.push(log2.join());
+const fz = Object.freeze(/a/); o.push(fz.test('a'), fz.test('b'), S()); const fg = Object.freeze(/a/g); o.push(T(() => fg.test('a')), fg.lastIndex, T(() => fg.test('b')), S()); const fy = Object.freeze(/a/y); o.push(T(() => fy.test('a')), T(() => fy.test('b'))); o.push(/a/g.test('a'), Object.isFrozen(/a/));
+const ro = /(a)/g; Object.defineProperty(ro, 'lastIndex', { writable: false, value: 0 }); o.push(T(() => ro.test('xa')), ro.lastIndex, T(() => ro.test('b')), ro.lastIndex); const ro2 = /(a)/g; Object.defineProperty(ro2, 'lastIndex', { writable: false, value: 9 }); o.push(T(() => ro2.test('a')), ro2.lastIndex); const pe = Object.preventExtensions(/a/g); o.push(pe.test('a'), pe.lastIndex); const se = Object.seal(/a/y); o.push(se.test('a'), se.lastIndex);
+function lit() { return /a/g; } const l1 = lit(), l2 = lit(); o.push(l1 === l2, l1.test('a'), l1.lastIndex, l2.lastIndex, Object.getOwnPropertyNames(l1), JSON.stringify(Object.getOwnPropertyDescriptor(l2, 'lastIndex'))); l1.a = 1; l1.b = 2; l1.c = 3; l1.d = 4; l1.e = 5; o.push(Object.keys(l1), l1.e, l1.lastIndex, Object.keys(l2), Object.getOwnPropertyNames(lit()));
+const fr = []; for (let i = 0; i < 3; i++) { const x = /a/g; if (i === 1) Object.freeze(x); fr.push(Object.isFrozen(x), T(() => x.test('a')), x.lastIndex); } o.push(fr); const nr = new RegExp('a', 'g'); nr.z = 1; o.push(Object.getOwnPropertyNames(nr), new RegExp('b').lastIndex, Object.getOwnPropertyNames(new RegExp(/c/g)), delete nr.z, T(() => delete nr.lastIndex), RegExp('a') instanceof RegExp);
+function NT() {} NT.prototype = Object.create(RegExp.prototype); const nt = Reflect.construct(RegExp, ['(a)'], NT); o.push(Object.getPrototypeOf(nt) === NT.prototype, nt.test('a'), nt.lastIndex); const rp = Reflect.construct(RegExp, ['a'], RegExp); o.push(rp.test('a'), Object.getOwnPropertyNames(rp));
+const x1 = /b+/.exec('abbc'); o.push(x1.index, x1.input, x1[0], x1.length, x1.groups, S()); const x2 = /b/g; o.push(x2.exec('abb').index, x2.lastIndex, x2.exec('abb').index, x2.exec('abb'), x2.lastIndex); o.push('abcabc'.replace(/b/g, 'X'), 'abc'.replace(/b/, '[$&$`$\']'), 'a1b2'.split(/\d/), 'a,b'.split(/,/, 1), 'abc'.split(/(?:)/), ''.split(/x/), ''.split(/(?:)/), 'aXbX'.match(/X/g), 'aXb'.search(/b/), [...'a1b2'.matchAll(/\d/g)].map(m => m.index), S());
+const dI = /b/d.exec('abc'); o.push(dI.indices[0], /(?<=a)b/.exec('ab').index); const lb = /(?<=a)b/g; lb.lastIndex = 1; o.push(lb.test('ab'), lb.lastIndex, S()); const lc = /(?<!a)b/y; lc.lastIndex = 1; o.push(lc.test('ab'), lc.lastIndex); const hat = /^b/g; hat.lastIndex = 1; o.push(hat.test('ab'), hat.lastIndex); const hm = /^(b)/gm; hm.lastIndex = 1; o.push(hm.test('a\nb'), hm.lastIndex, S()); const wb = /\bb/g; wb.lastIndex = 1; o.push(wb.test('ab'), wb.lastIndex); const em = /(?:)/g; em.lastIndex = 2; o.push(em.test('abc'), em.lastIndex, S()); const us = /./gu; us.lastIndex = 0; o.push(us.test('\u{1F600}'), us.lastIndex, RegExp.lastMatch.length);
+const t = 'x'.repeat(5000) + '7'; o.push(/(\d)/.test(t), RegExp.$1, RegExp['$`'].length, /\d/.test(t), RegExp.lastMatch, RegExp["$'"]); let cnt = 0; for (let i = 0; i < 2000; i++) { if (/(\d)/.test('a' + (i % 10))) cnt += +RegExp.$1; if (/\d/.test('b')) cnt = -1; } o.push(cnt, RegExp.$1);
+let c2 = 0; const P4 = RegExp.prototype, o4 = P4.exec; for (let i = 0; i < 40; i++) { if (i === 20) P4.exec = function () { c2 += 100; return null; }; if (i === 30) P4.exec = o4; if (/a/.test('a')) c2++; } o.push(c2, RegExp.lastMatch);
+const O = Object.getOwnPropertyDescriptor(RegExp, '$1'); o.push(typeof O.get, O.get.call(RegExp) === RegExp.$1); /(a)/.test('a'); o.push(O.get.call(RegExp), Object.getOwnPropertyDescriptor(RegExp.prototype, 'test').value.length);
+""";
+
+    private const string RegExpTestExpected = """
+[true,",,,123,abc,,abc123",false,",,,123,abc,,abc123",true,"1,2,2,12,abc,3,abc123",false,"1,2,2,12,abc,3,abc123"]
+[true,",b,b,b,x,,xb",true,"a,,,a,x,,xa",true,"a,,,a,,,a"]
+[true,"i","k","k","abcdefghijk"]
+[true,"2024,05,05,2024-05,on ,!,on 2024-05!",""]
+[true,",y,y,y,,,y",true,",,,ab,,,ab",true]
+[true,"a,,a,b,za,,zab",true,"a,,a,aa,x,b,xaab",true,",,,٣,x,,x٣",true,"٣,,٣,٣,x,,x٣"]
+[true,1,"1","",true,3,"2","1a",true,5,"3","1a2b",false,0,"3","1a2b",true,1,"1",""]
+[true,1,true,3,"2","","2",false,0,"2,,2,2,1a,,1a2"]
+[false,0,",,,,,,",true,2,"b,,b,b,a,c,abc",false,0,"b,,b,b,a,c,abc"]
+[true,2,",,,b,a,c,abc",false,0,true,2,true,3,false,0]
+["false",0,"true",2,"true",2,"true",2,"false",0,"true",2,"true",2,"true",2,"true",2,"false",0]
+[true,3,1,true,"object","valueOf,nong"]
+["TypeError","RangeError"]
+[true,2,"b",",,,b,a,,ab"]
+[true,"(b)","b,,b,b,a,,ab"]
+[true,"a,,a,a,x,,xa",false,true,"b,,b,b,x,,xb"]
+[false,"a,,a,a,x,,xa","r","r,,r,r,,,r",true,",,,n,,,n"]
+["over","over","a","a","z","z","z"]
+["5","b","","b"]
+["","","","",true,",,,,,,",true,",,,,,aa,aa","","aa"]
+["1","2","","x","x","z"]
+["axxbxx","x,,x,x,z,z,zxz","a1","1,,1,1,a,,a1",3,"1,,1,1,p,,p1"]
+[false,false,true,true,"K,,K,K,é ,,é K",true,",,,É,,,É",true,3,",,,k,ké,,kék"]
+[[true,false],"patched","a","patched","b",[true,false],",,,a,,,a",[false,false],[true,true],"TypeError","TypeError",[true,false],[true,false],[true,false]]
+["get",true,1,"a",false,0,true,"b,,b,b,,,b","undefined",true,",,,c,,,c"]
+[true,"b,,b,b,,,b",false,false,true,"d,,d,d,,,d"]
+["own",false,true,true,1,",,,a,,,a","ga",true]
+["true"]
+[false,true,",,,a,,,a"]
+[true,3,false,0,true]
+["B.exec","z","B.exec","y",true,false]
+[true,2]
+[true,0]
+["TypeError","TypeError","TypeError",true,false,"TypeError"]
+[true,true,true,true,"TypeError","str,li"]
+[true,false,",,,a,,,a","TypeError",0,"TypeError",",,,a,,,a","TypeError","TypeError",true,false]
+["TypeError",0,"TypeError",0,"TypeError",9,true,1,true,1]
+[false,true,1,0,["lastIndex"],"{\"value\":0,\"writable\":true,\"enumerable\":false,\"configurable\":false}",["a","b","c","d","e"],5,1,[],["lastIndex"]]
+[[false,"true",1,true,"TypeError",0,false,"true",1],["lastIndex","z"],0,["lastIndex"],true,"false",true]
+[true,true,0,true,["lastIndex"]]
+[1,"abbc","bb",1,null,",,,bb,a,c,abbc",1,2,2,null,0,"aXcaXc","a[bac]c",["a","b",""],["a"],["a","b","c"],[""],[],["X","X"],2,[1,3],",,,2,a1b,,a1b2"]
+[[1,2],1,true,2,",,,b,a,,ab",false,0,false,0,true,3,"b,,b,b,a\n,,a\nb",false,0,true,2,",,,,ab,c,abc",true,2,2]
+[true,"7",5000,true,"7","",9000,"9"]
+[1030,"a"]
+["function",true,"a",1]
+""";
+
+    /// <summary>Each line runs in a new engine: the first read of a capture changes how <c>test</c> records them.</summary>
+    [Fact]
+    public void RegExpTestAndLegacyStaticsMatchReferenceBehavior()
+    {
+        var snippets = RegExpTestSnippets.ReplaceLineEndings("\n").Split('\n');
+        var expected = RegExpTestExpected.ReplaceLineEndings("\n").Split('\n');
+        Assert.Equal(expected.Length, snippets.Length);
+        for (int i = 0; i < snippets.Length; i++)
+        {
+            using var engine = new JsEngine();
+            var got = engine.Evaluate(RegExpTestPrelude + "\n" + snippets[i] + "\nJSON.stringify(o)").AsString();
+            Assert.True(expected[i] == got, $"line {i}: {snippets[i]}\nexpected {expected[i]}\nbut got  {got}");
+        }
+    }
+
+    // Promise.prototype.then, reaction jobs and the job queue. Expected output generated by Node 24.15.0.
+    private const string PromiseJobsScript = """
+const log = globalThis.__log = [];
+const say = (...a) => log.push(a.map(x => typeof x === 'string' ? x : x === undefined ? 'undefined' : typeof x === 'function' ? 'fn' : x instanceof Error ? x.name : String(x)).join(' '));
+const hash = a => a.reduce((h, v) => (h * 31 + v) % 1000003, 7);
+// Scenarios run one after another, each draining fully, so that a tick counter is exact for each.
+const queue = [];
+const scenario = (name, f) => queue.push([name, f]);
+// tick(): how many microtask hops have passed since the scenario began.
+let hops = 0, ticking = false;
+const startTicker = n => { hops = 0; let p = Promise.resolve(); for (let i = 0; i < n; i++) p = p.then(() => { hops++; }); return p; };
+const at = (name, what) => say(name, what, '@', hops);
+
+// ---- await and resolve tick counts
+scenario('await primitive', async n => { startTicker(8); await 1; at(n, 'a'); await undefined; at(n, 'b'); });
+scenario('await native', async n => { startTicker(8); await Promise.resolve(1); at(n, 'a'); });
+scenario('await pending native', async n => { startTicker(8); let r; const p = new Promise(x => { r = x; }); r(1); await p; at(n, 'a'); });
+scenario('await thenable', async n => { startTicker(8); await { then(f) { at(n, 'then'); f(1); } }; at(n, 'a'); });
+scenario('await then derived', async n => { startTicker(8); await Promise.resolve(1).then(v => v); at(n, 'a'); });
+scenario('await patched own constructor', async n => { startTicker(10); const p = Promise.resolve(1); p.constructor = function () {}; await p; at(n, 'a'); });
+scenario('await constructor getter', async n => { startTicker(10); const p = Promise.resolve(1); Object.defineProperty(p, 'constructor', { get() { at(n, 'getter'); return Promise; } }); await p; at(n, 'a'); });
+scenario('await subclass', async n => { class S extends Promise {} startTicker(10); await S.resolve(1); at(n, 'a'); });
+scenario('async return value', async n => { startTicker(8); const f = async () => 1; f().then(() => at(n, 'a')); });
+scenario('async return promise', async n => { startTicker(8); const f = async () => Promise.resolve(1); f().then(() => at(n, 'a')); });
+scenario('async return thenable', async n => { startTicker(8); const f = async () => ({ then(g) { g(1); } }); f().then(() => at(n, 'a')); });
+scenario('resolve with promise', n => { startTicker(8); new Promise(r => r(Promise.resolve(1))).then(() => at(n, 'a')); });
+scenario('resolve with derived', n => { startTicker(8); new Promise(r => r(Promise.resolve(1).then(v => v))).then(() => at(n, 'a')); });
+scenario('handler returns promise', n => { startTicker(8); Promise.resolve().then(() => Promise.resolve(1)).then(() => at(n, 'a')); });
+scenario('handler returns pending then settled', n => { startTicker(10); let r; const q = new Promise(x => { r = x; }); Promise.resolve().then(() => q).then(v => at(n, 'a', v)); Promise.resolve().then(() => r(5)); });
+scenario('handler returns thenable', n => { startTicker(8); Promise.resolve().then(() => ({ then(f) { at(n, 'then'); f(2); } })).then(v => at(n, 'a', v)); });
+scenario('pass through', n => { startTicker(8); Promise.resolve(1).then().then(null).then(undefined, undefined).then(3, 'x').then(v => at(n, 'a', v)); });
+scenario('rejection through', n => { startTicker(8); Promise.reject(1).then(() => at(n, 'no')).then(() => at(n, 'no')).catch(v => at(n, 'a', v)); });
+scenario('finally ticks', n => { startTicker(12); Promise.resolve(1).finally(() => at(n, 'f')).then(v => at(n, 'a', v)); });
+scenario('finally rejected', n => { startTicker(12); Promise.reject(2).finally(() => at(n, 'f')).catch(v => at(n, 'a', v)); });
+scenario('all race any settled', n => { startTicker(14);
+  Promise.all([1, Promise.resolve(2)]).then(v => at(n, 'all', v));
+  Promise.race([1, Promise.resolve(2)]).then(v => at(n, 'race', v));
+  Promise.any([Promise.reject(1), 2]).then(v => at(n, 'any', v));
+  Promise.allSettled([1, Promise.reject(2)]).then(v => at(n, 'settled', v.length)); });
+scenario('async generator', async n => { startTicker(30); async function* g() { at(n, 'start'); const x = yield 1; at(n, 'x', x); yield Promise.resolve(2); return 3; } const it = g(); at(n, 'v', (await it.next()).value); at(n, 'v', (await it.next('s')).value); at(n, 'v', (await it.next()).value); });
+scenario('for await', async n => { startTicker(30); for await (const v of [1, Promise.resolve(2), { then(f) { f(3); } }]) at(n, 'v', v); });
+
+// ---- interleaving
+scenario('interleave', n => {
+  const o = [];
+  const a = async () => { o.push('a1'); await null; o.push('a2'); await Promise.resolve(); o.push('a3'); };
+  const b = () => Promise.resolve().then(() => o.push('b1')).then(() => o.push('b2')).then(() => o.push('b3'));
+  a(); b(); o.push('sync');
+  queueMicrotaskOr(() => o.push('q1'));
+  return new Promise(r => { let p = Promise.resolve(); for (let i = 0; i < 12; i++) p = p.then(() => {}); p.then(() => { say(n, o.join()); r(); }); });
+});
+function queueMicrotaskOr(f) { Promise.resolve().then(f); }
+scenario('reaction order pending', n => {
+  const o = []; let res; const p = new Promise(r => { res = r; });
+  for (let i = 0; i < 5; i++) p.then(() => { o.push(i); Promise.resolve().then(() => o.push('n' + i)); });
+  p.catch(() => o.push('never')); p.finally(() => o.push('fin'));
+  res(1); res(2);
+  p.then(v => o.push('late' + v));
+  return new Promise(r => { let q = Promise.resolve(); for (let i = 0; i < 8; i++) q = q.then(() => {}); q.then(() => { say(n, o.join()); r(); }); });
+});
+scenario('rejected order pending', n => {
+  const o = []; let rej; const p = new Promise((_, r) => { rej = r; });
+  for (let i = 0; i < 3; i++) p.then(() => o.push('f' + i), () => o.push('r' + i));
+  p.catch(() => o.push('c'));
+  rej(1); rej(2);
+  return Promise.resolve().then(() => {}).then(() => {}).then(() => say(n, o.join()));
+});
+
+// ---- bursts that cross any internal queue boundary, in order and with jobs added while draining
+for (const size of [1, 15, 16, 17, 31, 33, 2047, 2048, 2049, 4097, 10000, 20000]) scenario('burst ' + size, n => {
+  const p = Promise.resolve(); const o = []; const out = [];
+  for (let i = 0; i < size; i++) out.push(p.then(() => { o.push(i); return i; }));
+  return Promise.all(out).then(r => { let ok = true; for (let i = 0; i < size; i++) if (o[i] !== i || r[i] !== i) ok = false; say(n, ok, o.length, hash(o)); });
+});
+scenario('burst pending', n => {
+  let res; const p = new Promise(r => { res = r; }); const o = [];
+  for (let i = 0; i < 5000; i++) p.then(v => { o.push(i + v); });
+  res(1);
+  return Promise.resolve().then(() => { say(n, 'first', o.length); return new Promise(r => { let q = Promise.resolve(); q.then(() => { say(n, o.length, hash(o)); r(); }); }); });
+});
+scenario('ping pong', n => {
+  // a queue that never empties, so its front and back move through any block boundary
+  const o = []; let live = 3;
+  return new Promise(done => {
+    const step = (id, left) => { o.push(id); if (left === 0) { if (--live === 0) { say(n, o.length, hash(o)); done(); } return; } Promise.resolve().then(() => step(id, left - 1)); };
+    for (let id = 0; id < 3; id++) Promise.resolve().then(() => step(id, 3000 + id));
+  });
+});
+scenario('growing fan out', n => {
+  const o = []; let d = 0;
+  const spawn = level => { o.push(level); if (level < 12) { Promise.resolve(level + 1).then(spawn); Promise.resolve(level + 1).then(spawn); } };
+  spawn(0);
+  return new Promise(r => { const check = () => { if (o.length === 8191) { say(n, o.length, hash(o)); r(); } else Promise.resolve().then(check); }; check(); });
+});
+scenario('long chain', n => { let p = Promise.resolve(0); for (let i = 0; i < 5000; i++) p = p.then(v => v + i); return p.then(v => say(n, v)); });
+scenario('deep await chain', async n => { const f = async d => d === 0 ? 0 : 1 + await f(d - 1); say(n, await f(100)); });
+
+// ---- handler calls
+scenario('handler call', n => {
+  'use strict';
+  const rec = [];
+  return Promise.resolve(7).then(function (...a) { rec.push(this === undefined, a.length, a[0]); return 1; })
+    .then(function () { rec.push(arguments.length); })
+    .then(function sloppyLike() { rec.push(typeof this); })
+    .then(() => say(n, rec.join()));
+});
+scenario('sloppy handler this', n => new Function('say,n', 'return Promise.resolve().then(function () { say(n, this === globalThis, arguments.length); })')(say, n));
+scenario('handler kinds', n => {
+  class K { constructor() {} }
+  const bound = function (a, b) { return [this.x, a, b].join(); }.bind({ x: 1 }, 2);
+  return Promise.resolve(3).then(bound).then(v => say(n, 'bound', v))
+    .then(K).catch(e => say(n, 'class', e.name))
+    .then(async v => { await 1; return 9; }).then(v => say(n, 'async', v))
+    .then(function* () { yield 1; }).then(g => say(n, 'gen', typeof g.next))
+    .then(Math.max).then(v => say(n, 'native', v))
+    .then(new Proxy(() => 11, {})).then(v => say(n, 'proxy', v))
+    .then(new Proxy(() => 12, { apply() { throw new RangeError('p'); } })).catch(e => say(n, 'proxy throws', e.name))
+    .then(Promise).catch(e => say(n, 'Promise as handler', e.name));
+});
+scenario('handler throws', n => Promise.resolve().then(() => { throw 1; }).then(() => say(n, 'no'), v => { say(n, 'r', v); throw 2; }).catch(v => { say(n, 'c', v); return 3; }).then(v => say(n, 'v', v)));
+scenario('both handlers one runs', n => { let a = 0, b = 0; return Promise.resolve().then(() => { a++; throw 1; }, () => { b++; }).then(() => { a += 10; }, () => { b += 10; }).then(() => say(n, a, b)); });
+scenario('cycle', n => { const d = Promise.resolve().then(() => d); return d.catch(e => say(n, e.name, e instanceof TypeError)); });
+scenario('derived identity', n => {
+  const p = Promise.resolve(1); const d = p.then(); say(n, d !== p, d instanceof Promise, Object.getPrototypeOf(d) === Promise.prototype, Object.keys(d).length, Object.getOwnPropertyNames(d).length, Object.getOwnPropertySymbols(d).length, Object.prototype.toString.call(d), String(p.then.length), p.then.name);
+  return d;
+});
+scenario('derived mutated while pending', n => {
+  const o = []; const p = Promise.resolve(1);
+  const d1 = p.then(v => v + 1); d1.extra = 5; d1.then(v => o.push('d1', v, d1.extra));
+  const d2 = p.then(v => v + 2); Object.freeze(d2); d2.then(v => o.push('d2', v, Object.isFrozen(d2)));
+  const d3 = p.then(v => v + 3); Object.setPrototypeOf(d3, null); Promise.prototype.then.call(d3, v => o.push('d3', v));
+  const d4 = p.then(v => v + 4); d4.then = function (f) { o.push('own then'); return Promise.prototype.then.call(this, f); }; d4.then(v => o.push('d4', v));
+  const d5 = p.then(v => v + 5); Promise.resolve().then(() => d5).then(v => o.push('d5', v));
+  const d6 = p.then(); const d7 = d6.then(); const d8 = d7.then(); d8.then(v => o.push('d8', v));
+  const d9 = p.then(v => { d9.late = 1; return d9.late + v; }); d9.then(v => o.push('d9', v));
+  class Q extends Promise {} const d10 = p.then(v => v + 10); Object.setPrototypeOf(d10, Q.prototype); const d11 = d10.then(v => v); o.push(d11 instanceof Q); d11.then(v => o.push('d11', v));
+  return new Promise(r => { let q = Promise.resolve(); for (let i = 0; i < 12; i++) q = q.then(() => {}); q.then(() => { say(n, o.join()); r(); }); });
+});
+scenario('then many on derived while pending', n => { const o = []; const d = Promise.resolve(1).then(v => v); for (let i = 0; i < 40; i++) d.then(() => o.push(i)); return Promise.resolve().then(() => {}).then(() => {}).then(() => {}).then(() => say(n, hash(o), o.length)); });
+scenario('resolve derived with itself chained', n => { const o = []; let r0; const a = new Promise(r => { r0 = r; }); const b = a.then(v => { o.push('b', v); return b2; }); const b2 = Promise.resolve(2).then(v => v * 2); return (r0(1), b.then(v => say(n, o.join(), v))); });
+
+// ---- species and patching: each undoes what it patched
+const patched = (obj, key, desc, f) => { const old = Object.getOwnPropertyDescriptor(obj, key); Object.defineProperty(obj, key, desc); try { return f(); } finally { if (old) Object.defineProperty(obj, key, old); else delete obj[key]; } };
+scenario('prototype constructor patched', n => {
+  const seen = [];
+  class C extends Promise { constructor(e) { seen.push('C'); super(e); } }
+  const r = patched(Promise.prototype, 'constructor', { value: C, writable: true, configurable: true }, () => { const d = Promise.resolve(1).then(v => v + 1); seen.push(d instanceof C); return d; });
+  return r.then(v => say(n, v, seen.join())).then(() => say(n, 'after', Promise.resolve().then() instanceof C));
+});
+scenario('prototype constructor accessor', n => {
+  let reads = 0; let d;
+  patched(Promise.prototype, 'constructor', { get() { reads++; return Promise; }, configurable: true }, () => { d = Promise.resolve(1).then(v => v); d.then(); });
+  say(n, reads);
+  return d;
+});
+scenario('prototype constructor undefined and bad', n => {
+  const a = patched(Promise.prototype, 'constructor', { value: undefined, writable: true, configurable: true }, () => Promise.resolve(1).then(v => v));
+  say(n, a instanceof Promise);
+  for (const bad of [null, 1, 'x', true]) { try { patched(Promise.prototype, 'constructor', { value: bad, writable: true, configurable: true }, () => Promise.resolve(1).then(v => v)); say(n, 'ok', bad); } catch (e) { say(n, 'threw', bad, e.name); } }
+  return a;
+});
+scenario('prototype constructor throws', n => {
+  try { patched(Promise.prototype, 'constructor', { get() { throw new RangeError('x'); }, configurable: true }, () => Promise.resolve(1).then(() => say(n, 'handler ran'))); } catch (e) { say(n, e.name); }
+});
+scenario('species patched', n => {
+  const seen = [];
+  class C extends Promise {}
+  const g = patched(Promise, Symbol.species, { get() { seen.push('species'); return C; }, configurable: true }, () => Promise.resolve(1).then(v => v));
+  say(n, g instanceof C, seen.join());
+  const h = patched(Promise, Symbol.species, { value: undefined, configurable: true }, () => Promise.resolve(1).then(v => v));
+  say(n, h instanceof Promise, h instanceof C);
+  const i = patched(Promise, Symbol.species, { value: null, configurable: true }, () => Promise.resolve(1).then(v => v));
+  say(n, i instanceof Promise);
+  try { patched(Promise, Symbol.species, { value: 1, configurable: true }, () => Promise.resolve(1).then(v => v)); say(n, 'no throw'); } catch (e) { say(n, e.name); }
+  try { patched(Promise, Symbol.species, { value: () => {}, configurable: true }, () => Promise.resolve(1).then(v => v)); say(n, 'no throw'); } catch (e) { say(n, e.name); }
+  return Promise.all([g, h, i]).then(v => say(n, v.join()));
+});
+scenario('species capability shapes', n => {
+  const t = (name, C) => { try { const p = Promise.resolve(1); p.constructor = { [Symbol.species]: C }; const r = p.then(v => v); say(n, name, typeof r); return r; } catch (e) { say(n, name, e.name, e.message.length > 0); } };
+  const o = [];
+  t('not callable resolve', function (e) { e(1, 2); });
+  t('never calls', function () {});
+  t('twice', function (e) { e(undefined, undefined); e(() => {}, () => {}); return {}; });
+  t('twice bad', function (e) { e(() => {}, () => {}); e(() => {}, () => {}); });
+  const r = t('records', function (e) { e(v => { o.push('res', v); }, v => { o.push('rej', v); }); this.tag = 1; });
+  say(n, r.tag);
+  const p2 = Promise.reject(4); p2.constructor = { [Symbol.species]: function (e) { e(v => { o.push('res', v); }, v => { o.push('rej', v); }); } }; p2.then();
+  return Promise.resolve().then(() => {}).then(() => {}).then(() => say(n, o.join()));
+});
+scenario('own constructor and accessors', n => {
+  const seen = [];
+  const p = Promise.resolve(1); Object.defineProperty(p, 'constructor', { get() { seen.push('own'); return Promise; }, configurable: true });
+  p.then(); p.then(); say(n, seen.length);
+  const q = Promise.resolve(1); q.constructor = undefined; say(n, q.then() instanceof Promise);
+  const u = Promise.resolve(1); u.constructor = 5; try { u.then(); say(n, 'no'); } catch (e) { say(n, e.name); }
+  const w = Promise.resolve(1); Object.setPrototypeOf(w, null); say(n, Promise.prototype.then.call(w) instanceof Promise, Object.getPrototypeOf(w));
+  const x = Promise.resolve(1); Object.setPrototypeOf(x, Object.create(Promise.prototype)); say(n, x.then() instanceof Promise);
+  const z = Promise.resolve(1); Object.setPrototypeOf(z, { constructor: { [Symbol.species]: class extends Promise { get tag() { return 'z'; } } }, then: Promise.prototype.then }); say(n, z.then().tag);
+  const fz = Object.freeze(Promise.resolve(1)); return fz.then(v => say(n, 'frozen', v));
+});
+scenario('subclass', n => {
+  const seen = [];
+  class A extends Promise { constructor(e) { seen.push('new A'); super(e); } then(f, r) { seen.push('then A'); return super.then(f, r); } static get [Symbol.species]() { seen.push('species A'); return this; } }
+  class B extends Promise { static get [Symbol.species]() { return Promise; } }
+  const a = A.resolve(1).then(v => v + 1).then(v => { seen.push(v); return v; });
+  const b = new B(r => r(2)); const bd = b.then(v => v); seen.push(bd instanceof B, bd instanceof Promise);
+  const c = a.catch(() => {}); const d = a.finally(() => seen.push('fin'));
+  return Promise.all([a, bd, c, d]).then(v => { say(n, v.join()); say(n, seen.join()); });
+});
+scenario('then overridden', n => {
+  const o = [];
+  const orig = Promise.prototype.then;
+  let d;
+  try {
+    Promise.prototype.then = function (f, r) { o.push('patched'); return orig.call(this, f, r); };
+    Promise.resolve(1).catch(() => {}); o.push('a');
+    Promise.resolve(1).finally(() => {}); o.push('b');
+    new Promise(r => r(Promise.resolve(1))); o.push('c');
+    Promise.all([Promise.resolve(1)]); o.push('d');
+    Promise.race([Promise.resolve(1)]); o.push('e');
+    (async () => { await Promise.resolve(1); o.push('await'); })(); o.push('f');
+    d = Promise.resolve().then(() => Promise.resolve(2)); o.push('g');
+  } finally { /* the jobs above run later, while the patch is gone or still there, as in the spec */ }
+  return orig.call(Promise.resolve(), () => {}).then(() => { Promise.prototype.then = orig; }).then(() => orig.call(d, v => {})).then(() => say(n, o.join()));
+});
+scenario('then replaced by non function', n => {
+  const orig = Promise.prototype.then; const p = Promise.resolve(1);
+  try { Promise.prototype.then = 5; const d = new Promise(r => r(p)); return orig.call(d, v => say(n, v === p)).then(() => { Promise.prototype.then = orig; }); } catch (e) { Promise.prototype.then = orig; say(n, e.name); }
+});
+scenario('then deleted', n => {
+  const d0 = Object.getOwnPropertyDescriptor(Promise.prototype, 'then'); const orig = d0.value; const p = Promise.resolve(1);
+  delete Promise.prototype.then; say(n, typeof p.then);
+  const d = new Promise(r => r(p));
+  Object.defineProperty(Promise.prototype, 'then', d0);
+  return d.then(v => say(n, v === p, v));
+});
+scenario('then getter', n => {
+  let reads = 0; const orig = Object.getOwnPropertyDescriptor(Promise.prototype, 'then');
+  Object.defineProperty(Promise.prototype, 'then', { get() { reads++; return orig.value; }, configurable: true });
+  const p = Promise.resolve(1); const d = new Promise(r => r(p)); const c = p.catch(() => {});
+  (async () => { await p; })();
+  const seen = reads;
+  Object.defineProperty(Promise.prototype, 'then', orig);
+  return d.then(() => say(n, seen, reads));
+});
+scenario('then getter throws', n => {
+  const p = Promise.resolve(1); Object.defineProperty(p, 'then', { get() { throw new RangeError('g'); } });
+  return new Promise(r => r(p)).catch(e => say(n, e.name));
+});
+scenario('own then on resolution', n => {
+  const o = []; const p = Promise.resolve(1); p.then = (f, r) => { o.push('own', typeof f, typeof r); f(9); };
+  const d = new Promise(r => r(p));
+  return d.then(v => say(n, v, o.join()));
+});
+scenario('then receivers', n => {
+  const then = Promise.prototype.then;
+  for (const [k, v] of [['undefined', undefined], ['object', {}], ['number', 1], ['thenable', { then() {} }], ['proxy', new Proxy(Promise.resolve(), {})], ['subclass-less', Object.create(Promise.prototype)]]) {
+    try { then.call(v); say(n, k, 'ok'); } catch (e) { say(n, k, e.name); }
+  }
+  try { Promise.resolve().then.call(new Proxy(Promise.resolve(), {})); say(n, 'no'); } catch (e) { say(n, e.name); }
+  say(n, typeof new Proxy(Promise.resolve(), {}).then);
+});
+scenario('patched then restored', n => {
+  const orig = Promise.prototype.then; const o = [];
+  Promise.prototype.then = function (f, r) { o.push('x'); return orig.call(this, f, r); };
+  Promise.prototype.then = orig;
+  return Promise.resolve(1).then(v => { o.push(v); }).then(() => say(n, o.join()));
+});
+scenario('unrelated prototype property', n => {
+  Promise.prototype.someOther = 1;
+  return Promise.resolve(1).then(v => v + Promise.resolve().someOther).then(v => { delete Promise.prototype.someOther; say(n, v); });
+});
+scenario('withResolvers', n => {
+  const { promise, resolve, reject } = Promise.withResolvers();
+  const o = [promise.then(v => v + 1), promise.then(v => v + 2)];
+  resolve(1); reject(9); resolve(5);
+  say(n, resolve.length, resolve.name === '', reject.length);
+  return Promise.all(o).then(v => say(n, v.join()));
+});
+scenario('settled then alternation', n => {
+  const o = []; const a = Promise.resolve('a'), b = Promise.reject('b');
+  for (let i = 0; i < 40; i++) { (i % 2 ? b : a).then(v => o.push(v + i), v => o.push('r' + v + i)); }
+  return Promise.resolve().then(() => {}).then(() => say(n, o.join()));
+});
+
+const run = async () => {
+  for (const [name, f] of queue) {
+    try { await f(name); } catch (e) { say(name, 'threw', e); }
+    // let everything the scenario queued, its ticker included, finish before the next
+    let p = Promise.resolve(); for (let i = 0; i < 40; i++) p = p.then(() => {});
+    await p;
+  }
+  say('done');
+};
+run();
+""";
+
+    private const string PromiseJobsExpected = """
+await primitive a @ 1
+await primitive b @ 2
+await native a @ 1
+await pending native a @ 1
+await thenable then @ 1
+await thenable a @ 2
+await then derived a @ 2
+await patched own constructor a @ 3
+await constructor getter getter @ 0
+await constructor getter a @ 1
+await subclass a @ 3
+async return value a @ 1
+async return promise a @ 3
+async return thenable a @ 2
+resolve with promise a @ 3
+resolve with derived a @ 3
+handler returns promise a @ 4
+handler returns pending then settled a @ 4
+handler returns thenable then @ 2
+handler returns thenable a @ 3
+pass through a @ 5
+rejection through a @ 3
+finally ticks f @ 1
+finally ticks a @ 4
+finally rejected f @ 1
+finally rejected a @ 4
+all race any settled all @ 2
+all race any settled race @ 2
+all race any settled any @ 2
+all race any settled settled @ 2
+async generator start @ 0
+async generator v @ 2
+async generator x @ 2
+async generator v @ 4
+async generator v @ 6
+for await v @ 2
+for await v @ 4
+for await v @ 7
+interleave a1,sync,a2,b1,q1,a3,b2,b3
+reaction order pending 0,1,2,3,4,fin,late1,n0,n1,n2,n3,n4
+rejected order pending r0,r1,r2,c
+burst 1 true 1 217
+burst 15 true 15 394174
+burst 16 true 16 219373
+burst 17 true 17 800561
+burst 31 true 31 400996
+burst 33 true 33 356994
+burst 2047 true 2047 131749
+burst 2048 true 2048 86254
+burst 2049 true 2049 675916
+burst 4097 true 4097 240543
+burst 10000 true 10000 733
+burst 20000 true 20000 928452
+burst pending first 5000
+burst pending 5000 614196
+ping pong 9006 72494
+growing fan out 8191 581512
+long chain 12497500
+deep await chain 100
+handler call true,1,7,1,undefined
+sloppy handler this true 1
+handler kinds bound 1,2,3
+handler kinds class TypeError
+handler kinds async 9
+handler kinds gen function
+handler kinds native 65
+handler kinds proxy 11
+handler kinds proxy throws RangeError
+handler kinds Promise as handler TypeError
+handler throws r 1
+handler throws c 2
+handler throws v 3
+both handlers one runs 1 10
+cycle TypeError true
+derived identity true true true 0 0 0 [object Promise] 2 then
+derived mutated while pending own then,true,d1,2,5,d2,3,true,d3,4,d4,5,d9,2,d11,11,d5,6,d8,1
+then many on derived while pending 870456 40
+resolve derived with itself chained b,1 4
+prototype constructor patched 2 C,true,C,C,C
+prototype constructor patched after false
+prototype constructor accessor 2
+prototype constructor undefined and bad true
+prototype constructor undefined and bad threw null TypeError
+prototype constructor undefined and bad threw 1 TypeError
+prototype constructor undefined and bad threw x TypeError
+prototype constructor undefined and bad threw true TypeError
+prototype constructor throws RangeError
+species patched true species
+species patched true false
+species patched true
+species patched TypeError
+species patched TypeError
+species patched 1,1,1
+species capability shapes not callable resolve TypeError true
+species capability shapes never calls TypeError true
+species capability shapes twice object
+species capability shapes twice bad TypeError true
+species capability shapes records object
+species capability shapes 1
+species capability shapes res,1,rej,4
+own constructor and accessors 2
+own constructor and accessors true
+own constructor and accessors TypeError
+own constructor and accessors true null
+own constructor and accessors true
+own constructor and accessors z
+own constructor and accessors frozen 1
+subclass 2,2,2,2
+subclass new A,then A,species A,new A,then A,species A,new A,false,true,then A,species A,new A,species A,then A,species A,new A,then A,species A,new A,then A,species A,new A,then A,species A,new A,2,fin,new A,then A,species A,new A,then A,species A,new A
+then overridden patched,a,patched,b,c,patched,d,patched,e,f,patched,g,patched,patched,patched,patched,patched,await,patched,patched
+then replaced by non function TypeError
+then replaced by non function true
+then deleted undefined
+then deleted true [object Promise]
+then getter 2 2
+then getter throws RangeError
+own then on resolution 9 own,function,function
+then receivers undefined TypeError
+then receivers object TypeError
+then receivers number TypeError
+then receivers thenable TypeError
+then receivers proxy TypeError
+then receivers subclass-less TypeError
+then receivers TypeError
+then receivers function
+patched then restored 1
+unrelated prototype property 2
+withResolvers 1 true 1
+withResolvers 2,3
+settled then alternation a0,rb1,a2,rb3,a4,rb5,a6,rb7,a8,rb9,a10,rb11,a12,rb13,a14,rb15,a16,rb17,a18,rb19,a20,rb21,a22,rb23,a24,rb25,a26,rb27,a28,rb29,a30,rb31,a32,rb33,a34,rb35,a36,rb37,a38,rb39
+done
+""";
+
+    [Fact]
+    public void PromiseThenAndJobOrderingMatchReferenceBehavior()
+    {
+        using var engine = new JsEngine();
+        engine.Evaluate(PromiseJobsScript);
+        var got = engine.Evaluate("__log.join('\\n')").AsString().Split('\n');
+        var expected = PromiseJobsExpected.ReplaceLineEndings("\n").TrimEnd('\n').Split('\n');
+        for (int i = 0; i < Math.Min(expected.Length, got.Length); i++) Assert.True(expected[i] == got[i], $"line {i}: expected {expected[i]} but got {got[i]}");
+        Assert.Equal(expected.Length, got.Length);
+    }
+
+    // Expected output generated by running the script in Node.
+    private const string ArgumentsAndSpreadScript = """
+var out = [];
+function T(name, f) { var v; try { v = f(); } catch (e) { v = 'throws ' + (e && e.constructor && e.constructor.name); } out.push(name + ': ' + JSON.stringify(v, function (k, x) { return x === undefined ? 'undef' : typeof x === 'function' ? 'fn' : typeof x === 'symbol' ? 'sym' : x; })); }
+// arguments.length
+function len() { return arguments.length; }
+T('len', function () { return [len(), len(1), len(1, 2), len(1, 2, 3, 4, 5, 6, 7), len.call(null, 1), len.apply(null, [1, 2, 3]), Reflect.apply(len, null, [1, 2]), new (function () { this.n = arguments.length; })(1, 2).n, len(...[1, 2], 3)]; });
+T('lenParams', function () { function f(a, b) { a = 9; return [a, b, arguments.length]; } return [f(), f(1), f(1, 2), f(1, 2, 3)]; });
+T('lenDup', function () { function f(a, a) { return [a, arguments.length]; } return [f(1), f(1, 2)]; });
+T('lenCaptured', function () { function f(a) { var g = function () { return a; }; a = 7; return [g(), arguments.length]; } return f(1, 2); });
+T('lenCallback', function () { return [[1, 2].map(function () { return arguments.length; }), [3, 1].sort(function () { return arguments.length - 2; }), JSON.parse('[1]', function () { return arguments.length; })]; });
+T('lenStrict', function () { 'use strict'; function f(a) { a = 2; return arguments.length; } return [f(), f(1, 2)]; });
+T('lenClass', function () { class A { constructor() { this.n = arguments.length; } m() { return arguments.length; } set s(v) { this.t = arguments.length; } get g() { return arguments.length; } static st() { return arguments.length; } } class B extends A {} class C extends A { constructor() { super(1, 2, 3); this.c = arguments.length; } } var a = new A(1); a.s = 1; return [a.n, a.m(1, 2), a.t, a.g, A.st(1, 2, 3), new B(1, 2).n, new C(1).n, new C(1).c]; });
+T('lenBound', function () { return len.bind(null, 1, 2)(3); });
+T('lenDefault', function () { function f(x = arguments.length, y = arguments.length + 1) { return [x, y, arguments.length]; } return [f(), f(5), f(undefined, undefined, 1)]; });
+T('lenParamArrow', function () { function f(x = () => arguments.length) { return x(); } return f(undefined, 2); });
+T('lenRecursive', function () { function f(n) { return n === 0 ? arguments.length : f(n - 1, 1, 2) + arguments.length; } return f(3); });
+T('lenGen', function () { function* g(a) { a = 3; yield arguments.length; yield arguments[0]; yield arguments[1]; } return Array.from(g(1, 2)); });
+// not plain reads
+T('lenWrite', function () { function f() { arguments.length = 7; return arguments.length; } return f(1); });
+T('lenDelete', function () { function f() { var d = delete arguments.length; return [d, arguments.length]; } return f(1); });
+T('lenDeleteParen', function () { function f() { delete (arguments.length); return arguments.length; } return f(1); });
+T('lenUpdate', function () { function f() { arguments.length++; (arguments.length)++; arguments.length += 2; return arguments.length; } return f(1); });
+T('lenPattern', function () { function f() { [arguments.length] = [4]; var a = arguments.length; ({ x: arguments.length } = { x: 5 }); return [a, arguments.length]; } return f(1); });
+T('lenForOf', function () { function f() { for (arguments.length of [8]); return arguments.length; } return f(1); });
+T('lenForIn', function () { function f() { for (arguments.length in { k: 1 }); return arguments.length; } return f(1); });
+T('lenCall', function () { function f() { return arguments.length(); } return f(1); });
+T('lenCallOpt', function () { function f() { return arguments.length?.(); } return f(1); });
+T('lenOptional', function () { function f() { return [arguments?.length, arguments?.[0]]; } return f(1); });
+T('lenTag', function () { function f() { return arguments.length``; } return f(1); });
+T('lenNew', function () { function f() { return new arguments.length(); } return f(1); });
+T('lenTypeof', function () { function f() { return [typeof arguments.length, void arguments.length, arguments.length?.x, -arguments.length]; } return f(1); });
+T('escape', function () { function f() { return arguments; } var a = f(1, 2); return [a.length, a[1], Object.prototype.toString.call(a)]; });
+T('escapeTypeof', function () { function f() { return [typeof arguments, arguments.length]; } return f(1); });
+T('escapeArrow', function () { function f() { return (() => arguments.length)(); } return f(1, 2); });
+T('escapeArrowIdx', function () { function f() { return (() => arguments[1])(); } return f(1, 2); });
+T('escapeEval', function () { function f() { return [arguments.length, eval('arguments.length'), eval('arguments[0]')]; } return f(1, 2); });
+T('escapeEvalArrow', function () { function f() { return [arguments.length, (() => eval('arguments[1]'))()]; } return f(1, 2); });
+T('evalWrites', function () { function f() { eval('arguments.length = 9'); return arguments.length; } return f(1); });
+T('evalVar', function () { function f() { eval('var arguments = {length: 3}'); return arguments.length; } return f(1); });
+T('indirectEval', function () { function f() { return [(0, eval)('typeof arguments'), arguments.length]; } return f(1); });
+T('withInside', function () { function f() { with ({ length: 3, arguments: { length: 44 } }) { return arguments.length; } } return f(1); });
+T('withInside2', function () { function f() { with ({ length: 3 }) { return arguments.length; } } return f(1); });
+T('withUnrelated', function () { function f() { var x = 1; with ({ y: 2 }) { x = y + x; } return [x, arguments.length, arguments[0]]; } return f(5, 6); });
+T('varArguments', function () { function f() { var arguments; return arguments.length; } return f(1); });
+T('varArguments2', function () { function f() { var arguments = { length: 5 }; return arguments.length; } return f(1); });
+T('assignArguments', function () { function f() { arguments = { length: 6, 0: 'x' }; return [arguments.length, arguments[0]]; } return f(1); });
+T('fnArguments', function () { function f() { function arguments() {} return arguments.length; } return f(1); });
+T('blockFnArguments', function () { function f() { var a = arguments.length; { function arguments() {} } return a; } return f(1, 2); });
+T('letArguments', function () { function f() { let arguments = { length: 8 }; return arguments.length; } return f(1); });
+T('blockLet', function () { function f() { var a = arguments.length; { let arguments = { length: 8 }; a += arguments.length; } return a; } return f(1); });
+T('catchArguments', function () { function f() { var a = arguments.length; try { throw { length: 9 }; } catch (arguments) { a += arguments.length; } return a; } return f(1); });
+T('paramArguments', function () { function f(arguments) { return arguments.length; } return f('abc'); });
+T('nested', function () { function f() { function g() { return arguments.length; } return [arguments.length, g(1, 2, 3)]; } return f(1); });
+T('nestedEval', function () { function f() { function g() { return eval('arguments.length'); } return [arguments.length, g(1, 2)]; } return f(1); });
+T('varBodyParamScope', function () { function f(a = 1) { var arguments; return [arguments.length, a]; } return f(); });
+// arguments[i]
+function sum() { var s = 0; for (var i = 0; i < arguments.length; i++) s += arguments[i]; return s; }
+T('sum', function () { return [sum(), sum(1), sum(1, 2), sum(1, 2, 3, 4, 5, 6, 7, 8, 9)]; });
+T('localsOverExtras', function () { function f() { var a = 1, b = 2, c = 3, d = 4; return [arguments[0], arguments[1], arguments[2], a + b + c + d]; } return f(7, 8, 9); });
+T('lastArg', function () { function f() { return arguments[arguments.length - 1]; } return [f(), f(1), f(1, 2)]; });
+T('aliasSloppy', function () { function f(a) { a = 9; return arguments[0]; } return [f(), f(1), f(1, 2)]; });
+T('aliasSloppy2', function () { function f(a, b) { arguments[0] = 9; return [a, b, arguments[0], arguments[1]]; } return [f(), f(1), f(1, 2)]; });
+T('aliasWrite', function () { function f(a) { a = 3; arguments[1] = 5; return [arguments[0], arguments[1], arguments.length]; } return f(1); });
+T('aliasFnDecl', function () { function f(a) { function a() {} return typeof arguments[0]; } return [f(), f(1)]; });
+T('aliasDup', function () { function f(a, a) { a = 9; return [arguments[0], arguments[1]]; } return [f(1), f(1, 2)]; });
+T('noAliasStrict', function () { function f(a) { 'use strict'; a = 9; return [a, arguments[0], arguments[1], arguments.length]; } return [f(), f(1), f(1, 2)]; });
+T('noAliasDefault', function () { function f(a = 1) { a = 9; return [a, arguments[0], arguments.length]; } return [f(), f(2), f(2, 3)]; });
+T('noAliasRest', function () { function f(a, ...r) { a = 9; r[0] = 'z'; return [a, r, arguments[0], arguments[1], arguments.length]; } return [f(), f(1), f(1, 2, 3)]; });
+T('noAliasDestructure', function () { function f({ x }) { x = 2; return [x, arguments[0].x, arguments.length]; } return f({ x: 1 }, 2); });
+T('strictWrite', function () { function f(a) { 'use strict'; arguments[0] = 9; return [a, arguments[0]]; } return f(1); });
+T('deleteElem', function () { function f() { delete arguments[0]; return [arguments[0], arguments.length]; } return f(1); });
+T('updateElem', function () { function f() { arguments[0]++; return arguments[0]; } return f(1); });
+T('patternElem', function () { function f() { [arguments[0]] = [3]; return arguments[0]; } return f(1); });
+T('callElem', function () { function f() { return arguments[0](); } return f(function () { return [this.length, this[0] === arguments.callee]; }); });
+T('callElemStrictThis', function () { function f() { 'use strict'; return arguments[0](); } return f(function () { 'use strict'; return this.length; }, 2); });
+T('tagElem', function () { function f() { return arguments[0]`x`; } return f(function () { return this.length; }, 2); });
+T('parenCall', function () { function f() { return (arguments[0])(); } return f(function () { return this.length; }, 2, 3); });
+T('keys', function () { function f() { return [arguments['0'], arguments['length'], arguments['nope'], arguments['1'], arguments[1.5], arguments[-1], arguments[-0], arguments[NaN], typeof arguments['toString'], arguments[Symbol.iterator] === Array.prototype.values, arguments['callee'] === f]; } return f('a', 'b'); });
+T('keysStrict', function () { function f() { 'use strict'; return [arguments['0'], arguments['length'], typeof arguments['hasOwnProperty'], arguments[Symbol.iterator] === Array.prototype.values, arguments[Symbol.toStringTag]]; } return f('a', 'b'); });
+T('calleeStrict', function () { function f() { 'use strict'; return arguments['callee']; } return f(); });
+T('calleeRest', function () { function f(...r) { return arguments['callee']; } return f(); });
+T('calleeDefault', function () { function f(a = 1) { return arguments['callee']; } return f(); });
+T('objectKey', function () { function f() { var n = 0; var k = { toString() { n++; return '1'; } }; return [arguments[k], n, arguments[k], n, arguments.length]; } return f('a', 'b'); });
+T('throwingKey', function () { function f() { return arguments[{ toString() { throw new RangeError('k'); } }]; } return f(1); });
+T('symbolKey', function () { var s = Symbol('s'); function f() { return arguments[s]; } return f(1); });
+T('protoIndex', function () { function f() { return [arguments[0], arguments[1], arguments[2], arguments[3]]; } Object.prototype[2] = 'p2'; try { return [f('a'), f('a', 'b', 'c')]; } finally { delete Object.prototype[2]; } });
+T('protoGetter', function () { var seen = []; function f() { var a = arguments[2], b = arguments[2]; return [a, b, arguments[0], arguments.length, seen[0] === seen[1], Object.prototype.toString.call(seen[0]), seen[0].length, seen[0].callee === f]; } Object.defineProperty(Object.prototype, 2, { configurable: true, get() { seen.push(this); return 'g' + this.length; } }); try { return f('a'); } finally { delete Object.prototype[2]; } });
+T('protoGetterMutates', function () { function f() { var a = [arguments[0], arguments.length, arguments.foo2]; var x = arguments['foo']; return [a, x, arguments[0], arguments.length, arguments[1], arguments.bar]; } Object.defineProperty(Object.prototype, 'foo', { configurable: true, get() { this[0] = 'changed'; this[1] = 'new'; this.length = 2; this.bar = 'b'; return 'got'; } }); try { return f('a'); } finally { delete Object.prototype.foo; } });
+T('protoGetterMutatesStrict', function () { function f() { 'use strict'; var x = arguments['foo']; return [x, arguments[0], arguments.length, arguments[1]]; } Object.defineProperty(Object.prototype, 'foo', { configurable: true, get() { 'use strict'; this[0] = 'changed'; this[1] = 'new'; this.length = 2; return 'got'; } }); try { return f('a'); } finally { delete Object.prototype.foo; } });
+T('protoIndexGetterDelete', function () { function f() { var x = arguments[1]; return [x, arguments[0], arguments.length]; } Object.defineProperty(Object.prototype, 1, { configurable: true, get() { delete this[0]; this.length = 0; return 'd'; } }); try { return f('a'); } finally { delete Object.prototype[1]; } });
+T('elemInDefault', function () { function f(x = arguments[1]) { return [x, arguments[0], arguments.length]; } return [f(), f(undefined, 3)]; });
+T('elemCallback', function () { var r = []; [5, 6].forEach(function () { r.push(arguments[0], arguments[1], arguments[2].length, arguments[3]); }); return r; });
+T('elemMethod', function () { var o = { m() { return [this === o, arguments[0], arguments.length]; } }; return o.m(1, 2); });
+T('elemCtor', function () { class A { constructor() { this.v = arguments[0]; } } class B extends A { constructor() { super(arguments[0] + 1); this.w = arguments[1]; } } var b = new B(1, 2); return [b.v, b.w]; });
+T('elemInClosure', function () { function f() { var x = arguments[0]; return function () { return [x, arguments[0], arguments.length]; }; } return f(1)(2, 3); });
+T('elemAssignFrom', function () { function f() { var o = {}; o.a = arguments[0]; o[arguments[1]] = arguments.length; return o; } return f(1, 'k'); });
+T('mathMax', function () { function f() { return Math.max(arguments[0], arguments[1]) + arguments.length; } return f(1, 2); });
+T('tailElem', function () { 'use strict'; function g() { return arguments[0] + arguments.length; } function f() { return g(arguments[0], arguments[1], 3); } return f(1); });
+T('asyncArgs', function () { async function f(a) { a = 1; return arguments.length + arguments[0]; } var p = f(5, 6); return typeof p.then; });
+T('patched', function () { function f() { return [arguments.length, arguments[0]]; } var save = Array.prototype[Symbol.iterator]; Array.prototype[Symbol.iterator] = function () { return save.call(['x']); }; try { return f(...[1, 2]); } finally { Array.prototype[Symbol.iterator] = save; } });
+// rest
+function rest(...r) { return r; }
+T('rest', function () { return [rest(), rest(1), rest(1, 2, 3), rest(...[1, 2], ...[3]), rest.call(null, 1), rest.apply(null, [1, 2]), Array.isArray(rest()), Object.getOwnPropertyNames(rest(1)), rest(undefined, null)]; });
+T('restAfter', function () { function f(a, b, ...r) { return [a, b, r, r.length]; } return [f(), f(1), f(1, 2), f(1, 2, 3), f(1, 2, 3, 4, 5, 6)]; });
+T('restMutates', function () { var a = rest(1, 2); a.push(3, 4, 5); a[0] = 9; a.length = 4; var b = rest(); b.push(1); b[5] = 2; var c = rest(1); c.pop(); c.unshift(4, 5); return [a, b, c, b.length]; });
+T('restIndependent', function () { var a = rest(1), b = rest(1); a[0] = 2; return [a, b, a === b]; });
+T('restCallback', function () { return [[7].map((...a) => a.length), [7].map((a, ...r) => r.length), [7].map((a, b, ...r) => r[0].length), [7].map((a, b, c, ...r) => r), [7].map((a, b, c, d, ...r) => r), [7].reduce((...a) => a.length, 0), [3, 1].sort((...a) => a.length - 2)]; });
+T('restAndArguments', function () { function f(a, ...r) { r[0] = 'r'; return [arguments[1], arguments.length, r, a, (function () { return arguments.length; })()]; } return f(1, 2, 3); });
+T('restAndEscape', function () { function f(a, ...r) { var x = arguments; r[0] = 'r'; x[2] = 'x'; return [x[1], x[2], r, x.length]; } return f(1, 2, 3); });
+T('restPattern', function () { function f(a, ...[b, c = 5, ...d]) { return [a, b, c, d]; } function g(...{ length }) { return length; } return [f(1), f(1, 2, 3, 4, 5), g(1, 2)]; });
+T('restDefault', function () { function f(a = 1, b = () => r0, ...r) { var r0 = 2; return [a, typeof b, r]; } return f(undefined, undefined, 3); });
+T('restClosure', function () { function f(...r) { return () => r; } var g = f(1, 2); g().push(3); return g(); });
+T('restGen', function () { function* g(a, ...r) { yield r; r.push(1); yield r; yield a; } return Array.from(g(1, 2, 3)); });
+T('restCtor', function () { class A { constructor(...a) { this.a = a; } } class B extends A { constructor(...b) { super(...b, 'x'); this.b = b; } } class C extends B {} var c = new C(1, 2); return [c.a, c.b]; });
+T('restHoles', function () { return [rest(...[1, , 3]), 1 in rest(...[1, , 3]), rest(...[, ,])]; });
+T('restLarge', function () { var a = []; for (var i = 0; i < 70000; i++) a.push(i); var r = rest(...a); r.push(1); return [r.length, r[69999], r[70000]]; });
+T('restFrozenSource', function () { var r = rest(...Object.freeze([1, 2])); r.push(3); return r; });
+T('restEval', function () { function f(...r) { return eval('r.length + arguments.length'); } return f(1, 2); });
+T('restApplyArguments', function () { function f() { return rest.apply(null, arguments); } return f(1, 2); });
+// array spread
+T('spread', function () { var a = [1, 2, 3], e = []; return [[...a], [...a, 4], [0, ...a], [...a, ...a], [0, ...a, 4, ...e, 5, ...a, 6], [...e], [...e, 1], [...e, ...e], [...'héllo'], [...new Set([1, 1, 2])], [...new Map([[1, 2]])], [...(function* () { yield 1; yield 2; })()], [...new Uint8Array(2)]]; });
+T('spreadElisions', function () { var a = [1, 2]; var x = [...a, , ], y = [, ...a], z = [...a, , 3], w = [, , ...a, , ...a]; return [x.length, 2 in x, y.length, 0 in y, z.length, 2 in z, w.length, 2 in w, 4 in w]; });
+T('spreadHoles', function () { var h = [1, , 3]; var r = [...h, 4]; return [r, 1 in r, r.length]; });
+T('spreadHoleProto', function () { Array.prototype[1] = 'p'; try { var r = [...[1, , 3]]; return [r, Object.hasOwn(r, 1)]; } finally { delete Array.prototype[1]; } });
+T('spreadThenPush', function () { var a = [1, 2]; var r = [...a]; r.push(3); r.push(4, 5, 6, 7, 8, 9, 10, 11); var s = [...a, 0]; s[10] = 1; var t = [...a]; t.length = 0; t.push(1); return [r, s.length, 5 in s, t]; });
+T('spreadIndependent', function () { var a = [1, 2]; var r = [...a]; r[0] = 9; a[1] = 8; return [a, r]; });
+T('spreadPatchedIter', function () { var save = Array.prototype[Symbol.iterator]; Array.prototype[Symbol.iterator] = function* () { yield 'patched'; }; try { return [[...[1, 2]], rest(...[1, 2])]; } finally { Array.prototype[Symbol.iterator] = save; } });
+T('spreadPatchedNext', function () { var AIP = Object.getPrototypeOf([][Symbol.iterator]()); var save = AIP.next; var n = 0; AIP.next = function () { n++; return save.call(this); }; try { var r = [...[1, 2], 3]; return [r, n]; } finally { AIP.next = save; } });
+T('spreadOwnIter', function () { var a = [1, 2]; a[Symbol.iterator] = function* () { yield 'own'; }; return [...a, 3]; });
+T('spreadSubclass', function () { class S extends Array { *[Symbol.iterator]() { yield 'sub'; } } class P extends Array {} var p = new P(); p.push(1); var r = [...p, 2]; return [[...new S(3)], r, r instanceof P]; });
+T('spreadNonIterable', function () { return [...{}]; });
+T('spreadNull', function () { return [...null]; });
+T('spreadFrozen', function () { var r = [...Object.freeze([1, 2]), 3]; r.push(4); return r; });
+T('spreadSparse', function () { var s = []; s[100000] = 1; var r = [...s, 2]; return [r.length, r[100000], r[100001], 5 in r]; });
+T('spreadShiftQueue', function () { var q = []; for (var i = 0; i < 5000; i++) q.push(i); for (i = 0; i < 2000; i++) q.shift(); var r = [...q, -1]; return [r.length, r[0], r[3000], q.length]; });
+T('spreadArgumentsObj', function () { function f() { return [...arguments, 'x']; } return f(1, 2); });
+T('spreadGetterElement', function () { var a = [1, 2]; Object.defineProperty(a, 0, { get() { return 'g'; } }); return [...a, 3]; });
+T('spreadInCall', function () { function f() { return arguments.length; } var a = [1, 2]; return [f(...a), f(0, ...a), f(...a, 0), f(...a, ...a), f(0, ...[], 0), Math.max(...a), new Date(...[2020, 1]).getFullYear(), new (class { constructor(...x) { this.x = x; } })(...a, 3).x]; });
+T('spreadCallOrder', function () { var log = []; var a = { get b() { log.push('b'); return [1]; } }; function f(...x) { return x; } var r = f(log.push('p1'), ...a.b, log.push('p2')); return [r, log]; });
+T('spreadMutatedDuring', function () { var a = [1, 2]; var r = [...a, a.push(3), ...a]; return r; });
+T('spreadLongLiteral', function () { var a = []; for (var i = 0; i < 6000; i++) a.push(i); var r = [...a, ...a, 1]; r.push(2); return [r.length, r[5999], r[6000], r[12001]]; });
+// object spread
+T('ospread', function () { var o = { a: 1, b: 2 }; return [{ ...o }, { ...o, z: 1 }, { z: 1, ...o }, { ...o, a: 9 }, { a: 9, ...o }, { ...o, ...{ b: 3, c: 4 } }, { ...o, y: 1, z: 2, w: 3, v: 4, u: 5 }, { ...null }, { ...undefined, q: 1 }, { ...1 }, { ...'ab' }, { ...[1, 2], k: 1 }, { ...{} }, { ...{}, a: 1 }, { ...true }]; });
+T('ospreadKeys', function () { var o = { b: 1, 2: 2, a: 3, 1: 4 }; var s = Symbol('s'); var p = { [s]: 1, x: 2 }; var r = { ...p, y: 1 }; return [Object.keys({ ...o, c: 1 }), Object.keys({ c: 1, ...o }), Object.getOwnPropertySymbols(r).length, Object.keys(r), Object.keys({ ...{ x: 1 }, z: 2, x: 3 })]; });
+T('ospreadAttrs', function () { var o = {}; Object.defineProperty(o, 'h', { value: 1, enumerable: false }); Object.defineProperty(o, 'ro', { value: 2, enumerable: true, writable: false }); var g = { get v() { return 7; }, w: 1 }; var f = Object.freeze({ fz: 1 }); var r = { ...o }, q = { ...g, k: 1 }, t = { ...f, n: 2 }; t.fz = 3; r.ro = 5; return [r, Object.getOwnPropertyDescriptor(r, 'ro'), Object.getOwnPropertyDescriptor(q, 'v'), t, Object.isFrozen(t)]; });
+T('ospreadProto', function () { var p = { inh: 1 }; var o = Object.create(p); o.own = 2; class K { constructor() { this.f = 1; } m() {} } var a = { ...o, z: 1 }, b = { __proto__: p, ...{ x: 1 } }, c = { ...{ x: 1 }, __proto__: p }, d = { ...new K() }, e = { __proto__: null, ...{ x: 1 } }; return [a, a.inh, Object.getPrototypeOf(a) === Object.prototype, b.inh, b.x, Object.keys(b), c.inh, d, Object.getPrototypeOf(d) === Object.prototype, Object.getPrototypeOf(e)]; });
+T('ospreadProtoKey', function () { var o = JSON.parse('{"__proto__": 5, "x": 1}'); var r = { ...o, z: 1 }; return [Object.keys(r), r.__proto__, Object.getPrototypeOf(r) === Object.prototype]; });
+T('ospreadSetterProto', function () { var hit = 0; Object.defineProperty(Object.prototype, 'trap', { configurable: true, set(v) { hit++; }, get() { return 'pg'; } }); try { var r = { ...{ trap: 1 }, a: 1 }; var s = { trap: 2 }; s = { ...s }; return [r.trap, s.trap, hit, Object.keys(r)]; } finally { delete Object.prototype.trap; } });
+T('ospreadIndependent', function () { var o = { a: 1 }; var r = { ...o, b: 2 }; r.a = 5; o.a = 6; o.c = 7; r.d = 8; delete r.b; return [o, r, Object.keys(r)]; });
+T('ospreadShared', function () { var o = { a: 1, b: 2 }; var x = { ...o, z: 1 }, y = { ...o }, w = { ...o }; y.q = 1; w.q = 2; w.r = 3; return [x, y, w]; });
+T('ospreadBig', function () { var b = {}; for (var i = 0; i < 200; i++) b['k' + i] = i; var r = { ...b, z: 1 }; r.y = 2; var d = { a: 1, b: 2 }; delete d.a; var e = { ...d, a: 3 }; return [Object.keys(r).length, r.k199, r.z, r.y, e, Object.keys(e)]; });
+T('ospreadProxy', function () { var log = []; var p = new Proxy({ a: 1, b: 2 }, { ownKeys(t) { log.push('ownKeys'); return Reflect.ownKeys(t); }, get(t, k) { log.push('get ' + String(k)); return t[k]; }, getOwnPropertyDescriptor(t, k) { log.push('gopd ' + String(k)); return Reflect.getOwnPropertyDescriptor(t, k); } }); var r = { ...p, c: 3 }; return [r, log]; });
+T('ospreadMethods', function () { var o = { a: 1 }; var k = 'ck'; var r = { ...o, m() { return super.toString === Object.prototype.toString; }, get g() { return this.a; }, set g(v) {}, [k]: 2, f: function () {}, ar: () => 1 }; return [r.m(), r.g, r.ck, Object.keys(r), r.f.name, r.ar.name]; });
+T('ospreadFunction', function () { function f() {} f.x = 1; return [{ ...f, y: 2 }, { ...[], ...'', ...1 }]; });
+T('ospreadGetterOrder', function () { var log = []; var r = { a: log.push('a'), ...{ get x() { log.push('x'); return 1; } }, b: log.push('b'), ...{ get y() { log.push('y'); return 2; } } }; return [r, log]; });
+T('ospreadExtraSlots', function () { var r = { ...{ a: 1 }, b: 2, c: 3, d: 4, e: 5, f: 6, g: 7, h: 8, i: 9 }; r.j = 10; return [Object.values(r), Object.keys(r).length]; });
+T('objectRest', function () { var { a, ...r } = { a: 1, b: 2, c: 3 }; var { ...s } = { x: 1 }; s.y = 2; r.d = 4; return [a, r, s]; });
+T('assignUnaffected', function () { var t = Object.assign({}, { a: 1 }); t.b = 2; return t; });
+out.join('\n');
+""";
+
+    private const string ArgumentsAndSpreadExpected = """
+len: [0,1,2,7,1,3,2,2,3]
+lenParams: [[9,"undef",0],[9,"undef",1],[9,2,2],[9,2,3]]
+lenDup: [["undef",1],[2,2]]
+lenCaptured: [7,2]
+lenCallback: [[3,3],[3,1],3]
+lenStrict: [0,2]
+lenClass: [1,2,1,0,3,2,3,1]
+lenBound: 3
+lenDefault: [[0,1,0],[5,2,1],[3,4,3]]
+lenParamArrow: 2
+lenRecursive: 10
+lenGen: [2,3,2]
+lenWrite: 7
+lenDelete: [true,"undef"]
+lenDeleteParen: "undef"
+lenUpdate: 5
+lenPattern: [4,5]
+lenForOf: 8
+lenForIn: "k"
+lenCall: "throws TypeError"
+lenCallOpt: "throws TypeError"
+lenOptional: [1,1]
+lenTag: "throws TypeError"
+lenNew: "throws TypeError"
+lenTypeof: ["number","undef","undef",-1]
+escape: [2,2,"[object Arguments]"]
+escapeTypeof: ["object",1]
+escapeArrow: 2
+escapeArrowIdx: 2
+escapeEval: [2,2,1]
+escapeEvalArrow: [2,2]
+evalWrites: 9
+evalVar: 3
+indirectEval: ["undefined",1]
+withInside: 44
+withInside2: 1
+withUnrelated: [3,2,5]
+varArguments: 1
+varArguments2: 5
+assignArguments: [6,"x"]
+fnArguments: 0
+blockFnArguments: 2
+letArguments: 8
+blockLet: 9
+catchArguments: 10
+paramArguments: 3
+nested: [1,3]
+nestedEval: [1,2]
+varBodyParamScope: [0,1]
+sum: [0,1,3,45]
+localsOverExtras: [7,8,9,10]
+lastArg: ["undef",1,2]
+aliasSloppy: ["undef",9,9]
+aliasSloppy2: [["undef","undef",9,"undef"],[9,"undef",9,"undef"],[9,2,9,2]]
+aliasWrite: [3,5,1]
+aliasFnDecl: ["undefined","function"]
+aliasDup: [[1,"undef"],[1,9]]
+noAliasStrict: [[9,"undef","undef",0],[9,1,"undef",1],[9,1,2,2]]
+noAliasDefault: [[9,"undef",0],[9,2,1],[9,2,2]]
+noAliasRest: [[9,["z"],"undef","undef",0],[9,["z"],1,"undef",1],[9,["z",3],1,2,3]]
+noAliasDestructure: [2,1,2]
+strictWrite: [1,9]
+deleteElem: ["undef",1]
+updateElem: 2
+patternElem: 3
+callElem: [1,true]
+callElemStrictThis: 2
+tagElem: 2
+parenCall: 3
+keys: ["a",2,"undef","b","undef","undef","a","undef","function",true,true]
+keysStrict: ["a",2,"function",true,"undef"]
+calleeStrict: "throws TypeError"
+calleeRest: "throws TypeError"
+calleeDefault: "throws TypeError"
+objectKey: ["b",1,"b",2,2]
+throwingKey: "throws RangeError"
+symbolKey: "undef"
+protoIndex: [["a","undef","p2","undef"],["a","b","c","undef"]]
+protoGetter: ["g1","g1","a",1,true,"[object Arguments]",1,true]
+protoGetterMutates: [["a",1,"undef"],"got","changed",2,"new","b"]
+protoGetterMutatesStrict: ["got","changed",2,"new"]
+protoIndexGetterDelete: ["d","undef",0]
+elemInDefault: [["undef","undef",0],[3,"undef",2]]
+elemCallback: [5,0,2,"undef",6,1,2,"undef"]
+elemMethod: [true,1,2]
+elemCtor: [2,2]
+elemInClosure: [1,2,2]
+elemAssignFrom: {"a":1,"k":2}
+mathMax: 4
+tailElem: 4
+asyncArgs: "function"
+patched: [1,"x"]
+rest: [[],[1],[1,2,3],[1,2,3],[1],[1,2],true,["0","length"],["undef",null]]
+restAfter: [["undef","undef",[],0],[1,"undef",[],0],[1,2,[],0],[1,2,[3],1],[1,2,[3,4,5,6],4]]
+restMutates: [[9,2,3,4],[1,"undef","undef","undef","undef",2],[4,5],6]
+restIndependent: [[2],[1],false]
+restCallback: [[3],[2],[1],[[]],[[]],4,[3,1]]
+restAndArguments: [2,3,["r",3],1,0]
+restAndEscape: [2,"x",["r",3],3]
+restPattern: [[1,"undef",5,[]],[1,2,3,[4,5]],2]
+restDefault: [1,"function",[3]]
+restClosure: [1,2,3]
+restGen: [[2,3,1],[2,3,1],1]
+restCtor: [[1,2,"x"],[1,2]]
+restHoles: [[1,"undef",3],true,["undef","undef"]]
+restLarge: [70001,69999,1]
+restFrozenSource: [1,2,3]
+restEval: 4
+restApplyArguments: [1,2]
+spread: [[1,2,3],[1,2,3,4],[0,1,2,3],[1,2,3,1,2,3],[0,1,2,3,4,5,1,2,3,6],[],[1],[],["h","é","l","l","o"],[1,2],[[1,2]],[1,2],[0,0]]
+spreadElisions: [3,false,3,false,4,false,7,true,false]
+spreadHoles: [[1,"undef",3,4],true,4]
+spreadHoleProto: [[1,"p",3],true]
+spreadThenPush: [[1,2,3,4,5,6,7,8,9,10,11],11,false,[1]]
+spreadIndependent: [[1,8],[9,2]]
+spreadPatchedIter: [["patched"],["patched"]]
+spreadPatchedNext: [[1,2,3],3]
+spreadOwnIter: ["own",3]
+spreadSubclass: [["sub"],[1,2],false]
+spreadNonIterable: "throws TypeError"
+spreadNull: "throws TypeError"
+spreadFrozen: [1,2,3,4]
+spreadSparse: [100002,1,2,true]
+spreadShiftQueue: [3001,2000,-1,3000]
+spreadArgumentsObj: [1,2,"x"]
+spreadGetterElement: ["g",2,3]
+spreadInCall: [2,3,3,4,2,2,2020,[1,2,3]]
+spreadCallOrder: [[1,1,3],["p1","b","p2"]]
+spreadMutatedDuring: [1,2,3,1,2,3]
+spreadLongLiteral: [12002,5999,0,2]
+ospread: [{"a":1,"b":2},{"a":1,"b":2,"z":1},{"z":1,"a":1,"b":2},{"a":9,"b":2},{"a":1,"b":2},{"a":1,"b":3,"c":4},{"a":1,"b":2,"y":1,"z":2,"w":3,"v":4,"u":5},{},{"q":1},{},{"0":"a","1":"b"},{"0":1,"1":2,"k":1},{},{"a":1},{}]
+ospreadKeys: [["1","2","b","a","c"],["1","2","c","b","a"],1,["x","y"],["x","z"]]
+ospreadAttrs: [{"ro":5},{"value":5,"writable":true,"enumerable":true,"configurable":true},{"value":7,"writable":true,"enumerable":true,"configurable":true},{"fz":3,"n":2},false]
+ospreadProto: [{"own":2,"z":1},"undef",true,1,1,["x"],1,{"f":1},true,null]
+ospreadProtoKey: [["__proto__","x","z"],5,true]
+ospreadSetterProto: [1,2,0,["trap","a"]]
+ospreadIndependent: [{"a":6,"c":7},{"a":5,"d":8},["a","d"]]
+ospreadShared: [{"a":1,"b":2,"z":1},{"a":1,"b":2,"q":1},{"a":1,"b":2,"q":2,"r":3}]
+ospreadBig: [202,199,1,2,{"b":2,"a":3},["b","a"]]
+ospreadProxy: [{"a":1,"b":2,"c":3},["ownKeys","gopd a","get a","gopd b","get b"]]
+ospreadMethods: [true,1,2,["a","m","g","ck","f","ar"],"f","ar"]
+ospreadFunction: [{"x":1,"y":2},{}]
+ospreadGetterOrder: [{"a":1,"x":1,"b":3,"y":2},["a","x","b","y"]]
+ospreadExtraSlots: [[1,2,3,4,5,6,7,8,9,10],10]
+objectRest: [1,{"b":2,"c":3,"d":4},{"x":1,"y":2}]
+assignUnaffected: {"a":1,"b":2}
+""";
+
+    [Fact]
+    public void ArgumentsRestAndSpreadsMatchReferenceBehavior()
+    {
+        using var engine = new JsEngine();
+        var got = engine.Evaluate(ArgumentsAndSpreadScript).AsString().Split('\n');
+        var expected = ArgumentsAndSpreadExpected.ReplaceLineEndings("\n").TrimEnd('\n').Split('\n');
+        Assert.Equal(expected.Length, got.Length);
+        for (int i = 0; i < expected.Length; i++) Assert.True(expected[i] == got[i], $"line {i}: expected {expected[i]} but got {got[i]}");
+    }
+
+    private const string ToInt32AndTypeofNamesScript = """
+const out = [];
+const nums = [0, -0, 0.5, -0.5, 1, -1, 1.9, -1.9, 2147483647, 2147483648, -2147483648, -2147483649, 4294967295, 4294967296, 4294967297, -4294967297,
+  3000000000.7, -3000000000.7, 9007199254740991, -9007199254740991, 9007199254740992, 1e15, 1e19, -1e19, 9223372036854775000, 9223372036854775807, -9223372036854775808, -9223372036854777000,
+  18446744073709551616, 18446744073709555712, 1e21, -1e21, 1.7976931348623157e308, -1.7976931348623157e308, 5e-324, Infinity, -Infinity, NaN];
+const show = x => Object.is(x, -0) ? '-0' : String(x);
+for (const a of nums) {
+  out.push([a | 0, a & -1, a ^ 0, ~a, a << 1, a >> 1, a >>> 0, a >>> 1, 1 << a, 5 >> a, 7 >>> a, a & 0xffff, a | 0x80000000, a ^ 0xedb88320].map(show).join(' '));
+  for (const b of [3, -3, 2147483648, 1e19, NaN, 0.5]) out.push([a & b, a | b, a ^ b, a << b, a >> b, a >>> b].map(show).join(' '));
+}
+const others = ['12', '', 'x', true, false, null, undefined, [], [7], {}, { valueOf() { return 9; } }, { valueOf() { out.push('valueOf'); return 2 ** 33 + 3; } }];
+for (const v of others) out.push([v | 0, v & 3, ~v, v << 1, v >>> 0].map(show).join(' '));
+for (const f of [() => 1n & 1, () => 1 | 1n, () => ~1n, () => Symbol() | 0, () => ~Symbol(), () => ({ valueOf() { throw new RangeError('boom'); } }) >>> 0]) {
+  try { out.push(show(f())); } catch (e) { out.push(e.name); }
+}
+out.push(String(~5n), String(6n & 3n), String(1n << 70n));
+
+const vals = [undefined, null, true, false, 0, NaN, 'a', '', 'num' + 'ber', Symbol('s'), 1n, {}, [], function () {}, () => 1, class {}, new Proxy({}, {}), new Proxy(function () {}, {}), new Date(0), /r/];
+const names = ['undefined', 'object', 'boolean', 'number', 'string', 'symbol', 'bigint', 'function'];
+for (const v of vals) {
+  out.push([typeof v === 'undefined', typeof v === 'object', typeof v === 'boolean', typeof v === 'number', typeof v === 'string', typeof v === 'symbol', typeof v === 'bigint', typeof v === 'function',
+    typeof v !== 'string', typeof v == 'object', typeof v != 'number', 'number' === typeof v, typeof v === 'Number', typeof v === 'nope'].join(' '));
+  out.push(names.map(n => typeof v === n).join(' '));
+  out.push(typeof v, (typeof v).length);
+  if (typeof v === 'string') out.push('s'); else if (typeof v !== 'object') out.push('not-o'); else out.push('o');
+}
+out.push(typeof notDeclaredAnywhere === 'undefined', typeof notDeclaredAnywhere !== 'undefined');
+const dyn = ['num', 'ber'].join('');
+out.push(dyn === 'number', dyn === typeof 1, 'number' === dyn, typeof 1 === dyn, ('fun' + 'ction') === typeof main0, 'object' === 'ob' + 'ject');
+function main0() {}
+const o = { number: 1, string: 2, function: 3, undefined: 4, object: 5, boolean: 6, symbol: 7, bigint: 8 };
+out.push(JSON.stringify(o), Object.keys(o).join(), o.number + o['str' + 'ing'] + o[typeof o === 'object' ? 'function' : 'x']);
+const m = new Map([['number', 'n'], ['string', 's']]);
+out.push(m.get(typeof 1), m.get('str' + 'ing'), m.has('object'));
+switch (typeof 1) { case 'string': out.push('case s'); break; case 'number': out.push('case n'); break; default: out.push('case d'); }
+switch ('st' + 'ring') { case 'number': out.push('sw n'); break; case 'string': out.push('sw s'); break; default: out.push('sw d'); }
+out.join('\n');
+""";
+
+    private const string ToInt32AndTypeofNamesExpected = """
+0 0 0 -1 0 0 0 0 1 5 7 0 -2147483648 -306674912
+0 3 3 0 0 0
+0 -3 -3 0 0 0
+0 -2147483648 -2147483648 0 0 0
+0 -1981284352 -1981284352 0 0 0
+0 0 0 0 0 0
+0 0 0 0 0 0
+0 0 0 -1 0 0 0 0 1 5 7 0 -2147483648 -306674912
+0 3 3 0 0 0
+0 -3 -3 0 0 0
+0 -2147483648 -2147483648 0 0 0
+0 -1981284352 -1981284352 0 0 0
+0 0 0 0 0 0
+0 0 0 0 0 0
+0 0 0 -1 0 0 0 0 1 5 7 0 -2147483648 -306674912
+0 3 3 0 0 0
+0 -3 -3 0 0 0
+0 -2147483648 -2147483648 0 0 0
+0 -1981284352 -1981284352 0 0 0
+0 0 0 0 0 0
+0 0 0 0 0 0
+0 0 0 -1 0 0 0 0 1 5 7 0 -2147483648 -306674912
+0 3 3 0 0 0
+0 -3 -3 0 0 0
+0 -2147483648 -2147483648 0 0 0
+0 -1981284352 -1981284352 0 0 0
+0 0 0 0 0 0
+0 0 0 0 0 0
+1 1 1 -2 2 0 1 0 2 2 3 1 -2147483647 -306674911
+1 3 2 8 0 0
+1 -3 -4 536870912 0 0
+0 -2147483647 -2147483647 1 1 1
+0 -1981284351 -1981284351 1 1 1
+0 1 1 1 1 1
+0 1 1 1 1 1
+-1 -1 -1 0 -2 -1 4294967295 2147483647 -2147483648 0 0 65535 -1 306674911
+3 -1 -4 -8 -1 536870911
+-3 -1 2 -536870912 -1 7
+-2147483648 -1 2147483647 -1 -1 4294967295
+-1981284352 -1 1981284351 -1 -1 4294967295
+0 -1 -1 -1 -1 4294967295
+0 -1 -1 -1 -1 4294967295
+1 1 1 -2 2 0 1 0 2 2 3 1 -2147483647 -306674911
+1 3 2 8 0 0
+1 -3 -4 536870912 0 0
+0 -2147483647 -2147483647 1 1 1
+0 -1981284351 -1981284351 1 1 1
+0 1 1 1 1 1
+0 1 1 1 1 1
+-1 -1 -1 0 -2 -1 4294967295 2147483647 -2147483648 0 0 65535 -1 306674911
+3 -1 -4 -8 -1 536870911
+-3 -1 2 -536870912 -1 7
+-2147483648 -1 2147483647 -1 -1 4294967295
+-1981284352 -1 1981284351 -1 -1 4294967295
+0 -1 -1 -1 -1 4294967295
+0 -1 -1 -1 -1 4294967295
+2147483647 2147483647 2147483647 -2147483648 -2 1073741823 2147483647 1073741823 -2147483648 0 0 65535 -1 -1840808737
+3 2147483647 2147483644 -8 268435455 268435455
+2147483645 -1 -2147483646 -536870912 3 3
+0 -1 -1 2147483647 2147483647 2147483647
+166199296 -1 -166199297 2147483647 2147483647 2147483647
+0 2147483647 2147483647 2147483647 2147483647 2147483647
+0 2147483647 2147483647 2147483647 2147483647 2147483647
+-2147483648 -2147483648 -2147483648 2147483647 0 -1073741824 2147483648 1073741824 1 5 7 0 -2147483648 1840808736
+0 -2147483645 -2147483645 0 -268435456 268435456
+-2147483648 -3 2147483645 0 -4 4
+-2147483648 -2147483648 0 -2147483648 -2147483648 2147483648
+-2147483648 -1981284352 166199296 -2147483648 -2147483648 2147483648
+0 -2147483648 -2147483648 -2147483648 -2147483648 2147483648
+0 -2147483648 -2147483648 -2147483648 -2147483648 2147483648
+-2147483648 -2147483648 -2147483648 2147483647 0 -1073741824 2147483648 1073741824 1 5 7 0 -2147483648 1840808736
+0 -2147483645 -2147483645 0 -268435456 268435456
+-2147483648 -3 2147483645 0 -4 4
+-2147483648 -2147483648 0 -2147483648 -2147483648 2147483648
+-2147483648 -1981284352 166199296 -2147483648 -2147483648 2147483648
+0 -2147483648 -2147483648 -2147483648 -2147483648 2147483648
+0 -2147483648 -2147483648 -2147483648 -2147483648 2147483648
+2147483647 2147483647 2147483647 -2147483648 -2 1073741823 2147483647 1073741823 -2147483648 0 0 65535 -1 -1840808737
+3 2147483647 2147483644 -8 268435455 268435455
+2147483645 -1 -2147483646 -536870912 3 3
+0 -1 -1 2147483647 2147483647 2147483647
+166199296 -1 -166199297 2147483647 2147483647 2147483647
+0 2147483647 2147483647 2147483647 2147483647 2147483647
+0 2147483647 2147483647 2147483647 2147483647 2147483647
+-1 -1 -1 0 -2 -1 4294967295 2147483647 -2147483648 0 0 65535 -1 306674911
+3 -1 -4 -8 -1 536870911
+-3 -1 2 -536870912 -1 7
+-2147483648 -1 2147483647 -1 -1 4294967295
+-1981284352 -1 1981284351 -1 -1 4294967295
+0 -1 -1 -1 -1 4294967295
+0 -1 -1 -1 -1 4294967295
+0 0 0 -1 0 0 0 0 1 5 7 0 -2147483648 -306674912
+0 3 3 0 0 0
+0 -3 -3 0 0 0
+0 -2147483648 -2147483648 0 0 0
+0 -1981284352 -1981284352 0 0 0
+0 0 0 0 0 0
+0 0 0 0 0 0
+1 1 1 -2 2 0 1 0 2 2 3 1 -2147483647 -306674911
+1 3 2 8 0 0
+1 -3 -4 536870912 0 0
+0 -2147483647 -2147483647 1 1 1
+0 -1981284351 -1981284351 1 1 1
+0 1 1 1 1 1
+0 1 1 1 1 1
+-1 -1 -1 0 -2 -1 4294967295 2147483647 -2147483648 0 0 65535 -1 306674911
+3 -1 -4 -8 -1 536870911
+-3 -1 2 -536870912 -1 7
+-2147483648 -1 2147483647 -1 -1 4294967295
+-1981284352 -1 1981284351 -1 -1 4294967295
+0 -1 -1 -1 -1 4294967295
+0 -1 -1 -1 -1 4294967295
+-1294967296 -1294967296 -1294967296 1294967295 1705032704 -647483648 3000000000 1500000000 1 5 7 24064 -1294967296 1600707872
+0 -1294967293 -1294967293 -1769803776 -161870912 375000000
+-1294967296 -3 1294967293 0 -3 5
+-2147483648 -1294967296 852516352 -1294967296 -1294967296 3000000000
+-2134900736 -1141350912 993549824 -1294967296 -1294967296 3000000000
+0 -1294967296 -1294967296 -1294967296 -1294967296 3000000000
+0 -1294967296 -1294967296 -1294967296 -1294967296 3000000000
+1294967296 1294967296 1294967296 -1294967297 -1705032704 647483648 1294967296 647483648 1 5 7 41472 -852516352 -1600708320
+0 1294967299 1294967299 1769803776 161870912 161870912
+1294967296 -3 -1294967299 0 2 2
+0 -852516352 -852516352 1294967296 1294967296 1294967296
+153616384 -839933440 -993549824 1294967296 1294967296 1294967296
+0 1294967296 1294967296 1294967296 1294967296 1294967296
+0 1294967296 1294967296 1294967296 1294967296 1294967296
+-1 -1 -1 0 -2 -1 4294967295 2147483647 -2147483648 0 0 65535 -1 306674911
+3 -1 -4 -8 -1 536870911
+-3 -1 2 -536870912 -1 7
+-2147483648 -1 2147483647 -1 -1 4294967295
+-1981284352 -1 1981284351 -1 -1 4294967295
+0 -1 -1 -1 -1 4294967295
+0 -1 -1 -1 -1 4294967295
+1 1 1 -2 2 0 1 0 2 2 3 1 -2147483647 -306674911
+1 3 2 8 0 0
+1 -3 -4 536870912 0 0
+0 -2147483647 -2147483647 1 1 1
+0 -1981284351 -1981284351 1 1 1
+0 1 1 1 1 1
+0 1 1 1 1 1
+0 0 0 -1 0 0 0 0 1 5 7 0 -2147483648 -306674912
+0 3 3 0 0 0
+0 -3 -3 0 0 0
+0 -2147483648 -2147483648 0 0 0
+0 -1981284352 -1981284352 0 0 0
+0 0 0 0 0 0
+0 0 0 0 0 0
+-1530494976 -1530494976 -1530494976 1530494975 1233977344 -765247488 2764472320 1382236160 1 5 7 32768 -1530494976 1232995104
+0 -1530494973 -1530494973 640942080 -191311872 345559040
+-1530494976 -3 1530494973 0 -3 5
+-2147483648 -1530494976 616988672 -1530494976 -1530494976 2764472320
+-2134900736 -1376878592 758022144 -1530494976 -1530494976 2764472320
+0 -1530494976 -1530494976 -1530494976 -1530494976 2764472320
+0 -1530494976 -1530494976 -1530494976 -1530494976 2764472320
+-1981284352 -1981284352 -1981284352 1981284351 332398592 -990642176 2313682944 1156841472 1 5 7 0 -1981284352 1682998048
+0 -1981284349 -1981284349 1329594368 -247660544 289210368
+-1981284352 -3 1981284349 0 -4 4
+-2147483648 -1981284352 166199296 -1981284352 -1981284352 2313682944
+-1981284352 -1981284352 0 -1981284352 -1981284352 2313682944
+0 -1981284352 -1981284352 -1981284352 -1981284352 2313682944
+0 -1981284352 -1981284352 -1981284352 -1981284352 2313682944
+1981284352 1981284352 1981284352 -1981284353 -332398592 990642176 1981284352 990642176 1 5 7 0 -166199296 -1683979488
+0 1981284355 1981284355 -1329594368 247660544 247660544
+1981284352 -3 -1981284355 0 3 3
+0 -166199296 -166199296 1981284352 1981284352 1981284352
+524288 -524288 -1048576 1981284352 1981284352 1981284352
+0 1981284352 1981284352 1981284352 1981284352 1981284352
+0 1981284352 1981284352 1981284352 1981284352 1981284352
+-1024 -1024 -1024 1023 -2048 -512 4294966272 2147483136 1 5 7 64512 -1024 306675488
+0 -1021 -1021 -8192 -128 536870784
+-1024 -3 1021 0 -1 7
+-2147483648 -1024 2147482624 -1024 -1024 4294966272
+-1981284352 -1024 1981283328 -1024 -1024 4294966272
+0 -1024 -1024 -1024 -1024 4294966272
+0 -1024 -1024 -1024 -1024 4294966272
+0 0 0 -1 0 0 0 0 1 5 7 0 -2147483648 -306674912
+0 3 3 0 0 0
+0 -3 -3 0 0 0
+0 -2147483648 -2147483648 0 0 0
+0 -1981284352 -1981284352 0 0 0
+0 0 0 0 0 0
+0 0 0 0 0 0
+0 0 0 -1 0 0 0 0 1 5 7 0 -2147483648 -306674912
+0 3 3 0 0 0
+0 -3 -3 0 0 0
+0 -2147483648 -2147483648 0 0 0
+0 -1981284352 -1981284352 0 0 0
+0 0 0 0 0 0
+0 0 0 0 0 0
+-2048 -2048 -2048 2047 -4096 -1024 4294965248 2147482624 1 5 7 63488 -2048 306674464
+0 -2045 -2045 -16384 -256 536870656
+-2048 -3 2045 0 -1 7
+-2147483648 -2048 2147481600 -2048 -2048 4294965248
+-1981284352 -2048 1981282304 -2048 -2048 4294965248
+0 -2048 -2048 -2048 -2048 4294965248
+0 -2048 -2048 -2048 -2048 4294965248
+0 0 0 -1 0 0 0 0 1 5 7 0 -2147483648 -306674912
+0 3 3 0 0 0
+0 -3 -3 0 0 0
+0 -2147483648 -2147483648 0 0 0
+0 -1981284352 -1981284352 0 0 0
+0 0 0 0 0 0
+0 0 0 0 0 0
+4096 4096 4096 -4097 8192 2048 4096 2048 1 5 7 4096 -2147479552 -306670816
+0 4099 4099 32768 512 512
+4096 -3 -4099 0 0 0
+0 -2147479552 -2147479552 4096 4096 4096
+0 -1981280256 -1981280256 4096 4096 4096
+0 4096 4096 4096 4096 4096
+0 4096 4096 4096 4096 4096
+-559939584 -559939584 -559939584 559939583 -1119879168 -279969792 3735027712 1867513856 1 5 7 0 -559939584 857244448
+0 -559939581 -559939581 -184549376 -69992448 466878464
+-559939584 -3 559939581 0 -2 6
+-2147483648 -559939584 1587544064 -559939584 -559939584 3735027712
+-2002780160 -538443776 1464336384 -559939584 -559939584 3735027712
+0 -559939584 -559939584 -559939584 -559939584 3735027712
+0 -559939584 -559939584 -559939584 -559939584 3735027712
+559939584 559939584 559939584 -559939585 1119879168 279969792 559939584 279969792 1 5 7 0 -1587544064 -858225888
+0 559939587 559939587 184549376 69992448 69992448
+559939584 -3 -559939587 0 1 1
+0 -1587544064 -1587544064 559939584 559939584 559939584
+23068672 -1444413440 -1467482112 559939584 559939584 559939584
+0 559939584 559939584 559939584 559939584 559939584
+0 559939584 559939584 559939584 559939584 559939584
+0 0 0 -1 0 0 0 0 1 5 7 0 -2147483648 -306674912
+0 3 3 0 0 0
+0 -3 -3 0 0 0
+0 -2147483648 -2147483648 0 0 0
+0 -1981284352 -1981284352 0 0 0
+0 0 0 0 0 0
+0 0 0 0 0 0
+0 0 0 -1 0 0 0 0 1 5 7 0 -2147483648 -306674912
+0 3 3 0 0 0
+0 -3 -3 0 0 0
+0 -2147483648 -2147483648 0 0 0
+0 -1981284352 -1981284352 0 0 0
+0 0 0 0 0 0
+0 0 0 0 0 0
+0 0 0 -1 0 0 0 0 1 5 7 0 -2147483648 -306674912
+0 3 3 0 0 0
+0 -3 -3 0 0 0
+0 -2147483648 -2147483648 0 0 0
+0 -1981284352 -1981284352 0 0 0
+0 0 0 0 0 0
+0 0 0 0 0 0
+0 0 0 -1 0 0 0 0 1 5 7 0 -2147483648 -306674912
+0 3 3 0 0 0
+0 -3 -3 0 0 0
+0 -2147483648 -2147483648 0 0 0
+0 -1981284352 -1981284352 0 0 0
+0 0 0 0 0 0
+0 0 0 0 0 0
+0 0 0 -1 0 0 0 0 1 5 7 0 -2147483648 -306674912
+0 3 3 0 0 0
+0 -3 -3 0 0 0
+0 -2147483648 -2147483648 0 0 0
+0 -1981284352 -1981284352 0 0 0
+0 0 0 0 0 0
+0 0 0 0 0 0
+0 0 0 -1 0 0 0 0 1 5 7 0 -2147483648 -306674912
+0 3 3 0 0 0
+0 -3 -3 0 0 0
+0 -2147483648 -2147483648 0 0 0
+0 -1981284352 -1981284352 0 0 0
+0 0 0 0 0 0
+0 0 0 0 0 0
+12 0 -13 24 12
+0 0 -1 0 0
+0 0 -1 0 0
+1 1 -2 2 1
+0 0 -1 0 0
+0 0 -1 0 0
+0 0 -1 0 0
+0 0 -1 0 0
+7 3 -8 14 7
+0 0 -1 0 0
+9 1 -10 18 9
+valueOf
+valueOf
+valueOf
+valueOf
+valueOf
+3 3 -4 6 3
+TypeError
+TypeError
+-2
+TypeError
+TypeError
+RangeError
+-6
+2
+1180591620717411303424
+true false false false false false false false true false true false false false
+true false false false false false false false
+undefined
+9
+not-o
+false true false false false false false false true true true false false false
+false true false false false false false false
+object
+6
+o
+false false true false false false false false true false true false false false
+false false true false false false false false
+boolean
+7
+not-o
+false false true false false false false false true false true false false false
+false false true false false false false false
+boolean
+7
+not-o
+false false false true false false false false true false false true false false
+false false false true false false false false
+number
+6
+not-o
+false false false true false false false false true false false true false false
+false false false true false false false false
+number
+6
+not-o
+false false false false true false false false false false true false false false
+false false false false true false false false
+string
+6
+s
+false false false false true false false false false false true false false false
+false false false false true false false false
+string
+6
+s
+false false false false true false false false false false true false false false
+false false false false true false false false
+string
+6
+s
+false false false false false true false false true false true false false false
+false false false false false true false false
+symbol
+6
+not-o
+false false false false false false true false true false true false false false
+false false false false false false true false
+bigint
+6
+not-o
+false true false false false false false false true true true false false false
+false true false false false false false false
+object
+6
+o
+false true false false false false false false true true true false false false
+false true false false false false false false
+object
+6
+o
+false false false false false false false true true false true false false false
+false false false false false false false true
+function
+8
+not-o
+false false false false false false false true true false true false false false
+false false false false false false false true
+function
+8
+not-o
+false false false false false false false true true false true false false false
+false false false false false false false true
+function
+8
+not-o
+false true false false false false false false true true true false false false
+false true false false false false false false
+object
+6
+o
+false false false false false false false true true false true false false false
+false false false false false false false true
+function
+8
+not-o
+false true false false false false false false true true true false false false
+false true false false false false false false
+object
+6
+o
+false true false false false false false false true true true false false false
+false true false false false false false false
+object
+6
+o
+true
+false
+true
+true
+true
+true
+true
+true
+{"number":1,"string":2,"function":3,"undefined":4,"object":5,"boolean":6,"symbol":7,"bigint":8}
+number,string,function,undefined,object,boolean,symbol,bigint
+6
+n
+s
+false
+case n
+sw s
+""";
+
+    [Fact]
+    public void ToInt32AndTypeofNamesMatchReferenceBehavior()
+    {
+        using var engine = new JsEngine();
+        var got = engine.Evaluate(ToInt32AndTypeofNamesScript).AsString().Split('\n');
+        var expected = ToInt32AndTypeofNamesExpected.ReplaceLineEndings("\n").Split('\n');
+        Assert.Equal(expected.Length, got.Length);
+        for (int i = 0; i < expected.Length; i++) Assert.True(expected[i] == got[i], $"line {i}: expected {expected[i]} but got {got[i]}");
+    }
+
+    // Field initializers run in the interpreter loop, instance slots sized from the last instance, new.target only in construct
+    // frames, per-iteration environments, closures sharing "length" and "name". The expected values were produced by Node from the same script.
+    private const string ConstructionScript = """
+const L = [];
+const T = (name, fn) => { let r; try { r = fn(); } catch (e) { r = 'threw ' + (e && e.constructor ? e.constructor.name : typeof e); } L.push(name + ' = ' + JSON.stringify(r)); };
+const keys = o => Reflect.ownKeys(o).map(String);
+
+// ---- field initializers: order, this, new.target, arguments
+T('fieldOrder', () => { const log = []; class C { a = log.push('a'); b = (log.push('b'), this.a + 1); constructor(x = (log.push('param'), this.b)) { log.push('body', x); } } const c = new C(); return [log, c.a, c.b, keys(c)]; });
+T('fieldNewTarget', () => { class C { t = new.target; nt = new.target; constructor() { this.u = new.target === C; } } const c = new C(); return [c.t === undefined, c.u]; });
+T('argsSurviveFields', () => { class C { a = [1, 2, 3].map(x => x * 2); b = new Array(5).fill(9); constructor(p, q, r) { this.args = [p, q, r, arguments.length]; } } return new C(7, 8, 9).args; });
+T('manyArgsAndFields', () => { const g = (...a) => a.length; class C { x = g(1, 2, 3, 4, 5, 6, 7, 8); constructor(a, b, c, d, e, f) { this.s = a + b + c + d + e + f; } } return [new C(1, 2, 3, 4, 5, 6).s, new C(1, 2, 3, 4, 5, 6, 7).x]; });
+T('methodsAndArrowInField', () => { class C { v = 5; get = () => this.v; m() { return this.v * 2; } w = this.m(); } const c = new C(); c.v = 6; return [c.get(), c.w]; });
+T('evalInField', () => { class C { a = 1; b = eval('this.a + 1'); c = (0, eval)('typeof this'); } const c = new C(); return [c.b, c.c]; });
+T('argumentsInFieldEval', () => { class C { a = eval('arguments'); } return new C(); });
+T('computedAndPrivate', () => { let n = 0; const k = () => 'k' + ++n; class C { [k()] = 1; #p = 2; [k()] = this.#p + 1; get p() { return this.#p; } static s = 3; } const c = new C(); return [keys(c), c.k1, c.k2, c.p, C.s, new C().k2]; });
+T('fieldNoValue', () => { class C { a; b = undefined; c = null; 'quoted key' = 1; 42 = 2; } const c = new C(); return [keys(c), 'a' in c, c.a === undefined]; });
+T('nestedNewInField', () => { let d = 0; class C { kid = d++ < 3 ? new C() : null; depth = d; } const c = new C(); return [c.depth, c.kid.depth, c.kid.kid.kid.kid]; });
+T('sameClassManyTimes', () => { class C { a = 1; b = 2; c = this.a + this.b; } let s = 0; for (let i = 0; i < 100; i++) s += new C().c; return s; });
+
+// ---- a throw in an initializer must not reach the constructor's handlers
+T('throwBase', () => { const log = []; class C { a = (() => { throw new RangeError('boom'); })(); constructor() { try { log.push('body'); throw 1; } catch (e) { log.push('caught ' + e); } } } try { new C(); } catch (e) { log.push(e.message); } return log; });
+T('throwBaseFirstInstruction', () => { const log = []; class C { a = null.x; constructor() { try { log.push('body'); } finally { log.push('fin'); } } } try { new C(); } catch (e) { log.push(e.constructor.name); } return log; });
+T('throwBuiltinInField', () => { const log = []; class C { a = JSON.parse('{'); constructor() { try { log.push('body'); } catch (e) { log.push('caught'); } } } try { new C(); } catch (e) { log.push(e.constructor.name); } return log; });
+T('throwDerivedInSuperTry', () => { const log = []; class A {} class B extends A { a = (() => { throw new TypeError('fi'); })(); constructor() { try { super(); log.push('no'); } catch (e) { log.push('caught ' + e.message, this === undefined ? 'u' : 'bound'); } } } new B(); return log; });
+T('throwDerivedOutside', () => { const log = []; class A {} class B extends A { a = (() => { throw new TypeError('fi'); })(); constructor() { super(); log.push('no'); } } try { new B(); } catch (e) { log.push(e.message); } return log; });
+T('newAfterThrowInField', () => { let bad = true; class C { a = (() => { if (bad) throw 1; return 2; })(); constructor(x) { this.x = x; } } const r = []; for (let i = 0; i < 4; i++) { bad = i % 2 === 0; try { const c = new C(i); r.push([c.a, c.x]); } catch (e) { r.push(e); } } return r; });
+T('finallyAroundNew', () => { const log = []; class C { a = (() => { throw 'x'; })(); } function f() { try { return new C(); } catch (e) { log.push('c' + e); return 'r'; } finally { log.push('f'); } } return [f(), log]; });
+
+// ---- derived
+T('derivedFieldsOrder', () => { const log = []; class A { a = log.push('A.a'); constructor() { log.push('A.body', keys(this).join()); } } class B extends A { b = log.push('B.b'); constructor() { log.push('B.pre'); super(); log.push('B.post', keys(this).join()); } } class D extends B { d = log.push('D.d'); } new D(); return log; });
+T('superTwice', () => { let n = 0; class A { constructor() { n++; } } class B extends A { f = 1; constructor() { super(); try { super(); } catch (e) { this.e = e.constructor.name; } } } const b = new B(); return [n, b.e, b.f]; });
+T('thisBeforeSuper', () => { class A {} class B extends A { constructor() { this.x = 1; super(); } } return new B(); });
+T('noSuper', () => { class A {} class B extends A { constructor() { } } return new B(); });
+T('returnPrimitiveDerived', () => { class A {} class B extends A { constructor() { super(); return 1; } } return new B(); });
+T('returnUndefinedDerived', () => { class A {} class B extends A { f = 1; constructor() { super(); return undefined; } } return new B().f; });
+T('returnObjectDerived', () => { class A {} class B extends A { f = 1; constructor() { super(); return { z: 1 }; } } return keys(new B()); });
+T('returnPrimitiveBase', () => { class A { constructor() { this.p = 1; return 5; } } function F() { this.q = 2; return 'x'; } function G() { this.r = 3; return { s: 4 }; } return [new A().p, new F().q, new G().s, new G().r]; });
+T('superInArrow', () => { class A { constructor() { this.a = 1; } } class B extends A { f = this.a + 1; constructor() { const s = () => super(); s(); this.g = this.f + 1; } } const b = new B(); return [b.a, b.f, b.g]; });
+T('superInEval', () => { class A { constructor() { this.a = 1; } } class B extends A { f = this.a + 1; constructor() { eval('super()'); } } return new B().f; });
+T('superArrowThrowingField', () => { class A {} class B extends A { f = (() => { throw 'no'; })(); constructor() { const s = () => { try { super(); } catch (e) { return 'c' + e; } }; this_ = s(); } } var this_; try { new B(); } catch (e) { return [this_, e.constructor.name]; } });
+T('superParentChanges', () => { class A { constructor() { this.who = 'A'; } } class Z { constructor() { this.who = 'Z'; } } class B extends A { f = this.who + '!'; } const r = [new B().f]; Object.setPrototypeOf(B, Z); r.push(new B().f, new B() instanceof A); Object.setPrototypeOf(B, A); r.push(new B().f); return r; });
+T('superParentNull', () => { class A {} class B extends A {} Object.setPrototypeOf(B, null); return new B(); });
+T('superParentFunctionProto', () => { class A {} class B extends A { x = 1; } Object.setPrototypeOf(B, Function.prototype); return new B(); });
+T('superParentArrow', () => { class A {} class B extends A {} Object.setPrototypeOf(B, () => {}); return new B(); });
+T('superParentProxyBound', () => { const log = []; function P() { this.p = new.target === B; } class B extends P { f = this.p; } const r = [new B().f]; Object.setPrototypeOf(B, new Proxy(P, { construct(t, a, nt) { log.push('trap'); return Reflect.construct(t, a, nt); } })); r.push(new B().f, log.length); Object.setPrototypeOf(B, P.bind(null)); r.push(new B().f); return r; });
+T('extendsBuiltin', () => { class E extends Error { code = 7; constructor(m) { super(m); this.z = this.code + 1; } } class M extends Map { n = this.size; } class AA extends Array { t = this.length; } const e = new E('hi'); return [e.message, e.code, e.z, e instanceof Error, new M([[1, 2]]).n, new AA(3).t, keys(new AA(1))]; });
+T('extendsFunctionCtor', () => { function F(a) { this.a = a; } class C extends F { b = this.a + 1; constructor(a) { super(a); } } class D extends C {} const d = new D(4); return [d.a, d.b, keys(d), d instanceof F]; });
+
+// ---- fields are definitions on whatever super() returned
+T('fieldNotSetter', () => { const log = []; class A { set x(v) { log.push('set'); } get x() { return 'g'; } } class B extends A { x = 1; } const b = new B(); return [b.x, log, keys(b)]; });
+T('fieldOnFrozenReturn', () => { class A { constructor() { return Object.freeze({}); } } class B extends A { x = 1; } return new B(); });
+T('fieldOnNonExtensibleAfterIcFilled', () => { class A { constructor(o) { return o; } } class B extends A { x = 1; } const r = []; r.push(new B({}).x); r.push(new B({}).x); try { new B(Object.preventExtensions({})); r.push('no'); } catch (e) { r.push(e.constructor.name); } return r; });
+T('fieldOverExistingAfterIcFilled', () => { class A { constructor(o) { return o; } } class B extends A { x = 1; y = 2; } const r = []; new B({}); new B({}); const o = { y: 0, x: 9 }; new B(o); r.push(keys(o), o.x, o.y); const g = {}; Object.defineProperty(g, 'x', { get() { return 'getter'; }, configurable: true }); new B(g); r.push(Object.getOwnPropertyDescriptor(g, 'x').value); const n = {}; Object.defineProperty(n, 'x', { value: 1, configurable: false }); try { new B(n); r.push('no'); } catch (e) { r.push(e.constructor.name); } return r; });
+T('fieldOnProxyReturn', () => { const log = []; class A { constructor(o) { return o; } } class B extends A { x = 1; } new B({}); const p = new Proxy({}, { defineProperty(t, k, d) { log.push(k, d.value, d.writable, d.enumerable, d.configurable); return Reflect.defineProperty(t, k, d); } }); new B(p); return log; });
+T('fieldOnArrayFunctionReturn', () => { class A { constructor(o) { return o; } } class B extends A { x = 1; length = 0; } new B({}); const a = [1, 2, 3]; new B(a); const f = function () {}; new B(f); return [a.length, a.x, f.x, f.length]; });
+T('fieldOnPrototypeObject', () => { class A { constructor(o) { return o; } } class B extends A { x = 1; } const read = c => c.x; const p = {}; const child = Object.create(p); new B({}); new B({}); const r = [read(child), read(child)]; new B(p); r.push(read(child)); return r; });
+T('fieldOnPrototypeObject2', () => { class A { constructor(o) { return o; } } class B extends A { x = 1; } const read = c => c.x; const q = { x: 'q' }; const p = Object.create(q); const child = Object.create(p); new B(Object.create(q)); new B(Object.create(q)); const r = [read(child), read(child)]; new B(p); r.push(read(child)); return r; });
+
+// ---- new and the prototype property
+T('protoChanges', () => { function F() { this.v = 1; } const r = []; const p1 = F.prototype; p1.m = 1; r.push(new F().m); F.prototype = { m: 2 }; r.push(new F().m); F.prototype = p1; r.push(new F().m); F.prototype = 5; const o = new F(); r.push(Object.getPrototypeOf(o) === Object.prototype, o.v); F.prototype = null; r.push(Object.getPrototypeOf(new F()) === Object.prototype); F.prototype = Object.prototype; r.push(Object.getPrototypeOf(new F()) === Object.prototype); F.prototype = Array.prototype; r.push(new F() instanceof Array, Array.isArray(new F())); F.prototype = Function.prototype; r.push(typeof new F(), Object.getPrototypeOf(new F()) === Function.prototype); F.prototype = p1; r.push(new F().m); return r; });
+T('protoShared', () => { function F() { this.a = 1; } function G() { this.b = 1; this.c = 2; } G.prototype = F.prototype; F.prototype.q = 1; const f = new F(), g = new G(); return [keys(f), keys(g), f.q, g.q, Object.getPrototypeOf(f) === Object.getPrototypeOf(g)]; });
+T('protoAfterProtoChange', () => { function F() {} const b1 = { w: 1 }, b2 = { w: 2 }; Object.setPrototypeOf(F.prototype, b1); const a = new F(); Object.setPrototypeOf(F.prototype, b2); const c = new F(); return [a.w, c.w]; });
+T('protoFrozenCtor', () => { function F() {} const p = F.prototype; Object.freeze(F); return [Object.getPrototypeOf(new F()) === p]; });
+T('protoNonWritableDefine', () => { function F() {} const p = { z: 1 }; Object.defineProperty(F, 'prototype', { value: p, writable: false }); return new F().z; });
+T('classProtoDescriptor', () => { class C {} const d = Object.getOwnPropertyDescriptor(C, 'prototype'); return [d.writable, d.enumerable, d.configurable, keys(C), C.prototype.constructor === C]; });
+T('reflectConstruct', () => { class A { a = new.target; f = 1; constructor() { this.nt = new.target; } } function N() {} N.prototype = { fromN: 1 }; const x = Reflect.construct(A, [], N); const log = []; const pn = new Proxy(N, { get(t, k, r) { log.push(String(k)); return Reflect.get(t, k, r); } }); const y = Reflect.construct(A, [], pn); const bound = N.bind(null); const z = Reflect.construct(A, [], bound); return [x.fromN, x.nt === N, x.a === undefined, y.fromN, log, Object.getPrototypeOf(z) === Object.prototype || Object.getPrototypeOf(z) === A.prototype, z.fromN]; });
+T('newTargetSameFeedback', () => { const mk = () => function () { this.a = 1; }; const F = mk(), G = mk(); F.prototype.w = 'F'; G.prototype.w = 'G'; const r = []; for (let i = 0; i < 4; i++) r.push(new (i % 2 ? F : G)().w); return r; });
+T('classFactorySameFeedback', () => { const mk = t => class { f = t; }; const A = mk('a'), B = mk('b'); const r = []; for (let i = 0; i < 4; i++) { const o = new (i % 2 ? A : B)(); r.push(o.f, o instanceof A); } return r; });
+T('notConstructors', () => { const r = []; for (const f of [() => {}, async function () {}, function* () {}, ({ m() {} }).m, Math.max]) { try { new f(); r.push('no'); } catch (e) { r.push(e.constructor.name); } } class C {} try { C(); } catch (e) { r.push(e.constructor.name); } return r; });
+T('generatorFunctionPrototype', () => { function* g() {} return [typeof g.prototype, Object.getPrototypeOf(g.prototype) === Object.getPrototypeOf(function* () {}).prototype, 'constructor' in Object.getOwnPropertyDescriptors(g.prototype)]; });
+
+// ---- slots sized from what earlier instances had: order, size changes
+T('slotHintOrder', () => { function F(n) { if (n & 1) this.a = 1; if (n & 2) this.b = 2; this.c = 3; if (n & 4) this.d = 4; for (let i = 0; i < (n >> 3); i++) this['k' + i] = i; } const r = []; for (const n of [7, 0, 1, 2, 4, 8 + 7, 40 * 8, 0, 3]) { const o = new F(n); r.push(keys(o).length > 8 ? keys(o).length + ':' + keys(o).slice(-1) : keys(o).join('')); } return r; });
+T('slotHintDeleteAdd', () => { function F() { this.a = 1; this.b = 2; delete this.a; this.a = 3; this.c = 4; } new F(); new F(); const o = new F(); return [keys(o), o.a]; });
+T('slotHintEmptyInstanceHasNothing', () => { function F(big) { if (big) for (let i = 0; i < 20; i++) this['p' + i] = i; } new F(true); const o = new F(false); const r = [keys(o), JSON.stringify(o), 'p0' in o, o.p0]; const u = []; for (const k in o) u.push(k); r.push(u); o.z = 1; r.push(keys(o)); return r; });
+T('slotHintManyProps', () => { function F() { for (let i = 0; i < 100; i++) this['p' + i] = i; } new F(); const o = new F(); return [keys(o).length, o.p99, keys(o)[50]]; });
+T('slotHintThrowingCtor', () => { const leak = []; function F(n) { for (let i = 0; i < n; i++) this['p' + i] = i; if (!n) { leak.push(this); throw 'x'; } } new F(20); for (let i = 0; i < 3; i++) { try { new F(0); } catch (e) {} } return [leak.length, keys(leak[0]), keys(leak[2])]; });
+T('slotHintRecursiveCtor', () => { function N(d) { this.l = d ? new N(d - 1) : null; this.r = d ? new N(d - 1) : null; this.d = d; } const c = o => o ? 1 + c(o.l) + c(o.r) : 0; const t = new N(5); return [c(t), keys(t), keys(t.l.l)]; });
+T('freezeSealInCtor', () => { function F() { this.a = 1; Object.freeze(this); } const o = new F(); 'use strict'; o.a = 2; return [o.a, Object.isFrozen(o)]; });
+T('accessorInCtor', () => { function F() { Object.defineProperty(this, 'g', { get() { return 7; }, enumerable: true }); this.x = 1; } return [new F().g, keys(new F())]; });
+
+// ---- environments copied per iteration
+T('perIter', () => { const fs = []; for (let i = 0; i < 3; i++) fs.push(() => i); return fs.map(f => f()); });
+T('perIterMutated', () => { const fs = []; for (let i = 0; i < 6; i++) { fs.push(() => i); i++; } return fs.map(f => f()); });
+T('perIterInUpdate', () => { const fs = []; for (let i = 0, g = () => i; i < 3; i++, fs.push(g)) { } return fs.map(f => f()); });
+T('perIterTwoAndObject', () => { const fs = []; for (let i = 0, o = { v: 1 }, s = 'x'; i < 3; i++, s += 'y') { fs.push(() => [i, o, s]); o.v++; } const r = fs.map(f => f()); return [r[0][2], r[2][2], r[0][0], r[2][0], r[0][1] === r[2][1], r[0][1].v]; });
+T('perIterEval', () => { const fs = []; for (let i = 0; i < 3; i++) fs.push(() => eval('i')); return fs.map(f => f()); });
+T('perIterEvalVar', () => { const fs = []; for (let i = 0; i < 3; i++) { eval('var ev' + i + ' = i * 2'); fs.push(() => i); } return [ev0, ev1, ev2, fs[2]()]; });
+T('perIterTdz', () => { const fs = []; for (let i = 0, j = (fs.push(() => { try { return k; } catch (e) { return e.constructor.name; } }), 1), k = 2; i < 2; i++) { } return fs[0](); });
+T('perIterWith', () => { const o = { w: 'o' }; const fs = []; with (o) { for (let i = 0; i < 2; i++) fs.push(() => w + i); } o.w = 'p'; return fs.map(f => f()); });
+
+// ---- closures
+T('closureProps', () => { const mk = () => () => 1; const a = mk(), b = mk(); a.x = 1; return [a.x, b.x, a.name, a.length, keys(a), keys(b), a === b]; });
+T('closureNameDefine', () => { const mk = () => (p, q) => 1; const a = mk(), b = mk(); Object.defineProperty(a, 'name', { value: 'renamed' }); Object.defineProperty(a, 'length', { value: 9 }); return [a.name, a.length, b.name, b.length, mk().name, mk().length]; });
+T('closureNameWritable', () => { const mk = () => function nm(p) {}; const a = mk(), b = mk(); Object.defineProperty(a, 'name', { writable: true }); a.name = 'w'; const c = mk(); return [a.name, b.name, c.name, Object.getOwnPropertyDescriptor(a, 'name').writable, Object.getOwnPropertyDescriptor(c, 'name').writable]; });
+T('closureDeleteName', () => { const mk = () => ({ m() {} }).m; const a = mk(), b = mk(); delete a.name; delete a.length; return [a.name, a.length, keys(a), b.name, b.length, keys(b), keys(mk())]; });
+T('closureAssignReadonly', () => { const mk = () => () => 1; const a = mk(); a.name = 'x'; a.length = 7; const r = [a.name, a.length]; const s = () => { 'use strict'; a.name = 'y'; }; try { s(); r.push('no'); } catch (e) { r.push(e.constructor.name); } r.push(mk().name); return r; });
+T('closureFreezeAndAddMany', () => { const mk = () => () => 1; const a = mk(), b = mk(); for (let i = 0; i < 10; i++) b['p' + i] = i; Object.freeze(a); return [Object.isFrozen(a), Object.isFrozen(mk()), keys(b).length, keys(mk()).length, b.name, b.p9]; });
+T('closureAccessorOnName', () => { const mk = () => () => 1; const a = mk(); Object.defineProperty(a, 'name', { get() { return 'acc'; } }); return [a.name, mk().name, typeof Object.getOwnPropertyDescriptor(a, 'name').get, Object.getOwnPropertyDescriptor(mk(), 'name').value]; });
+T('anonymousNamedByKey', () => { const k = 'dyn', sym = Symbol('s'); const mk = () => ({ [k]: () => 1, [sym]: function () {}, a: () => 2, get [k + 2]() { return 1; } }); const o = mk(), p = mk(); return [o[k].name, o[sym].name, o.a.name, p[k].name, Object.getOwnPropertyDescriptor(o, 'dyn2').get.name]; });
+T('anonymousClassFieldName', () => { const k = 'key'; class C { [k] = () => 1; a = () => 2; b = function () {}; c = class {}; #d = () => 3; d() { return this.#d.name; } static e = () => 1; } const o = new C(), q = new C(); return [o.a.name, o.b.name, o.c.name, o.d(), C.e.name, q.a.name]; });
+T('assignNamed', () => { let f; const fs = []; for (let i = 0; i < 2; i++) { f = () => i; fs.push(f.name); } return fs; });
+T('functionPrototypeLazy', () => { const mk = () => function (a, b) {}; const a = mk(), b = mk(); const d0 = Object.getOwnPropertyDescriptor(a, 'prototype'); const r = [keys(a), keys(mk()), d0.writable, d0.enumerable, d0.configurable, typeof d0.value, a.prototype.constructor === a, a.prototype === a.prototype, a.prototype !== b.prototype, keys(a.prototype), Object.getOwnPropertyDescriptor(a.prototype, 'constructor').enumerable]; b.prototype = 3; r.push(b.prototype, Object.getOwnPropertyDescriptor(b, 'prototype').writable); return r; });
+T('thisAndHome', () => { const o = { v: 1, m() { return [1, 2].map(x => this.v + x); }, n() { return (() => super.toString === Object.prototype.toString)(); } }; function F() { this.g = () => new.target === F; } class P { w() { return 'P'; } } class Q extends P { w() { return (() => super.w() + 'Q')(); } } return [o.m(), o.n(), new F().g(), new Q().w()]; });
+T('arrowInCtorThisBox', () => { class A {} class B extends A { constructor() { const g = () => this; let e; try { g(); } catch (x) { e = x.constructor.name; } super(); this.same = g() === this; this.e = e; } } const b = new B(); return [b.same, b.e]; });
+T('legacyCaller', () => { function who() { return who.caller === null ? 'null' : typeof who.caller; } class C { w = who(); } function F() { this.w = who(); } function H() { return new C().w; } return [H(), new F().w]; });
+
+// ---- inside generators and async
+T('newInGenerator', () => { class C { a = 1; b = [...[1, 2]].length; } class D extends C { c = this.a + 1; } function* g() { const x = new C(); yield x.b; const y = new D(); yield y.c; yield new (class { z = (function* () { yield 9; })().next().value; })().z; } return [...g()]; });
+T('fieldThrowInGenerator', () => { class C { a = (() => { throw 'g'; })(); } function* g() { try { yield new C(); } catch (e) { yield 'c' + e; } } return [...g()]; });
+T('fieldsAndCallbacks', () => { class C { a = [3, 1, 2].sort((x, y) => x - y); b = this.a.map(x => new (class { v = x * 2; })().v); } return new C().b; });
+
+L.join('\n');
+""";
+
+    private const string ConstructionExpected = """
+fieldOrder = [["a","b","param","body",2],1,2,["a","b"]]
+fieldNewTarget = [true,true]
+argsSurviveFields = [7,8,9,3]
+manyArgsAndFields = [21,8]
+methodsAndArrowInField = [6,10]
+evalInField = [2,"object"]
+argumentsInFieldEval = "threw SyntaxError"
+computedAndPrivate = [["k1","k2"],1,3,2,3,3]
+fieldNoValue = [["42","a","b","c","quoted key"],true,true]
+nestedNewInField = [4,4,null]
+sameClassManyTimes = 300
+throwBase = ["boom"]
+throwBaseFirstInstruction = ["TypeError"]
+throwBuiltinInField = ["SyntaxError"]
+throwDerivedInSuperTry = ["caught fi","bound"]
+throwDerivedOutside = ["fi"]
+newAfterThrowInField = [1,[2,1],1,[2,3]]
+finallyAroundNew = ["r",["cx","f"]]
+derivedFieldsOrder = ["B.pre","A.a","A.body","a","B.b","B.post","a,b","D.d"]
+superTwice = [2,"ReferenceError",1]
+thisBeforeSuper = "threw ReferenceError"
+noSuper = "threw ReferenceError"
+returnPrimitiveDerived = "threw TypeError"
+returnUndefinedDerived = 1
+returnObjectDerived = ["z"]
+returnPrimitiveBase = [1,2,4,null]
+superInArrow = [1,2,3]
+superInEval = 2
+superArrowThrowingField = undefined
+superParentChanges = ["A!","Z!",true,"A!"]
+superParentNull = "threw TypeError"
+superParentFunctionProto = "threw TypeError"
+superParentArrow = "threw TypeError"
+superParentProxyBound = [true,true,1,true]
+extendsBuiltin = ["hi",7,8,true,1,3,["length","t"]]
+extendsFunctionCtor = [4,5,["a","b"],true]
+fieldNotSetter = [1,[],["x"]]
+fieldOnFrozenReturn = "threw TypeError"
+fieldOnNonExtensibleAfterIcFilled = [1,1,"TypeError"]
+fieldOverExistingAfterIcFilled = [["y","x"],1,2,1,"TypeError"]
+fieldOnProxyReturn = ["x",1,true,true,true]
+fieldOnArrayFunctionReturn = "threw TypeError"
+fieldOnPrototypeObject = [null,null,1]
+fieldOnPrototypeObject2 = ["q","q",1]
+protoChanges = [1,2,1,true,1,true,true,true,false,"object",true,1]
+protoShared = [["a"],["b","c"],1,1,true]
+protoAfterProtoChange = [2,2]
+protoFrozenCtor = [true]
+protoNonWritableDefine = 1
+classProtoDescriptor = [false,false,false,["length","name","prototype"],true]
+reflectConstruct = [1,true,true,1,["prototype"],true,null]
+newTargetSameFeedback = ["G","F","G","F"]
+classFactorySameFeedback = ["b",false,"a",true,"b",false,"a",true]
+notConstructors = ["TypeError","TypeError","TypeError","TypeError","TypeError","TypeError"]
+generatorFunctionPrototype = ["object",true,true]
+slotHintOrder = ["abcd","c","ac","bc","cd","abcdk0","41:k39","c","abc"]
+slotHintDeleteAdd = [["b","a","c"],3]
+slotHintEmptyInstanceHasNothing = [[],"{}",false,null,[],["z"]]
+slotHintManyProps = [100,99,"p50"]
+slotHintThrowingCtor = [3,[],[]]
+slotHintRecursiveCtor = [63,["l","r","d"],["l","r","d"]]
+freezeSealInCtor = [1,true]
+accessorInCtor = [7,["g","x"]]
+perIter = [0,1,2]
+perIterMutated = [1,3,5]
+perIterInUpdate = [0,0,0]
+perIterTwoAndObject = ["x","xyy",0,2,true,4]
+perIterEval = [0,1,2]
+perIterEvalVar = [0,2,4,2]
+perIterTdz = 2
+perIterWith = ["p0","p1"]
+closureProps = [1,null,"",0,["length","name","x"],["length","name"],false]
+closureNameDefine = ["renamed",9,"",2,"",2]
+closureNameWritable = ["w","nm","nm",true,false]
+closureDeleteName = ["",0,[],"m",0,["length","name"],["length","name"]]
+closureAssignReadonly = ["",0,"TypeError",""]
+closureFreezeAndAddMany = [true,false,12,2,"",9]
+closureAccessorOnName = ["acc","","function",""]
+anonymousNamedByKey = ["dyn","[s]","a","dyn","get dyn2"]
+anonymousClassFieldName = ["a","b","c","#d","e","a"]
+assignNamed = ["f","f"]
+functionPrototypeLazy = [["length","name","arguments","caller","prototype"],["length","name","arguments","caller","prototype"],true,false,false,"object",true,true,true,["constructor"],false,3,true]
+thisAndHome = [[2,3],true,true,"PQ"]
+arrowInCtorThisBox = [true,"ReferenceError"]
+legacyCaller = ["null","function"]
+newInGenerator = [2,2,9]
+fieldThrowInGenerator = ["cg"]
+fieldsAndCallbacks = [2,4,6]
+""";
+
+    [Fact]
+    public void ConstructionMatchesReferenceBehavior()
+    {
+        using var engine = new JsEngine();
+        var got = engine.Evaluate(ConstructionScript).AsString().Split('\n');
+        var expected = ConstructionExpected.ReplaceLineEndings("\n").TrimEnd('\n').Split('\n');
+        Assert.Equal(expected.Length, got.Length);
+        for (int i = 0; i < expected.Length; i++) Assert.True(expected[i] == got[i], $"line {i}: expected {expected[i]} but got {got[i]}");
+    }
 }

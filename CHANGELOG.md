@@ -11,6 +11,11 @@ counts as public API.
 - `Object.assign` into an empty object, `instanceof`, `new` and class fields with constant names are faster.
 - Repeated `eval` of the same source reuses its compiled code, up to a bounded total source length.
 - Closures and environments are smaller.
+- `regex.test` and capture-free `exec`, `replace` and `split` no longer build match objects, and legacy `RegExp` statics are captured lazily.
+- `promise.then` allocates less, and the job queue no longer copies when it grows.
+- `arguments.length` and `arguments[i]` read from the call frame when the object cannot be observed. Rest and spread allocate their exact size.
+- Class field initializers run in the interpreter loop rather than a nested one. Closures allocate less.
+- `typeof x === 'name'` ends at a reference comparison, and bitwise operators keep their fast path for values outside the int32 range.
 
 ## 1.0.1 (2026-11-08)
 
