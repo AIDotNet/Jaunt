@@ -187,7 +187,7 @@ internal sealed partial class Vm
     /// order (no accessors, index or symbol keys): nothing observable runs, so the keys and values are read straight from
     /// the shape and slots. An empty target with the same prototype takes the source's shape and a copy of its slots.
     /// </summary>
-    private bool TryCopyPlainDataProperties(JsObject target, JsObject so, ReadOnlySpan<JsValue> excluded)
+    private bool TryCopyPlainDataProperties(JsObject target, JsObject so, ReadOnlySpan<JsValue> excluded, int reserve)
     {
         if (so.GetType() != typeof(JsObject) || so.Dict != null) return false;
         var shape = so.Shape;
@@ -206,7 +206,7 @@ internal sealed partial class Vm
                 {
                     if (n > 0)
                     {
-                        var copy = new JsValue[n];
+                        var copy = new JsValue[n + reserve];
                         Array.Copy(slots, copy, n);
                         target.Slots = copy;
                         target.Shape = shape;
@@ -779,10 +779,11 @@ internal sealed partial class Vm
         else fn.DefineOwnProperty("name", PropertyDescriptor.Data(new JsValue(name), PropFlags.Configurable));
     }
 
-    internal void CopyDataProperties(JsObject target, in JsValue source, ReadOnlySpan<JsValue> excluded)
+    /// <param name="reserve">Properties the caller is about to add (the rest of an object literal), when the target takes a copy of the source's slots.</param>
+    internal void CopyDataProperties(JsObject target, in JsValue source, ReadOnlySpan<JsValue> excluded, int reserve = 0)
     {
         if (source.IsNullOrUndefined) return;
-        if (source.IsObject && source.Ref is JsObject so && TryCopyPlainDataProperties(target, so, excluded)) return;
+        if (source.IsObject && source.Ref is JsObject so && TryCopyPlainDataProperties(target, so, excluded, reserve)) return;
         var from = Operations.ToObject(Realm, source);
         var keys = new List<PropertyKey>();
         from.OwnPropertyKeys(keys);
@@ -964,6 +965,33 @@ internal sealed partial class Vm
         cooked.AddOwnProperty("raw", JsValue.FromObject(raw), PropFlags.None);
         ObjectBuiltins.SetIntegrityLevel(realm, cooked, frozen: true);
         return cooked;
+    }
+
+    /// <summary>
+    /// <c>arguments[key]</c> in a function with an elided arguments object (<see cref="FunctionInfo.ArgumentsElided"/>). An index
+    /// in the argument list reads it; an index past the end misses unless %Object.prototype% holds it. For any other key the real
+    /// object is created, once, in <paramref name="holder"/> and asked: it can be reached from an accessor's receiver afterwards.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private JsValue ArgumentsElement(Frame f, in JsValue key, ref JsValue holder)
+    {
+        if (!holder.IsObject)
+        {
+            var args = f.Args!;
+            if (key.IsNumber)
+            {
+                double d = key.Num;
+                int i = (int)d;
+                if (i == d && i >= 0)
+                {
+                    if (i < args.Length) return args[i];
+                    if (Realm.ObjectPrototype.FindOwn(PropertyKey.FromIndex((uint)i), out _) < 0) return JsValue.Undefined;
+                }
+            }
+            // a mapped object here has no parameters to alias (see FunctionInfo.ArgumentsElided)
+            holder = JsValue.FromObject((f.T.Flags & FunctionFlags.MappedArguments) != 0 ? CreateMappedArgumentsObject(f, Array.Empty<int>()) : CreateArgumentsObject(f));
+        }
+        return GetElemSlow(holder, key);
     }
 
     private JsObject CreateMappedArgumentsObject(Frame f, int[] paramSlots)

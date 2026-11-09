@@ -107,8 +107,8 @@ internal sealed partial class Vm
                 return pc + 3;
             }
             case Op.CopyDataProps:
-                CopyDataProperties(regs[bp + code[pc + 1]].AsObjectUnchecked, regs[bp + code[pc + 2]], ReadOnlySpan<JsValue>.Empty);
-                return pc + 3;
+                CopyDataProperties(regs[bp + code[pc + 1]].AsObjectUnchecked, regs[bp + code[pc + 2]], ReadOnlySpan<JsValue>.Empty, code[pc + 3]);
+                return pc + 4;
             case Op.ObjectRest:
             {
                 var target = new JsObject(realm, realm.ObjectPrototype);
@@ -326,11 +326,24 @@ internal sealed partial class Vm
             {
                 int start = code[pc + 2];
                 var args = f.Args ?? Array.Empty<JsValue>();
-                var arr = new JsArray(realm, Math.Max(0, args.Length - start));
-                for (int i = start; i < args.Length; i++) arr.Push(args[i]);
-                regs[bp + code[pc + 1]] = JsValue.FromObject(arr);
+                // a function without an arguments object kept only these arguments, in an array nothing else will read
+                if ((f.T.Flags & FunctionFlags.RestOnlyArgs) != 0) f.Args = null;
+                else args = args.Length <= start ? Array.Empty<JsValue>() : args.AsSpan(start).ToArray();
+                regs[bp + code[pc + 1]] = JsValue.FromObject(JsArray.TakingItems(realm, args));
                 return pc + 3;
             }
+            case Op.ArgCount:
+                regs[bp + code[pc + 1]] = new JsValue(f.Argc);
+                return pc + 2;
+            case Op.ArgLength:
+            {
+                ref var holder = ref regs[bp + code[pc + 2]];
+                regs[bp + code[pc + 1]] = holder.IsObject ? holder.AsObjectUnchecked.Get("length", holder) : new JsValue(f.Args!.Length);
+                return pc + 3;
+            }
+            case Op.ArgElem:
+                regs[bp + code[pc + 1]] = ArgumentsElement(f, regs[bp + code[pc + 2]], ref regs[bp + code[pc + 3]]);
+                return pc + 4;
             case Op.LdImport:
             {
                 var v = Modules.ReadImport(realm, f.Callee.Module!, code[pc + 2]);

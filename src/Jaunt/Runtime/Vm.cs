@@ -55,6 +55,8 @@ internal sealed class Frame
     /// </summary>
     public Feedback Feedback = null!;
     public JsValue[]? Args;
+    /// <summary>The number of arguments, set only with <see cref="FunctionFlags.ArgcOnly"/>.</summary>
+    public int Argc;
     /// <summary>
     /// Coroutine frames only: the pooled frame this heap frame displaced from <c>Vm._frames</c> at its depth while it is
     /// attached (restored when it detaches). The active frames are addressed by depth, see <see cref="Vm.Current"/>.
@@ -566,7 +568,7 @@ internal sealed partial class Vm
             for (int i = n; i < initEnd; i++) regs[b + i] = default;
             if (_poisonRegisters) for (int i = initEnd; i < t.RegisterCount; i++) regs[b + i] = s_poison;
         }
-        if ((t.Flags & FunctionFlags.NeedsArgsArray) != 0) f.Args = args.ToArray();   // otherwise still null from PopFrame
+        if ((t.Flags & FunctionFlags.NeedsArgsArray) != 0) CaptureArgs(f, t, args);   // otherwise Args is still null from PopFrame
         SetupFrame(f, c, thisValue, newTarget, flags);
         return f;
     }
@@ -642,10 +644,20 @@ internal sealed partial class Vm
         f.Base = b;
         if (!ReferenceEquals(f.Regs, regs)) f.Regs = regs;
         // before the registers above the parameters are initialized: with an overlapping window the extra arguments live there
-        if ((t.Flags & FunctionFlags.NeedsArgsArray) != 0) f.Args = new ReadOnlySpan<JsValue>(callerRegs, argStart, argc).ToArray();
+        if ((t.Flags & FunctionFlags.NeedsArgsArray) != 0) CaptureArgs(f, t, new ReadOnlySpan<JsValue>(callerRegs, argStart, argc));
         int initEnd = t.InitUndefEnd < 0 ? count : t.InitUndefEnd;
         for (int i = n; i < initEnd; i++) regs[b + i] = default;
         if (_poisonRegisters) for (int i = initEnd; i < count; i++) regs[b + i] = s_poison;
+    }
+
+    /// <summary>What the callee of a function with <see cref="FunctionFlags.NeedsArgsArray"/> keeps of its arguments.</summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static void CaptureArgs(Frame f, FunctionTemplate t, ReadOnlySpan<JsValue> args)
+    {
+        var flags = t.Flags;
+        if ((flags & FunctionFlags.ArgcOnly) != 0) f.Argc = args.Length;
+        else if ((flags & FunctionFlags.RestOnlyArgs) == 0) f.Args = args.ToArray();
+        else f.Args = args.Length <= t.RestIndex ? Array.Empty<JsValue>() : args.Slice(t.RestIndex).ToArray();
     }
 
     /// <summary>A register window that cannot overlap the caller's (see <see cref="PushCallFrame"/>), with the arguments copied in.</summary>
@@ -976,18 +988,24 @@ internal sealed partial class Vm
         int initEnd = t.InitUndefEnd < 0 ? t.RegisterCount : t.InitUndefEnd;
         for (int i = n; i < initEnd; i++) regs[b + i] = default;
         if (_poisonRegisters) for (int i = initEnd; i < t.RegisterCount; i++) regs[b + i] = s_poison;
-        if ((t.Flags & FunctionFlags.NeedsArgsArray) != 0) f.Args = CallbackArgsArray(a0, a1, a2, a3, argc);
+        if ((t.Flags & FunctionFlags.NeedsArgsArray) != 0)
+        {
+            if ((t.Flags & FunctionFlags.ArgcOnly) != 0) f.Argc = argc;
+            else f.Args = CallbackArgsArray(a0, a1, a2, a3, argc, (t.Flags & FunctionFlags.RestOnlyArgs) != 0 ? t.RestIndex : 0);
+        }
         SetupFrame(f, c, thisValue, JsValue.Undefined, FrameFlags.None);
         return Run(f);
     }
 
-    private static JsValue[] CallbackArgsArray(in JsValue a0, in JsValue a1, in JsValue a2, in JsValue a3, int argc)
+    /// <summary>The arguments from <paramref name="start"/> on.</summary>
+    private static JsValue[] CallbackArgsArray(in JsValue a0, in JsValue a1, in JsValue a2, in JsValue a3, int argc, int start)
     {
-        var args = new JsValue[argc];
-        if (argc > 0) args[0] = a0;
-        if (argc > 1) args[1] = a1;
-        if (argc > 2) args[2] = a2;
-        if (argc > 3) args[3] = a3;
+        if (argc <= start) return Array.Empty<JsValue>();
+        var args = new JsValue[argc - start];
+        if (start < 1) args[0 - start] = a0;
+        if (argc > 1 && start < 2) args[1 - start] = a1;
+        if (argc > 2 && start < 3) args[2 - start] = a2;
+        if (argc > 3 && start < 4) args[3 - start] = a3;
         return args;
     }
 

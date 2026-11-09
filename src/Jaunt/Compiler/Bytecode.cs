@@ -67,6 +67,12 @@ internal enum Op : int
     Intrinsic,
     /// <summary>A class field with a constant name: this, name, value, inline cache.</summary>
     DefineFieldK,
+    /// <summary><c>arguments.length</c> in a function whose arguments object is never created and holds nothing else: dst.</summary>
+    ArgCount,
+    /// <summary><c>arguments.length</c> when the object is elided but may have been created by <see cref="ArgElem"/>: dst, the register holding it or undefined.</summary>
+    ArgLength,
+    /// <summary><c>arguments[key]</c> when the object is elided: dst, key, the register holding the object or undefined.</summary>
+    ArgElem,
     Count_,
 }
 
@@ -112,7 +118,7 @@ internal static class OpInfo
         S(Op.DelProp, R, R, K); S(Op.DelElem, R, R, R);
         S(Op.GetSuper, R, R, R, R); S(Op.SetSuper, R, R, R, R); S(Op.LoadSuperBase, R);
         S(Op.DefineProp, R, R, R); S(Op.DefinePropK, R, K, R, C); S(Op.DefineFieldK, R, K, R, C); S(Op.DefineAccessor, R, R, R, I); S(Op.DefineMethod, R, R, R); S(Op.SetProto, R, R);
-        S(Op.CopyDataProps, R, R); S(Op.ObjectRest, R, R, O, N);
+        S(Op.CopyDataProps, R, R, I); S(Op.ObjectRest, R, R, O, N);
         S(Op.NewObject, R, I); S(Op.NewArray, R, I); S(Op.ArrayPush, R, R); S(Op.ArrayPushHole, R); S(Op.ArraySpread, R, R, I);
         foreach (var op in new[] { Op.Add, Op.Sub, Op.Mul, Op.Div, Op.Mod, Op.Exp, Op.BitAnd, Op.BitOr, Op.BitXor, Op.Shl, Op.Shr, Op.UShr,
                      Op.Eq, Op.Ne, Op.StrictEq, Op.StrictNe, Op.Lt, Op.Le, Op.Gt, Op.Ge, Op.InstanceOf, Op.In })
@@ -164,6 +170,7 @@ internal static class OpInfo
         S(Op.NewRegExp, R, K, K, C);
         S(Op.CreateArguments, R);
         S(Op.CreateRestArray, R, I);
+        S(Op.ArgCount, R); S(Op.ArgLength, R, R); S(Op.ArgElem, R, R, R);
         S(Op.LdImport, R, I, K);
         S(Op.ImportMeta, R);
         S(Op.DynamicImport, R, R, O, I);
@@ -204,6 +211,12 @@ internal enum FunctionFlags
     FieldInitializer = 32768,
     NeedsArgsArray = 65536,
     ClassStaticInit = 131072,
+    /// <summary>With <see cref="NeedsArgsArray"/>: only the argument count is read (Frame.Argc), no array.</summary>
+    ArgcOnly = 262144,
+    /// <summary>With <see cref="NeedsArgsArray"/>: Frame.Args holds only the arguments that form the rest array, which takes it over.</summary>
+    RestOnlyArgs = 524288,
+    /// <summary>The arguments object of this function has the mapped form (sloppy, simple parameters).</summary>
+    MappedArguments = 1048576,
 }
 
 internal struct HandlerEntry

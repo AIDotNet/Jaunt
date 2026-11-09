@@ -333,6 +333,19 @@ internal sealed class JsArray : JsObject
         }
     }
 
+    /// <summary>A new array whose elements are exactly <paramref name="items"/>, which it takes over.</summary>
+    internal static JsArray TakingItems(Realm realm, JsValue[] items)
+    {
+        var arr = new JsArray(realm);
+        if (items.Length != 0)
+        {
+            arr.Items = items;
+            arr.Length = (uint)items.Length;
+            realm.ChargeBytes(items.Length * 24L);
+        }
+        return arr;
+    }
+
     public override string ClassName => "Array";
 
     internal override bool CanCacheNamed(in PropertyKey key) => !(key.Value is string s && (s == "length" || PropertyKey.TryParseArrayIndex(s, out _)));
@@ -367,6 +380,17 @@ internal sealed class JsArray : JsObject
         if (pages == null || !Dense || index >= Length) return false;
         value = pages[index >> PageShift][index & PageMask];
         return value.IsNotEmpty;
+    }
+
+    /// <summary>Like <see cref="EnsureCapacity"/> for a final size that is known: an element store of exactly that size. The array is not in queue mode.</summary>
+    private void ReserveExactly(uint needed)
+    {
+        if (needed > Realm.MaxArrayLength) { EnsureCapacity(needed); return; }
+        Realm.ChargeBytes((needed - Items.Length) * 24L);
+        var n = new JsValue[needed];
+        Items.AsSpan().CopyTo(n);
+        MarkHoles(n, Items.Length);
+        Items = n;
     }
 
     internal void EnsureCapacity(uint needed)
@@ -428,7 +452,7 @@ internal sealed class JsArray : JsObject
         // reserve: elements the caller will append right after (an array literal's trailing elements), so the
         // append does not grow an exactly sized backing store a second time
         ulong want = (ulong)start + n + reserve;
-        if (want > (uint)Items.Length) EnsureCapacity((uint)Math.Min(want, uint.MaxValue - 1));
+        if (want > (uint)Items.Length) ReserveExactly((uint)Math.Min(want, uint.MaxValue - 1));
         Array.Copy(items, 0, Items, start, n);
         Length = start + n;
         return true;
