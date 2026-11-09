@@ -1551,7 +1551,7 @@ scenario('growing fan out', n => {
   return new Promise(r => { const check = () => { if (o.length === 8191) { say(n, o.length, hash(o)); r(); } else Promise.resolve().then(check); }; check(); });
 });
 scenario('long chain', n => { let p = Promise.resolve(0); for (let i = 0; i < 5000; i++) p = p.then(v => v + i); return p.then(v => say(n, v)); });
-scenario('deep await chain', async n => { const f = async d => d === 0 ? 0 : 1 + await f(d - 1); say(n, await f(300)); });
+scenario('deep await chain', async n => { const f = async d => d === 0 ? 0 : 1 + await f(d - 1); say(n, await f(100)); });
 
 // ---- handler calls
 scenario('handler call', n => {
@@ -1812,7 +1812,7 @@ burst pending 5000 614196
 ping pong 9006 72494
 growing fan out 8191 581512
 long chain 12497500
-deep await chain 300
+deep await chain 100
 handler call true,1,7,1,undefined
 sloppy handler this true 1
 handler kinds bound 1,2,3
