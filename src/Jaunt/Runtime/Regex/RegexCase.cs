@@ -65,6 +65,36 @@ internal static class RegexCase
         }
     }
 
+    private static CharSet? s_legacyNonCanonical;
+
+    private static CharSet NonCanonicalOf(bool unicode)
+    {
+        if (unicode) return NonCanonical;
+        var s = s_legacyNonCanonical;
+        if (s != null) return s;
+        var (from, _) = Pairs(false);
+        var list = new List<(int, int)>(from.Length);
+        foreach (var c in from) list.Add((c, c));
+        s = CharSet.FromRanges(list);
+        Interlocked.CompareExchange(ref s_legacyNonCanonical, s, null);
+        return s_legacyNonCanonical!;
+    }
+
+    /// <summary>
+    /// { x | Canonicalize(x) ∈ <paramref name="canonical"/> }: membership of x in it is ignore-case matching against a
+    /// closed set, without canonicalizing x.
+    /// </summary>
+    public static CharSet Preimage(CharSet canonical, bool unicode)
+    {
+        var (from, to) = Pairs(unicode);
+        var own = canonical.Subtract(NonCanonicalOf(unicode));   // characters that are their own canonical form
+        var list = new List<(int, int)>(own.Ranges.Length / 2 + 8);
+        for (int i = 0; i < own.Ranges.Length; i += 2) list.Add((own.Ranges[i], own.Ranges[i + 1]));
+        for (int i = 0; i < from.Length; i++)
+            if (canonical.Contains(to[i])) list.Add((from[i], from[i]));
+        return CharSet.FromRanges(list);
+    }
+
     /// <summary>MaybeSimpleCaseFolding for v-mode: the set of canonical characters of S.</summary>
     public static CharSet FoldCanonical(CharSet set) => Close(set, true).Subtract(NonCanonical);
 

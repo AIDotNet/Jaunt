@@ -13,6 +13,14 @@ internal sealed class CharSet
     public CharSet(int[] ranges)
     {
         Ranges = ranges;
+        for (int i = 0; i < ranges.Length && ranges[i] < 128; i += 2)
+        {
+            for (int c = ranges[i], hi = Math.Min(ranges[i + 1], 127); c <= hi; c++)
+            {
+                if (c < 64) _ascii0 |= 1UL << c;
+                else _ascii1 |= 1UL << (c - 64);
+            }
+        }
         // sets are built while compiling a pattern (property escapes, unions, case folding): large ones are memory and
         // work of the running execution (tracked bytes + VM work, so Timeout/Interrupt are reached)
         if (ranges.Length > 64) Vm.OnThread?.ChargeCompileWork(ranges.Length);
@@ -23,8 +31,12 @@ internal sealed class CharSet
 
     public bool IsEmpty => Ranges.Length == 0;
 
+    /// <summary>Membership of the ASCII characters, as a bitmap (the common case of a match loop).</summary>
+    private readonly ulong _ascii0, _ascii1;
+
     public bool Contains(int c)
     {
+        if ((uint)c < 128) return ((c < 64 ? _ascii0 >> c : _ascii1 >> (c - 64)) & 1) != 0;
         var r = Ranges;
         int lo = 0, hi = r.Length / 2 - 1;
         while (lo <= hi)

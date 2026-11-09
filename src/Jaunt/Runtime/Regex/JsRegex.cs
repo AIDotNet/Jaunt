@@ -5,8 +5,9 @@ namespace Jaunt.Runtime.Regex;
 
 /// <summary>
 /// Native ECMAScript regular expression: pattern compiled to a small bytecode run by a backtracking VM with an
-/// explicit choice stack (no CLR recursion proportional to the input). Used for patterns the .NET Regex adaptation
-/// cannot express exactly: Unicode property escapes, v-flag class sets, modifiers and duplicate named groups.
+/// explicit choice stack (no CLR recursion proportional to the input). Runs every pattern it can compile. Before
+/// matching, a literal prefix or first-character set skips start positions that cannot match, and single-character
+/// loops consume in a tight loop, skip positions their continuation cannot start at, and drop useless backtracking.
 /// </summary>
 internal sealed class JsRegex
 {
@@ -52,11 +53,13 @@ internal sealed class JsRegex
     public static JsRegex Compile(string pattern, string flags)
     {
         var parser = new RegexParser(pattern, flags);
-        var tree = RegexParser.Resolve(parser.Parse(), parser);
+        var tree = Flatten(RegexParser.Resolve(parser.Parse(), parser));
         var c = new Compiler(flags.Contains('u') || flags.Contains('v'));
         c.Emit(tree, back: false);
         c.Code.Add(OpMatch);
         var re = new JsRegex(c.Code.ToArray(), c.Sets.ToArray(), c.Unicode, parser.CaptureCount, parser.GroupNames.ToArray(), c.RegCount);
+        re.AnalyseLoops();
+        re.AnalyseStart(tree);
         bool dupNames = false;
         var seen = new HashSet<string>(StringComparer.Ordinal);
         foreach (var n in parser.GroupNames) if (n != null && !seen.Add(n)) dupNames = true;
@@ -64,6 +67,40 @@ internal sealed class JsRegex
         re.RequiresNative = flags.Contains('v') || dupNames || parser.NeedsNative || unicodeIgnoreCase || pattern.Contains("\\p{") || pattern.Contains("\\P{")
             || (pattern.Contains("(?<") && pattern.Contains("\\u")) || NeedsNative(tree);
         return re;
+    }
+
+    /// <summary>
+    /// Greedy unbounded repeats of a greedy unbounded single-character repeat, without captures (<c>(?:a*)*</c>,
+    /// <c>(?:a+)+</c>, <c>(?:\d{2,})+</c>) become one repeat of the character, with the product of the minimums. Both forms
+    /// reach the same end positions, the nested one first reaching each in decreasing order (with repeats), so the first
+    /// one where the rest of the pattern succeeds is the same, while the nested form backtracks exponentially.
+    /// </summary>
+    private static RNode Flatten(RNode n)
+    {
+        switch (n)
+        {
+            case RSeq s:
+                for (int i = 0; i < s.Items.Count; i++) s.Items[i] = Flatten(s.Items[i]);
+                return s;
+            case RAlt a:
+                for (int i = 0; i < a.Alts.Count; i++) a.Alts[i] = Flatten(a.Alts[i]);
+                return a;
+            case RGroup g: g.Body = Flatten(g.Body); return g;
+            case RLook l: l.Body = Flatten(l.Body); return l;
+            case RRepeat r:
+            {
+                r.Body = Flatten(r.Body);
+                var body = r.Body is RSeq { Items.Count: 1 } one ? one.Items[0] : r.Body;
+                if (r.Max == -1 && r.Greedy && r.CapFrom >= r.CapTo
+                    && body is RRepeat { Max: -1, Greedy: true, Body: RChar or RAny or RSet } inner && inner.CapFrom >= inner.CapTo
+                    && (inner.Min <= 1 || r.Min >= 1)   // (?:a{2,})* cannot match one character
+                    && (long)r.Min * inner.Min <= int.MaxValue)
+                    return new RRepeat { Body = inner.Body, Min = r.Min * inner.Min, Max = -1, Greedy = true, CapFrom = r.CapFrom, CapTo = r.CapFrom };
+                return r;
+            }
+            default:
+                return n;
+        }
     }
 
     private static bool NeedsNative(RNode n) => n switch
@@ -75,6 +112,325 @@ internal sealed class JsRegex
         RLook l => NeedsNative(l.Body),
         _ => false,
     };
+
+    // ------------------------------------------------------------------ analysis (optimisations that never change a result)
+
+    private static int InstrLen(int[] code, int pc) => (code[pc] & 0xFF) switch
+    {
+        OpMatch or OpFail => 1,
+        OpSet or OpResetCaps or OpRegSet or OpLook => 3,
+        OpBackRef => 3 + code[pc + 2],
+        OpLoopCheck => 6,
+        OpEmptyCheck => 4,
+        OpSimpleLoop => 9,
+        _ => 2,
+    };
+
+    private static bool IsLineTerminator(int c) => c is 10 or 13 or 0x2028 or 0x2029;
+
+    /// <summary>Matches one character with a simple-loop / single-char matcher description.</summary>
+    private bool MatchOne(int kind, int arg, int flags, int c)
+    {
+        switch (kind)
+        {
+            case 0: return c == arg;
+            case 1: return RegexCase.Canon(c, _unicode) == arg;
+            case 2: return arg != 0 || !IsLineTerminator(c);
+            default:
+            {
+                var set = _sets[arg];
+                bool hit = (flags & 1) != 0 ? set.Contains(RegexCase.Canon(c, _unicode)) : set.Contains(c);
+                return hit != ((flags & 2) != 0);
+            }
+        }
+    }
+
+    /// <summary>
+    /// A forward simple loop whose continuation starts with a literal character (past capture saves) records it: a
+    /// position where that character is absent cannot continue, so backtracking skips it. When the loop cannot match
+    /// the character itself, or the continuation is an end anchor the loop cannot satisfy by giving characters back,
+    /// giving back never helps and the loop pushes no choice (it is atomic).
+    /// </summary>
+    private void AnalyseLoops()
+    {
+        var code = _code;
+        for (int pc = 0; pc < code.Length; pc += InstrLen(code, pc))
+        {
+            if (code[pc] != OpSimpleLoop) continue;   // forward loops only
+            if (code[pc + 1] == 3 && (code[pc + 3] & 1) == 0) AddLoopStops(code[pc + 2], (code[pc + 3] & 2) != 0);
+            int q = pc + 9;
+            for (int hops = 0; hops < 16; hops++)
+            {
+                int op = code[q];
+                if (op == OpSaveStart || op == OpSaveEnd) q += 2;
+                else if (op == OpJmp) q = code[q + 1];
+                else break;
+            }
+            int kind = code[pc + 1], arg = code[pc + 2], flags = code[pc + 3];
+            bool greedy = code[pc + 6] != 0;
+            if (code[q] == OpChar)
+            {
+                int c = code[q + 1];
+                if (c < 0xD800 || (c > 0xDFFF && c <= 0xFFFF))
+                {
+                    code[pc + 7] = c;
+                    if (greedy && !MatchOne(kind, arg, flags, c)) code[pc + 8] = 1;
+                }
+            }
+            else if (code[q] == OpEol && greedy)
+            {
+                if (code[q + 1] == 0 || !(MatchOne(kind, arg, flags, 10) || MatchOne(kind, arg, flags, 13)
+                    || MatchOne(kind, arg, flags, 0x2028) || MatchOne(kind, arg, flags, 0x2029)))
+                    code[pc + 8] = 1;
+            }
+            else if (greedy && (code[q] == OpSet || (code[q] == OpSimpleLoop && code[q + 4] >= 1)))
+            {
+                // the continuation must first match a character of another class: when no character is in both, a
+                // given-back character (one the loop accepted) can never continue
+                var mine = Accepts(kind, arg, flags);
+                var next = code[q] == OpSet ? Accepts(3, code[q + 1], code[q + 2]) : Accepts(code[q + 1], code[q + 2], code[q + 3]);
+                if (mine != null && next != null && mine.Intersect(next).IsEmpty) code[pc + 8] = 1;
+            }
+        }
+        _leadLoop = LeadingLoop();
+    }
+
+    /// <summary>The code points a single-character matcher accepts; null when that is not a plain set (case folding at match time).</summary>
+    private CharSet? Accepts(int kind, int arg, int flags)
+    {
+        switch (kind)
+        {
+            case 0: return CharSet.Single(arg);
+            case 2: return arg != 0 ? CharSet.AllCodePoints : CharSet.FromRanges(new List<(int, int)> { (10, 10), (13, 13), (0x2028, 0x2029) }).Complement();
+            case 3 when (flags & 1) == 0: return (flags & 2) != 0 ? _sets[arg].Complement() : _sets[arg];
+            default: return null;
+        }
+    }
+
+    /// <summary>
+    /// Address of a greedy, unbounded forward simple loop that is the first thing a match consumes (after zero-width
+    /// items only), or -1. When an attempt from position p ran it over [p, e) and failed, an attempt from any q in
+    /// (p, e) fails too: its loop stops at the same e and can only try a subset of the lengths tried from p, and the
+    /// rest of the pattern sees the same input at the same positions. Only the captured text differs, which matters
+    /// only through back references, so a pattern with any back reference has no leading loop.
+    /// </summary>
+    private int _leadLoop = -1;
+
+    private int LeadingLoop()
+    {
+        var code = _code;
+        for (int pc = 0; pc < code.Length; pc += InstrLen(code, pc))
+            if ((code[pc] & 0xFF) == OpBackRef) return -1;
+        int at = 0;
+        while (true)
+        {
+            int op = code[at];
+            switch (op)
+            {
+                case OpSaveStart:
+                case OpSaveEnd:
+                case OpBol:
+                case OpEol:
+                case OpWordB:
+                    at += 2;
+                    continue;
+                case OpLook:
+                    at = code[at + 2];
+                    continue;
+                case OpSimpleLoop:
+                    return code[at + 5] == -1 && code[at + 6] != 0 ? at : -1;
+                default:
+                    return -1;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Per set index, for forward class loops: the code units a vectorised search looks for to find where a long run
+    /// ends (the members, searched with IndexOfAnyExcept, or for a negated class the excluded characters, with IndexOfAny).
+    /// Only when that stops exactly where the code-unit loop does: in Unicode mode at a surrogate too.
+    /// </summary>
+    private System.Buffers.SearchValues<char>?[]? _loopStops;
+
+    private void AddLoopStops(int setIndex, bool negate)
+    {
+        if (_loopStops?[setIndex] != null || (negate && _unicode)) return;
+        var bmp = _sets[setIndex].Intersect(CharSet.Range(0, 0xFFFF));
+        if (bmp.IsEmpty || bmp.Count > 256) return;
+        if (_unicode && !bmp.Intersect(CharSet.Range(0xD800, 0xDFFF)).IsEmpty) return;
+        _loopStops ??= new System.Buffers.SearchValues<char>?[_sets.Length];
+        _loopStops[setIndex] = System.Buffers.SearchValues.Create(Chars(bmp));
+    }
+
+    /// <summary>The pattern can only match at position 0 (a leading <c>^</c> without the m flag).</summary>
+    private bool _anchored;
+    /// <summary>Literal text every match begins with (BMP, no surrogates), searched for with IndexOf.</summary>
+    private string? _prefix;
+    /// <summary>Code units that can begin a match (or, with <see cref="_firstExcept"/>, the ones that cannot).</summary>
+    private System.Buffers.SearchValues<char>? _firstValues;
+    private bool _firstExcept;
+    /// <summary>Code points that can begin a match, checked one position at a time when no vectorised form applies.</summary>
+    private CharSet? _firstSet;
+    private bool HasStartScan => _prefix != null || _firstValues != null || _firstSet != null;
+
+    /// <summary>
+    /// A literal character (BMP, no surrogate) that every match consumes, from the top level of the pattern after its
+    /// first item, or -1: a search where it does not occur at or after the start fails at once. Checked once per search,
+    /// it bounds patterns that would otherwise backtrack at every position of a text that cannot match.
+    /// </summary>
+    private int _required = -1;
+
+    private void AnalyseStart(RNode tree)
+    {
+        var items = tree is RSeq seq ? seq.Items : new List<RNode> { tree };
+        for (int i = items.Count - 1; i >= 1; i--)
+        {
+            if (items[i] is RChar { IgnoreCase: false } rc && (rc.C < 0xD800 || (rc.C > 0xDFFF && rc.C <= 0xFFFF)))
+            {
+                _required = rc.C;
+                break;
+            }
+        }
+        if (items.Count > 0 && items[0] is RAssert { Kind: AssertKind.Bol, Multiline: false })
+        {
+            _anchored = true;
+            return;
+        }
+        var sb = new System.Text.StringBuilder();
+        foreach (var it in items)
+        {
+            if (it is RAssert or RLook) continue;   // zero-width: the consumed text is unchanged
+            if (it is RChar { IgnoreCase: false } ch && (ch.C < 0xD800 || (ch.C > 0xDFFF && ch.C <= 0xFFFF)))
+            {
+                sb.Append((char)ch.C);
+                continue;
+            }
+            break;
+        }
+        if (sb.Length > 0)
+        {
+            _prefix = sb.ToString();
+            return;
+        }
+        var (set, nullable) = First(tree, _unicode);
+        if (set == null || nullable || set.IsEmpty) return;
+        var excluded = set.Complement(0x10FFFF);
+        if (excluded.IsEmpty) return;   // every position can begin a match
+        if (excluded.Ranges[^1] < 128)
+        {
+            // only ASCII characters are excluded (a negated class, ignore-case): every other code unit is a candidate,
+            // and in Unicode mode the high half of a pair is found before its low half
+            _firstValues = System.Buffers.SearchValues.Create(Chars(excluded));
+            _firstExcept = true;
+            return;
+        }
+        bool supplementary = set.Ranges[^1] > 0xFFFF;
+        var bmp = set.Intersect(CharSet.Range(0, 0xFFFF));
+        bool surrogates = !bmp.Intersect(CharSet.Range(0xD800, 0xDFFF)).IsEmpty;
+        if (!(_unicode && supplementary))
+        {
+            // in non-Unicode mode a code point above U+FFFF never matches a single code unit: ignored
+            var non = bmp.Complement(0xFFFF);
+            if (bmp.Count <= 256 && !(_unicode && surrogates))
+            {
+                _firstValues = System.Buffers.SearchValues.Create(Chars(bmp));
+                return;
+            }
+            if (non.Count <= 256 && non.Intersect(CharSet.Range(0xD800, 0xDFFF)).IsEmpty)
+            {
+                if (non.IsEmpty) return;   // every code unit can begin a match
+                _firstValues = System.Buffers.SearchValues.Create(Chars(non));
+                _firstExcept = true;
+                return;
+            }
+        }
+        _firstSet = set;
+    }
+
+    /// <summary>The ASCII characters that satisfy <paramref name="matches"/>, plus every non-ASCII code point when <paramref name="nonAscii"/>.</summary>
+    private static CharSet IgnoreCaseFirst(Func<int, bool> matches, bool nonAscii)
+    {
+        var list = new List<(int, int)>();
+        for (int x = 0; x < 128; x++) if (matches(x)) list.Add((x, x));
+        if (nonAscii) list.Add((128, 0x10FFFF));
+        return CharSet.FromRanges(list);
+    }
+
+    private static char[] Chars(CharSet set)
+    {
+        var a = new char[set.Count];
+        int k = 0;
+        foreach (var c in set.CodePoints()) a[k++] = (char)c;
+        return a;
+    }
+
+    /// <summary>
+    /// The characters that can begin a match of <paramref name="n"/> (null: any) and whether it can match empty.
+    /// Over-approximates: '.', back references and class strings give up, and ignore-case may add every non-ASCII character.
+    /// </summary>
+    private static (CharSet? Set, bool Nullable) First(RNode n, bool unicode)
+    {
+        switch (n)
+        {
+            case REmpty:
+            case RAssert:
+            case RLook:
+                return (CharSet.Empty, true);
+            case RChar ch when !ch.IgnoreCase:
+                return (CharSet.Single(ch.C), false);
+            case RChar ch:
+            {
+                // matches x when Canonicalize(x) == Canonicalize(C); without u/v no non-ASCII character canonicalizes to ASCII
+                int k = RegexCase.Canon(ch.C, unicode);
+                return (IgnoreCaseFirst(x => RegexCase.Canon(x, unicode) == k, unicode || k >= 128), false);
+            }
+            case RSet set when !set.IgnoreCase:
+                return (set.Negate ? set.Set.Complement() : set.Set, false);
+            case RSet set:
+            {
+                // as compiled: membership of Canonicalize(x) in the closed set
+                var closed = set.Canonical ? set.Set : RegexCase.Close(set.Set, unicode);
+                bool negate = set.Negate;
+                bool nonAscii = unicode || negate || (!closed.IsEmpty && closed.Ranges[^1] >= 128);
+                return (IgnoreCaseFirst(x => closed.Contains(RegexCase.Canon(x, unicode)) != negate, nonAscii), false);
+            }
+            case RGroup g:
+                return First(g.Body, unicode);
+            case RRepeat r:
+            {
+                if (r.Max == 0) return (CharSet.Empty, true);
+                var (bs, bn) = First(r.Body, unicode);
+                return (bs, bn || r.Min == 0);
+            }
+            case RSeq s:
+            {
+                var acc = CharSet.Empty;
+                foreach (var item in s.Items)
+                {
+                    var (fs, fn) = First(item, unicode);
+                    if (fs == null) return (null, false);
+                    acc = acc.Union(fs);
+                    if (!fn) return (acc, false);
+                }
+                return (acc, true);
+            }
+            case RAlt a:
+            {
+                var acc = CharSet.Empty;
+                bool nullable = false;
+                foreach (var alt in a.Alts)
+                {
+                    var (fs, fn) = First(alt, unicode);
+                    if (fs == null) return (null, false);
+                    acc = acc.Union(fs);
+                    nullable |= fn;
+                }
+                return (acc, nullable);
+            }
+            default:
+                return (null, false);
+        }
+    }
 
     // ------------------------------------------------------------------ compiler
 
@@ -123,7 +479,12 @@ internal sealed class JsRegex
                     break;
                 }
                 case RChar ch:
-                    if (ch.IgnoreCase) { Code.Add(OpCharI | b); Code.Add(RegexCase.Canon(ch.C, Unicode)); }
+                    if (LegacyIgnoreCaseChars(ch) is { } same)
+                    {
+                        if (same.Count == 1) { Code.Add(OpChar | b); Code.Add(same.Ranges[0]); }
+                        else { Code.Add(OpSet | b); Code.Add(AddSet(same)); Code.Add(0); }
+                    }
+                    else if (ch.IgnoreCase) { Code.Add(OpCharI | b); Code.Add(RegexCase.Canon(ch.C, Unicode)); }
                     else { Code.Add(OpChar | b); Code.Add(ch.C); }
                     break;
                 case RAny any:
@@ -212,20 +573,42 @@ internal sealed class JsRegex
             return l;
         }
 
-        private int AddSet(RSet set)
+        /// <summary>
+        /// The set and matcher flags of a class. Ignore-case matching (Canonicalize(x) in the closed set) becomes plain
+        /// membership in the preimage of the closed set: the same characters, no case mapping per character.
+        /// </summary>
+        private (int Index, int Flags) AddSet(RSet set)
         {
             var s = set.Set;
-            if (set.IgnoreCase && !set.Canonical) s = RegexCase.Close(s, Unicode);
+            if (set.IgnoreCase)
+            {
+                if (!set.Canonical) s = RegexCase.Close(s, Unicode);
+                s = RegexCase.Preimage(s, Unicode);
+            }
+            Sets.Add(s);
+            return (Sets.Count - 1, set.Negate ? 2 : 0);
+        }
+
+        private int AddSet(CharSet s)
+        {
             Sets.Add(s);
             return Sets.Count - 1;
         }
 
         private void EmitSet(RSet set, int b)
         {
+            var (index, flags) = AddSet(set);
             Code.Add(OpSet | b);
-            Code.Add(AddSet(set));
-            Code.Add((set.IgnoreCase ? 1 : 0) | (set.Negate ? 2 : 0));
+            Code.Add(index);
+            Code.Add(flags);
         }
+
+        /// <summary>
+        /// Without u/v, an ignore-case character is compiled as the set of characters with the same canonical form (the
+        /// case table is small); with u/v it stays a canonicalizing comparison, which needs no table.
+        /// </summary>
+        private CharSet? LegacyIgnoreCaseChars(RChar ch) =>
+            ch.IgnoreCase && !Unicode ? RegexCase.Preimage(CharSet.Single(RegexCase.Canon(ch.C, false)), false) : null;
 
         private static bool IsSingleChar(RNode n) => n is RChar or RAny or RSet;
 
@@ -239,14 +622,22 @@ internal sealed class JsRegex
                 Code.Add(OpSimpleLoop | b);
                 switch (rp.Body)
                 {
+                    case RChar ch when LegacyIgnoreCaseChars(ch) is { } same: Code.Add(3); Code.Add(AddSet(same)); Code.Add(0); break;
                     case RChar ch when ch.IgnoreCase: Code.Add(1); Code.Add(RegexCase.Canon(ch.C, Unicode)); Code.Add(0); break;
                     case RChar ch: Code.Add(0); Code.Add(ch.C); Code.Add(0); break;
                     case RAny any: Code.Add(2); Code.Add(any.DotAll ? 1 : 0); Code.Add(0); break;
-                    case RSet set: Code.Add(3); Code.Add(AddSet(set)); Code.Add((set.IgnoreCase ? 1 : 0) | (set.Negate ? 2 : 0)); break;
+                    case RSet set:
+                    {
+                        var (index, flags) = AddSet(set);
+                        Code.Add(3); Code.Add(index); Code.Add(flags);
+                        break;
+                    }
                 }
                 Code.Add(rp.Min);
                 Code.Add(rp.Max);
                 Code.Add(rp.Greedy ? 1 : 0);
+                Code.Add(-1);   // follow character, set by AnalyseLoops
+                Code.Add(0);    // atomic, set by AnalyseLoops
                 return;
             }
             int r = RegCount++, p = RegCount++;
@@ -277,35 +668,29 @@ internal sealed class JsRegex
         public int LoopPc; // simple loop op address (bounds + matcher)
     }
 
-    /// <summary>The backtracking stacks of a <see cref="Matcher"/>, kept between matches. Their contents never outlive a search.</summary>
-    public sealed class MatcherStacks
-    {
-        internal int[] UndoSlot = new int[64];
-        internal int[] UndoOld = new int[64];
-        internal Choice[] Choices = new Choice[64];
-    }
-
-    /// <summary>Per-match mutable state (not thread-safe; one instance per execution).</summary>
+    /// <summary>
+    /// Per-search mutable state (not thread-safe). A matcher can be kept for later searches (<see cref="Reset"/>): its
+    /// backtracking stacks and capture buffer are reused, their contents never outlive a search.
+    /// </summary>
     public sealed class Matcher
     {
-        private readonly JsRegex _re;
-        private readonly string _s;
+        private JsRegex _re;
+        private string _s;
         private readonly Action? _tick;
-        public readonly int[] Caps;
-        private readonly int[] _regs;
-        private int[] _undoSlot;
-        private int[] _undoOld;
+        /// <summary>[start,end) pairs of the last search; longer than 2 * CaptureCount when the matcher was reused (see <see cref="CopyCaps"/>).</summary>
+        public int[] Caps;
+        private int[] _regs;
+        private int[] _undoSlot = new int[64];
+        private int[] _undoOld = new int[64];
         private int _undoCount;
-        private Choice[] _choices;
+        private Choice[] _choices = new Choice[64];
         private int _choiceCount;
         private int _steps;
+        /// <summary>Where the leading loop (see <see cref="_leadLoop"/>) stopped in the current attempt, or -1.</summary>
+        private int _leadEnd;
 
-        public Matcher(JsRegex re, string input, Action? tick, MatcherStacks? stacks = null)
+        public Matcher(JsRegex re, string input, Action? tick)
         {
-            stacks ??= new MatcherStacks();
-            _undoSlot = stacks.UndoSlot;
-            _undoOld = stacks.UndoOld;
-            _choices = stacks.Choices;
             _re = re;
             _s = input;
             _tick = tick;
@@ -313,28 +698,55 @@ internal sealed class JsRegex
             _regs = new int[Math.Max(1, re._regCount)];
         }
 
-        /// <summary>Stores the stacks, which may have grown, in <paramref name="stacks"/> for the next match; false when they are too large to keep.</summary>
-        public bool TryReturnStacks(MatcherStacks stacks)
+        /// <summary>Prepares a kept matcher for a search of <paramref name="re"/> in <paramref name="input"/>.</summary>
+        public void Reset(JsRegex re, string input)
         {
-            if (_choices.Length > MaxKeptStack || _undoSlot.Length > MaxKeptStack) return false;
-            stacks.UndoSlot = _undoSlot;
-            stacks.UndoOld = _undoOld;
-            stacks.Choices = _choices;
-            return true;
+            _re = re;
+            _s = input;
+            if (Caps.Length < re.CaptureCount * 2) Caps = new int[re.CaptureCount * 2];
+            if (_regs.Length < re._regCount) _regs = new int[re._regCount];
+        }
+
+        /// <summary>Drops the input reference after a search; false when the stacks grew too large to keep this matcher.</summary>
+        public bool Release()
+        {
+            _s = "";
+            return _choices.Length <= MaxKeptStack && _undoSlot.Length <= MaxKeptStack;
         }
 
         private const int MaxKeptStack = 4096;
 
+        /// <summary>The captures of the last successful search, exactly 2 * CaptureCount long.</summary>
+        public int[] CopyCaps() => Caps.AsSpan(0, _re.CaptureCount * 2).ToArray();
+
         /// <summary>RegExpBuiltinExec matcher loop: tries positions from <paramref name="start"/>. Caps hold [start,end) pairs.</summary>
         public bool Search(int start, bool sticky)
         {
-            int len = _s.Length;
-            if (_re._unicode && start > 0 && start < len && char.IsLowSurrogate(_s[start]) && char.IsHighSurrogate(_s[start - 1])) start--;
+            var re = _re;
+            var s = _s;
+            int len = s.Length;
+            if (re._unicode && start > 0 && start < len && char.IsLowSurrogate(s[start]) && char.IsHighSurrogate(s[start - 1])) start--;
+            if (re._anchored)
+            {
+                // a leading ^ (no m flag) only matches at 0: the other positions need not be tried
+                if (start != 0) return false;
+                sticky = true;
+            }
+            if (re._required >= 0 && start < len && s.AsSpan(start).IndexOf((char)re._required) < 0) return false;
+            if (re._required >= 0 && start >= len) return false;
+            bool scan = !sticky && re.HasStartScan;
+            int capLen = re.CaptureCount * 2;
             for (int at = start; at <= len;)
             {
-                Array.Fill(Caps, -1);
+                if (scan)
+                {
+                    at = NextStart(at);
+                    if (at < 0) return false;
+                }
+                Caps.AsSpan(0, capLen).Fill(-1);
                 _undoCount = 0;
                 _choiceCount = 0;
+                _leadEnd = -1;
                 int end = Run(0, at);
                 if (end >= 0)
                 {
@@ -343,9 +755,41 @@ internal sealed class JsRegex
                     return true;
                 }
                 if (sticky) return false;
-                at += _re._unicode && at + 1 < len && char.IsHighSurrogate(_s[at]) && char.IsLowSurrogate(_s[at + 1]) ? 2 : 1;
+                // no position inside the run the leading loop consumed can begin a match either
+                if (_leadEnd > at) at = _leadEnd;
+                else at += re._unicode && at + 1 < len && char.IsHighSurrogate(s[at]) && char.IsLowSurrogate(s[at + 1]) ? 2 : 1;
             }
             return false;
+        }
+
+        /// <summary>The first position at or after <paramref name="at"/> where a match can begin (a superset), or -1.</summary>
+        private int NextStart(int at)
+        {
+            var re = _re;
+            var span = _s.AsSpan(at);
+            int i;
+            if (re._prefix is { } p) i = p.Length == 1 ? span.IndexOf(p[0]) : span.IndexOf(p.AsSpan());
+            else if (re._firstValues is { } v) i = re._firstExcept ? span.IndexOfAnyExcept(v) : span.IndexOfAny(v);
+            else return ScanFirstSet(at);
+            return i < 0 ? -1 : at + i;
+        }
+
+        private int ScanFirstSet(int at)
+        {
+            var s = _s;
+            var set = _re._firstSet!;
+            bool unicode = _re._unicode;
+            for (int i = at; i < s.Length; i++)
+            {
+                int c = s[i];
+                if (unicode && (uint)(c - 0xD800) <= 0x7FF)
+                {
+                    if (c <= 0xDBFF && i + 1 < s.Length && char.IsLowSurrogate(s[i + 1])) c = char.ConvertToUtf32((char)c, s[i + 1]);
+                    else if (c >= 0xDC00 && i > at && char.IsHighSurrogate(s[i - 1])) continue;   // inside a pair
+                }
+                if (set.Contains(c)) return i;
+            }
+            return -1;
         }
 
         private void SetCap(int slot, int v)
@@ -388,8 +832,6 @@ internal sealed class JsRegex
             _choices[_choiceCount++] = new Choice { Kind = kind, Pc = pc, Pos = pos, Undo = _undoCount, Count = count, LoopPc = loopPc };
         }
 
-        private static bool IsLineTerminator(int c) => c is 10 or 13 or 0x2028 or 0x2029;
-
         /// <summary>Reads the character at pos (forward) or before pos (backward). Returns the width, 0 at the edge.</summary>
         private int Read(int pos, bool back, out int c)
         {
@@ -420,24 +862,7 @@ internal sealed class JsRegex
             if (e < 0 || e >= _s.Length) return false;
             char c = _s[e];
             if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_') return true;
-            return unicodeIgnoreCase && (c == 'ſ' || c == 'K');
-        }
-
-        /// <summary>Matches one character with a simple-loop / single-char matcher description.</summary>
-        private bool MatchOne(int kind, int arg, int flags, int c)
-        {
-            switch (kind)
-            {
-                case 0: return c == arg;
-                case 1: return RegexCase.Canon(c, _re._unicode) == arg;
-                case 2: return arg != 0 || !IsLineTerminator(c);
-                default:
-                {
-                    var set = _re._sets[arg];
-                    bool hit = (flags & 1) != 0 ? set.Contains(RegexCase.Canon(c, _re._unicode)) : set.Contains(c);
-                    return hit != ((flags & 2) != 0);
-                }
-            }
+            return unicodeIgnoreCase && (c == 'ſ' || c == 'K');   // long s, Kelvin sign
         }
 
         private void Step()
@@ -449,10 +874,24 @@ internal sealed class JsRegex
             }
         }
 
+        /// <summary><paramref name="n"/> steps at once: the same ticks as as many <see cref="Step"/> calls.</summary>
+        private void Steps(int n)
+        {
+            _steps += n;
+            while (_steps >= 4096)
+            {
+                _steps -= 4096;
+                _tick?.Invoke();
+            }
+        }
+
         /// <summary>Runs from <paramref name="pc"/> at <paramref name="pos"/>; returns the end position or -1.</summary>
         private int Run(int pc, int pos)
         {
-            var code = _re._code;
+            var re = _re;
+            var code = re._code;
+            var s = _s;
+            bool unicode = re._unicode;
             int baseChoice = _choiceCount;
             while (true)
             {
@@ -464,12 +903,26 @@ internal sealed class JsRegex
                     case OpMatch:
                         return pos;
                     case OpChar:
+                    {
+                        int want = code[pc + 1];
+                        if (!back && (uint)(want - 0xD800) > 0x7FF && want <= 0xFFFF)
+                        {
+                            // a BMP character that is not a surrogate is one code unit in either mode
+                            if (pos >= s.Length || s[pos] != want) goto Fail;
+                            pos++;
+                            pc += 2;
+                            continue;
+                        }
+                        int w = Read(pos, back, out int c);
+                        if (w == 0 || c != want) goto Fail;
+                        pos += back ? -w : w;
+                        pc += 2;
+                        continue;
+                    }
                     case OpCharI:
                     {
                         int w = Read(pos, back, out int c);
-                        if (w == 0) goto Fail;
-                        if ((op & 0xFF) == OpCharI) c = RegexCase.Canon(c, _re._unicode);
-                        if (c != code[pc + 1]) goto Fail;
+                        if (w == 0 || RegexCase.Canon(c, unicode) != code[pc + 1]) goto Fail;
                         pos += back ? -w : w;
                         pc += 2;
                         continue;
@@ -484,8 +937,17 @@ internal sealed class JsRegex
                     }
                     case OpSet:
                     {
+                        int flags = code[pc + 2];
+                        if (!back && (flags & 1) == 0 && pos < s.Length && (!unicode || (uint)(s[pos] - 0xD800) > 0x7FF))
+                        {
+                            // one code unit, no case folding
+                            if (re._sets[code[pc + 1]].Contains(s[pos]) == ((flags & 2) != 0)) goto Fail;
+                            pos++;
+                            pc += 3;
+                            continue;
+                        }
                         int w = Read(pos, back, out int c);
-                        if (w == 0 || !MatchOne(3, code[pc + 1], code[pc + 2], c)) goto Fail;
+                        if (w == 0 || !re.MatchOne(3, code[pc + 1], flags, c)) goto Fail;
                         pos += back ? -w : w;
                         pc += 3;
                         continue;
@@ -518,11 +980,11 @@ internal sealed class JsRegex
                         pc += 3;
                         continue;
                     case OpBol:
-                        if (!(pos == 0 || (code[pc + 1] != 0 && IsLineTerminator(_s[pos - 1])))) goto Fail;
+                        if (!(pos == 0 || (code[pc + 1] != 0 && IsLineTerminator(s[pos - 1])))) goto Fail;
                         pc += 2;
                         continue;
                     case OpEol:
-                        if (!(pos == _s.Length || (code[pc + 1] != 0 && IsLineTerminator(_s[pos])))) goto Fail;
+                        if (!(pos == s.Length || (code[pc + 1] != 0 && IsLineTerminator(s[pos])))) goto Fail;
                         pc += 2;
                         continue;
                     case OpWordB:
@@ -549,7 +1011,7 @@ internal sealed class JsRegex
                         int len = ge - gs;
                         if (!back)
                         {
-                            if (pos + len > _s.Length || !SubstringEquals(gs, pos, len, ic)) goto Fail;
+                            if (pos + len > s.Length || !SubstringEquals(gs, pos, len, ic)) goto Fail;
                             pos += len;
                         }
                         else
@@ -613,12 +1075,39 @@ internal sealed class JsRegex
                         int kind = code[pc + 1], arg = code[pc + 2], flags = code[pc + 3];
                         int min = code[pc + 4], max = code[pc + 5];
                         bool greedy = code[pc + 6] != 0;
-                        int next = pc + 7;
+                        int next = pc + 9;
                         int count = 0;
+                        if (!back && kind == 3 && (flags & 1) == 0)
+                        {
+                            // forward class without case folding: a tight loop over code units (a surrogate stops it in
+                            // Unicode mode, and the general loop below goes on from there)
+                            var set = re._sets[arg];
+                            bool negate = (flags & 2) != 0;
+                            int limit = greedy ? (max == -1 ? int.MaxValue : max) : min;
+                            int end = (int)Math.Min((long)pos + limit, s.Length);
+                            while (pos < end)
+                            {
+                                if (count == 16 && re._loopStops?[arg] is { } stops)
+                                {
+                                    // a long run: find its end with a vectorised search (see AnalyseLoops)
+                                    var span = s.AsSpan(pos, end - pos);
+                                    int i = negate ? span.IndexOfAny(stops) : span.IndexOfAnyExcept(stops);
+                                    int n = i < 0 ? span.Length : i;
+                                    pos += n;
+                                    count += n;
+                                    break;
+                                }
+                                int c = s[pos];
+                                if ((unicode && (uint)(c - 0xD800) <= 0x7FF) || set.Contains(c) == negate) break;
+                                pos++;
+                                count++;
+                            }
+                            Steps(count);
+                        }
                         while (count < min)
                         {
                             int w = Read(pos, back, out int c);
-                            if (w == 0 || !MatchOne(kind, arg, flags, c)) goto Fail;
+                            if (w == 0 || !re.MatchOne(kind, arg, flags, c)) goto Fail;
                             pos += back ? -w : w;
                             count++;
                             Step();
@@ -628,14 +1117,33 @@ internal sealed class JsRegex
                             while (max == -1 || count < max)
                             {
                                 int w = Read(pos, back, out int c);
-                                if (w == 0 || !MatchOne(kind, arg, flags, c)) break;
+                                if (w == 0 || !re.MatchOne(kind, arg, flags, c)) break;
                                 pos += back ? -w : w;
                                 count++;
                                 Step();
                             }
-                            if (count > min) PushChoice(1, next, pos, count - min, pc);
+                            if (pc == re._leadLoop) _leadEnd = pos;
+                            // an atomic loop (see AnalyseLoops) has no use for the characters it could give back
+                            if (count > min && code[pc + 8] == 0) PushChoice(1, next, pos, count - min, pc);
                         }
-                        else if (max == -1 || count < max) PushChoice(2, next, pos, count, pc);
+                        else
+                        {
+                            int follow = code[pc + 7];
+                            if (follow >= 0)
+                            {
+                                // the continuation starts with `follow`: take characters until it is next (forward loops only)
+                                while (pos >= s.Length || s[pos] != follow)
+                                {
+                                    if (max != -1 && count >= max) goto Fail;
+                                    int w = Read(pos, false, out int c);
+                                    if (w == 0 || !re.MatchOne(kind, arg, flags, c)) goto Fail;
+                                    pos += w;
+                                    count++;
+                                    Step();
+                                }
+                            }
+                            if (max == -1 || count < max) PushChoice(2, next, pos, count, pc);
+                        }
                         pc = next;
                         continue;
                     }
@@ -660,24 +1168,48 @@ internal sealed class JsRegex
                     }
                     int lop = code[ch.LoopPc];
                     bool lback = (lop & Back) != 0;
+                    int follow = code[ch.LoopPc + 7];
                     if (ch.Kind == 1)
                     {
-                        // give back one character
-                        int w = Read(ch.Pos, !lback, out _);
-                        ch.Pos += lback ? w : -w;
+                        // give back one character; with a known follow character, go on to the first position that has it
+                        bool resume;
+                        while (true)
+                        {
+                            int w = Read(ch.Pos, !lback, out _);
+                            ch.Pos += lback ? w : -w;
+                            bool last = --ch.Count == 0;
+                            resume = follow < 0 || s[ch.Pos] == follow;
+                            if (last) _choiceCount--;
+                            if (resume || last) break;
+                            Step();
+                        }
+                        if (!resume) continue;
                         pos = ch.Pos;
                         pc = ch.Pc;
-                        if (--ch.Count == 0) _choiceCount--;
                         break;
                     }
                     else
                     {
-                        // lazy: take one more character
+                        // lazy: take one more character (and, with a follow character, up to the next position that has it)
                         int kind = code[ch.LoopPc + 1], arg = code[ch.LoopPc + 2], flags = code[ch.LoopPc + 3], max = code[ch.LoopPc + 5];
                         int w = Read(ch.Pos, lback, out int c);
-                        if (w == 0 || !MatchOne(kind, arg, flags, c)) { _choiceCount--; continue; }
+                        if (w == 0 || !re.MatchOne(kind, arg, flags, c)) { _choiceCount--; continue; }
                         ch.Pos += lback ? -w : w;
                         ch.Count++;
+                        if (follow >= 0)
+                        {
+                            bool dead = false;
+                            while (ch.Pos >= s.Length || s[ch.Pos] != follow)
+                            {
+                                if (max != -1 && ch.Count >= max) { dead = true; break; }
+                                w = Read(ch.Pos, false, out c);
+                                if (w == 0 || !re.MatchOne(kind, arg, flags, c)) { dead = true; break; }
+                                ch.Pos += w;
+                                ch.Count++;
+                                Step();
+                            }
+                            if (dead) { _choiceCount--; continue; }
+                        }
                         pos = ch.Pos;
                         pc = ch.Pc;
                         if (max != -1 && ch.Count >= max) _choiceCount--;

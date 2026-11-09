@@ -226,6 +226,25 @@ internal static class RegExpBuiltins
             if (a.This.IsNotObject) throw JsErrors.TypeError(realm, "RegExp.prototype[@@match] called on non-object");
             var rx = a.This.AsObjectUnchecked;
             var s = Operations.ToString(realm, a[0]);
+            if (rx is JsRegExp pre && pre.Global && IsRegExpPristine(realm, pre))
+            {
+                // unmodified global regexp: the same matches and lastIndex writes, without the flags accessors and the
+                // intermediate exec result arrays (as FastReplace)
+                pre.SetOrThrow("lastIndex", JsValue.Zero);
+                var found = realm.NewArray();
+                while (true)
+                {
+                    var m = ExecMatch(realm, pre, s);
+                    if (m == null) return found.Length == 0 ? JsValue.Null : JsValue.FromObject(found);
+                    found.Push(new JsValue(m.Value));
+                    if (m.Length == 0)
+                    {
+                        long li = Operations.ToLength(realm, pre.GetLastIndex());
+                        pre.SetOrThrow("lastIndex", new JsValue(AdvanceIndex(s, li, pre.Unicode)));
+                    }
+                    realm.Vm.Tick();
+                }
+            }
             var flags = Operations.ToString(realm, rx.Get("flags"));
             if (!flags.Contains('g')) return RegExpExec(realm, a.This, s);
             bool fullUnicode = flags.Contains('u') || flags.Contains('v');
@@ -405,9 +424,11 @@ internal static class RegExpBuiltins
             {
                 throw JsErrors.SyntaxError(realm, $"Invalid regular expression: /{pattern}/{flags}: {pe.Description}");
             }
-            // property escapes go to the native engine: its Unicode tables match the ECMAScript version (17.0)
-            // the native engine handles what the .NET adaptation would get subtly wrong: Unicode 17 property escapes,
-            // capture resets inside quantified groups, duplicate / escaped group names
+            // every pattern the native engine compiles runs on it: it is exact ECMAScript (Unicode 17 property escapes,
+            // capture resets inside quantified groups, duplicate group names, Canonicalize), charges the execution
+            // budget as it goes, and with its start-position scan and simple loops it is faster than the .NET
+            // interpreter that NativeAOT uses. The .NET program is kept only for a pattern the native engine rejects
+            // (nesting too deep), which Acornima's adaptation still accepts.
             JsRegex? preparsed = null;
             bool forceNative = false;
             if (result.Success && result.Regex != null)
@@ -415,12 +436,7 @@ internal static class RegExpBuiltins
                 try
                 {
                     preparsed = JsRegex.Compile(pattern, flags);
-                    forceNative = preparsed.RequiresNative;
-                    // ignore-case without u/v: non-ASCII pattern text or named groups always use the native engine
-                    if (flags.Contains('i') && !flags.Contains('u') && !flags.Contains('v')
-                        && (pattern.AsSpan().ContainsAnyExceptInRange((char)0, (char)127) || pattern.Contains("(?<", StringComparison.Ordinal)
-                            || MayDenoteNonAscii(pattern)))
-                        forceNative = true;
+                    forceNative = true;
                 }
                 catch (RegexSyntaxException) { preparsed = null; }
             }
@@ -439,25 +455,8 @@ internal static class RegExpBuiltins
                 int maxNum = 0;
                 foreach (var gn in regex.GetGroupNumbers()) if (gn > maxNum) maxNum = gn;
                 entry = new RegExpProgram { Regex = regex, Groups = Math.Max(0, result.ActualRegexGroupCount - 1), Names = names.ToArray(), NameGroups = nameGroups.ToArray(), DotnetMaxGroup = maxNum };
-                if (preparsed != null && preparsed.CaptureCount - 1 == entry.Groups)
-                {
-                    // Acornima's adaptation wraps every named group in an unnamed one, so .NET group g is JS group g
-                    // (source order, like the native engine); the named group itself gets a further .NET number
-                    var map = new int[preparsed.CaptureCount];
-                    bool ok = true;
-                    for (int g = 1; g < map.Length && ok; g++)
-                    {
-                        var n = preparsed.GroupNames[g];
-                        if (n == null) continue;
-                        map[g] = regex.GroupNumberFromName(n);
-                        ok = map[g] > 0;
-                    }
-                    if (ok) { entry.SliceFallback = preparsed; entry.SliceFallbackGroups = map; }
-                }
-                if (entry.SliceFallback == null)
-                    entry.Regex = new SysRegex(regex.ToString(), regex.Options, s_longMatchTimeout);
-                if (flags.Contains('i') && !flags.Contains('u') && !flags.Contains('v') && preparsed != null && names.Count == 0)
-                    entry.NativeIgnoreCase = preparsed;
+                // the native engine could not compile it, so there is no budgeted fallback for a long match
+                entry.Regex = new SysRegex(regex.ToString(), regex.Options, s_longMatchTimeout);
             }
             else
             {
@@ -542,19 +541,11 @@ internal static class RegExpBuiltins
 
     private static readonly RegexMatch s_noMatch = new();
 
-    /// <summary>Escapes that can denote non-ASCII characters (\u, \x, legacy octal) — ASCII-only text otherwise.</summary>
-    private static bool MayDenoteNonAscii(string pattern)
-    {
-        for (int i = 0; i + 1 < pattern.Length; i++)
-        {
-            if (pattern[i] != '\\') continue;
-            char c = pattern[++i];
-            if (c is 'u' or 'x' || (c >= '0' && c <= '9')) return true;
-        }
-        return false;
-    }
-
-    private static RegexMatch SafeMatch(Realm realm, RegExpProgram re, string s, int start)
+    /// <summary>
+    /// The first match at or after <paramref name="start"/>. With <paramref name="sticky"/>, the native engine only tries
+    /// <paramref name="start"/> (the .NET backend may return a later match: callers check the index).
+    /// </summary>
+    private static RegexMatch SafeMatch(Realm realm, RegExpProgram re, string s, int start, bool sticky = false)
     {
         realm.Vm.Tick(Math.Max(1, (s.Length - start) / 256));
         var native = re.Native;
@@ -562,13 +553,11 @@ internal static class RegExpBuiltins
             native = re.NativeIgnoreCase;
         if (native != null)
         {
-            // the stacks are taken for the duration of the search; if it ends by throwing, the next one allocates new ones
-            var stacks = realm.RegexStacks;
-            realm.RegexStacks = null;
-            var m = new JsRegex.Matcher(native, s, realm.RegexTick ??= () => realm.Vm.Tick(64), stacks ??= new JsRegex.MatcherStacks());
-            bool found = m.Search(start, sticky: false);
-            if (m.TryReturnStacks(stacks)) realm.RegexStacks = stacks;
-            return found ? new RegexMatch { Success = true, Caps = m.Caps, Input = s } : s_noMatch;
+            var m = TakeMatcher(realm, native, s);
+            bool found = m.Search(start, sticky);
+            var result = found ? new RegexMatch { Success = true, Caps = m.CopyCaps(), Input = s } : s_noMatch;
+            ReturnMatcher(realm, m);
+            return result;
         }
         try
         {
@@ -583,6 +572,32 @@ internal static class RegExpBuiltins
         {
             return AfterSliceTimeout(realm, re, s, start);
         }
+    }
+
+    /// <summary>
+    /// The realm's native matcher, taken for the duration of a search (a search that ends by throwing leaves the realm
+    /// without one, and the next search allocates a new one).
+    /// </summary>
+    private static JsRegex.Matcher TakeMatcher(Realm realm, JsRegex native, string s)
+    {
+        var m = realm.RegexMatcher;
+        if (m == null) return NewMatcher(realm, native, s);
+        realm.RegexMatcher = null;
+        m.Reset(native, s);
+        return m;
+    }
+
+    // separate, so the closure over the realm is only allocated here
+    private static JsRegex.Matcher NewMatcher(Realm realm, JsRegex native, string s) =>
+        new(native, s, realm.RegexTick ??= () => realm.Vm.Tick(64));
+
+    /// <summary><paramref name="i"/>, or i - 1 when i is the low half of a surrogate pair.</summary>
+    private static int PairStart(string s, int i) =>
+        i > 0 && i < s.Length && char.IsLowSurrogate(s[i]) && char.IsHighSurrogate(s[i - 1]) ? i - 1 : i;
+
+    private static void ReturnMatcher(Realm realm, JsRegex.Matcher m)
+    {
+        if (m.Release()) realm.RegexMatcher = m;
     }
 
     /// <summary>
@@ -800,8 +815,10 @@ internal static class RegExpBuiltins
                 re.SetOrThrow("lastIndex", JsValue.Zero);
                 return null;
             }
+            // with u/v, a lastIndex inside a surrogate pair starts at the pair (as V8 does), sticky included
+            if (re.Unicode) lastIndex = PairStart(s, (int)lastIndex);
         }
-        var m = SafeMatch(realm, re.Program, s, (int)lastIndex);
+        var m = SafeMatch(realm, re.Program, s, (int)lastIndex, sticky);
         if (!m.Success || (sticky && m.Index != lastIndex))
         {
             if (global || sticky) re.SetOrThrow("lastIndex", JsValue.Zero);
@@ -827,7 +844,8 @@ internal static class RegExpBuiltins
         var liv = re.GetLastIndex();
         var p = re.Program;
         // anything else, including an object lastIndex whose conversion could run code, takes the general path
-        if (p.Regex == null || p.Native != null || !liv.IsNumber || (p.Groups > 0 && realm.LegacyCapturesRead))
+        var native = p.Native;
+        if ((p.Regex == null && native == null) || !liv.IsNumber || (p.Groups > 0 && realm.LegacyCapturesRead))
             return ExecMatch(realm, re, s) != null;
         bool global = p.Global, sticky = p.Sticky;
         int start = 0;
@@ -839,16 +857,24 @@ internal static class RegExpBuiltins
                 re.SetOrThrow("lastIndex", JsValue.Zero);
                 return false;
             }
-            start = (int)lastIndex;
+            start = p.Unicode ? PairStart(s, (int)lastIndex) : (int)lastIndex;
         }
         if (p.NativeIgnoreCase != null && s.AsSpan(start).ContainsAnyExceptInRange((char)0, (char)127))
             return ExecMatch(realm, re, s) != null;
         realm.Vm.Tick(Math.Max(1, (s.Length - start) / 256));
         int index, length;
         RegexMatch? full = null;
-        try
+        if (native != null)
         {
-            if (!Bounds(p.Regex, s, start, out index, out length)) index = -1;
+            var m = TakeMatcher(realm, native, s);
+            bool found = m.Search(start, sticky);
+            index = found ? m.Caps[0] : -1;
+            length = found ? m.Caps[1] - m.Caps[0] : 0;
+            ReturnMatcher(realm, m);
+        }
+        else try
+        {
+            if (!Bounds(p.Regex!, s, start, out index, out length)) index = -1;
         }
         catch (System.Text.RegularExpressions.RegexMatchTimeoutException)
         {
@@ -1103,12 +1129,12 @@ internal static class RegExpBuiltins
     {
         bool global = re.Global, fullUnicode = re.Unicode;
         if (global) re.SetOrThrow("lastIndex", JsValue.Zero);
-        var matches = new List<RegexMatch>();
+        List<RegexMatch>? matches = null;
         while (true)
         {
             var m = ExecMatch(realm, re, s);
             if (m == null) break;
-            matches.Add(m);
+            (matches ??= new List<RegexMatch>()).Add(m);
             if (!global) break;
             if (m.Length == 0)
             {
@@ -1117,9 +1143,10 @@ internal static class RegExpBuiltins
             }
             realm.Vm.Tick();
         }
-        if (matches.Count == 0) return new JsValue(s);
+        if (matches == null) return new JsValue(s);
         bool plain = !functional && replaceStr.IndexOf('$') < 0;
-        var sb = new StringBuilder();
+        if (plain) return new JsValue(PlainReplace(realm, s, matches, replaceStr));
+        var sb = new StringBuilder(s.Length + 16);
         int charged = 0;
         int nextSourcePosition = 0;
         foreach (var m in matches)
@@ -1127,8 +1154,6 @@ internal static class RegExpBuiltins
             int position = m.Index;
             var matched = m.Value;
             string replacement;
-            if (plain) replacement = replaceStr;
-            else
             {
                 var captures = new JsValue[re.GroupCount];
                 for (int g = 1; g <= re.GroupCount; g++) captures[g - 1] = m.Group(g);
@@ -1168,6 +1193,42 @@ internal static class RegExpBuiltins
         if (nextSourcePosition < s.Length) sb.Append(s, nextSourcePosition, s.Length - nextSourcePosition);
         realm.ChargeOutput(sb.Length - charged);
         return new JsValue(sb.ToString());
+    }
+
+    /// <summary>
+    /// The result of replacing <paramref name="matches"/> with a string that has no <c>$</c>: its length is known, so it is
+    /// built in place. The same length check (on the text up to the last replacement) and the same total charge as the
+    /// general loop, made before the string is allocated.
+    /// </summary>
+    private static string PlainReplace(Realm realm, string s, List<RegexMatch> matches, string replaceStr)
+    {
+        long built = 0;
+        int next = 0;
+        foreach (var m in matches)
+        {
+            if (m.Index < next) continue;
+            built += m.Index - next + replaceStr.Length;
+            next = m.Index + m.Length;
+        }
+        if (built > realm.MaxStringLength) throw JsErrors.RangeError(realm, "Invalid string length");
+        long total = built + (s.Length - next);
+        if (total > int.MaxValue) throw JsErrors.RangeError(realm, "Invalid string length");
+        realm.ChargeOutput(total);
+        return string.Create((int)total, (s, matches, replaceStr), static (span, st) =>
+        {
+            var (src, ms, rep) = st;
+            int at = 0, from = 0;
+            foreach (var m in ms)
+            {
+                if (m.Index < from) continue;
+                src.AsSpan(from, m.Index - from).CopyTo(span[at..]);
+                at += m.Index - from;
+                rep.AsSpan().CopyTo(span[at..]);
+                at += rep.Length;
+                from = m.Index + m.Length;
+            }
+            src.AsSpan(from).CopyTo(span[at..]);
+        });
     }
 
     public static string GetSubstitution(string matched, string str, int position, JsValue[] captures, JsValue namedCaptures, string replacement, Realm realm)
