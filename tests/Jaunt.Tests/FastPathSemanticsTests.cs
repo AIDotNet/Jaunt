@@ -2925,6 +2925,8 @@ T('bigints', () => { const a = 6n, b = 3n; return String([a & b, a | b, a ^ b, a
 T('crcLike', () => { let c = 0xffffffff; for (let i = 0; i < 300; i++) { c ^= (i * 37) & 255; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; } return [(c ^ 0xffffffff) >>> 0, c, c | 0]; });
 T('nqueens', () => { function solve(n, row, cols, d1, d2) { if (row === n) return 1; let count = 0, avail = ~(cols | d1 | d2) & ((1 << n) - 1); while (avail) { const bit = avail & -avail; avail ^= bit; count += solve(n, row + 1, cols | bit, ((d1 | bit) << 1) & ((1 << n) - 1), (d2 | bit) >> 1); } return count; } return [solve(6, 0, 0, 0, 0), solve(8, 0, 0, 0, 0)]; });
 
+T('computedKeys', () => { const f = new Float64Array(4), g = new Float32Array([NaN, -0, 1.5]), a = [1, 2, 3], o = {}; const r = []; for (let i = 0; i < 3; i++) { f[i * 1 + 1] += i + 0.5; a[i - 0] += 10; } const ks = [-0, 0.5, 2 ** 32 - 1, 2 ** 32, -1, NaN, 1e21, 3]; for (const k of ks) { o[k + 0] = 1; a[k * 1] = 'v'; r.push(f[k * 1], a[k * 1]); } r.push(Array.from(f), Object.is(g[1] * 1, -0), g[0] !== g[0], g[2], Object.keys(o).sort(), a.length); return r; });
+
 // ---- loops: tests at the bottom
 T('forCounts', () => { let tests = 0; const t = i => (tests++, i < 3); const r = []; for (let i = 0; t(i); i++) r.push(i); for (let i = 5; t(i); i++) r.push('never'); return [r, tests]; });
 T('forImmAndReg', () => { const r = []; const n = 4, nan = NaN, u = undefined; for (let i = 0; i < 4; i++) r.push(i); for (let i = 4; i <= n; i++) r.push('le' + i); for (let i = 3; i > 1; i--) r.push('gt' + i); for (let i = 3; i >= 3; i--) r.push('ge' + i);
@@ -2960,6 +2962,7 @@ bigintMix = "TypeError"
 bigints = "2,7,5,48,3,-3"
 crcLike = [4192622097,102345198,102345198]
 nqueens = [4,92]
+computedKeys = [0,"v",null,"v",null,"v",null,"v",null,"v",null,"v",null,"v",2.5,"v",[0,0.5,1.5,2.5],true,true,1.5,["-1","0","0.5","1e+21","3","4294967295","4294967296","NaN"],4]
 forCounts = [[0,1,2],5]
 forImmAndReg = [0,1,2,3,"le4","gt3","gt2","ge3","notge0","notge1","notge2","notge3",0.5,1,1.5,"f0","f1","f2","a","aa","0","1","2","m0","m1","m2","neg2","neg1","neg0",-3,-2]
 loopValueOf = ["v0",0,"v1",1,"v2",2,"v3","v3","w5","v3","w4","v3","w3","v3"]

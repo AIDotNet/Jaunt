@@ -88,6 +88,9 @@ public readonly struct JsValue : IEquatable<JsValue>
         else slot = new JsValue(number);
     }
 
+    /// <summary>The NaN that numbers hold (<see cref="NaN"/>), as a double.</summary>
+    internal static double CanonicalNaN => BitConverter.Int64BitsToDouble(0x7FF8_0000_0000_0000);
+
     /// <summary>The layout of <see cref="JsValue"/> with the payload typed as a double, for <see cref="StoreNumber"/>.</summary>
     private struct NumberSlot
     {

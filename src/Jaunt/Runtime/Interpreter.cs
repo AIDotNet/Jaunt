@@ -593,7 +593,9 @@ internal sealed partial class Vm
                         {
                             // strings, symbols and array-index numbers are already keys (see Operations.ToPropertyKeyValue)
                             ref readonly var a = ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 2));
-                            if (a.IsString || a.IsSymbol || (a.IsNumber && Operations.IsArrayIndexNumber(a.Num))) Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = a;
+                            // an index is copied through a floating-point register, as the GetElem or SetElem after it reads it (JsValue.LoadNumber)
+                            if (a.IsNumber && Operations.IsArrayIndexNumber(JsValue.LoadNumber(a))) JsValue.StoreNumber(ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)), JsValue.LoadNumber(a));
+                            else if (a.IsString || a.IsSymbol) Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = a;
                             else { f.Pc = PcAt(ref code0, ref ip) + 1; Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = Operations.ToPropertyKeyValue(Realm, a); }
                             ip = ref Unsafe.Add(ref ip, 3);
                             continue;
@@ -1572,9 +1574,7 @@ internal sealed partial class Vm
     [MethodImpl(MethodImplOptions.NoInlining)]
     private static bool TypedGetFast(JsTypedArray ta, double key, ref JsValue dst)
     {
-        if (!ta.TryGetElementFast(key, out var v)) return false;
-        dst = v;
-        return true;
+        return ta.TryGetElementFast(key, ref dst);
     }
 
     [MethodImpl(MethodImplOptions.NoInlining)]
