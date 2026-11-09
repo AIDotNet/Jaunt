@@ -1340,4 +1340,119 @@ JSON.stringify(out);
             Assert.True(p.Value.ToString() == g.ToString(), $"{p.Name}: expected {p.Value} got {g}");
         }
     }
+
+    private const string RegExpTestPrelude = """
+const o=[];const S=()=>[RegExp.$1,RegExp.$2,RegExp['$+'],RegExp.lastMatch,RegExp['$`'],RegExp["$'"],RegExp.input].join(',');const T=f=>{try{return String(f())}catch(e){return e.name}};
+""";
+
+    private const string RegExpTestSnippets = """
+o.push(/\d+/.test('abc123'), S()); o.push(/z/.test('abc123'), S()); o.push(/(\d)(\d)/.test('abc123'), S()); o.push(/(z)/.test('q'), S());
+o.push(/(a)|(b)/.test('xb'), S(), /(a)|(b)/.test('xa'), S()); o.push(/(a)(b)?/.test('a'), S());
+o.push(/(a)(b)(c)(d)(e)(f)(g)(h)(i)(j)(k)/.test('abcdefghijk'), RegExp.$9, RegExp['$+'], RegExp.lastParen, RegExp.lastMatch);
+o.push(/(?<y>\d{4})-(?<m>\d\d)/.test('on 2024-05!'), S(), RegExp.$3);
+o.push(/(?<a>x)|(?<a>y)/.test('y'), S()); o.push(/(?:(a)|b)+/.test('ab'), S(), RegExp.$1 === '');
+o.push(/(?<=(a))b/.test('zab'), S()); o.push(/(\w)\1/.test('xaab'), S()); o.push(/\p{Nd}+/u.test('x٣'), S()); o.push(/(\p{Nd})/u.test('x٣'), S());
+const g = /(\d)/g; for (let i = 0; i < 5; i++) o.push(g.test('1a2b3'), g.lastIndex, RegExp.$1, RegExp['$`']);
+const g2 = /(\d)/g; o.push(g2.test('1a2'), g2.lastIndex); o.push(g2.test('1a2'), g2.lastIndex); o.push(RegExp.$1, RegExp.$2, RegExp.lastMatch); o.push(g2.test('zz'), g2.lastIndex, S());
+const y = /(b)/y; o.push(y.test('abc'), y.lastIndex, S()); y.lastIndex = 1; o.push(y.test('abc'), y.lastIndex, S()); o.push(y.test('abc'), y.lastIndex, S());
+const y2 = /b/y; y2.lastIndex = 1; o.push(y2.test('abc'), y2.lastIndex, S()); o.push(y2.test('abc'), y2.lastIndex); const gy = /b/gy; gy.lastIndex = 1; o.push(gy.test('abb'), gy.lastIndex, gy.test('abb'), gy.lastIndex, gy.test('abb'), gy.lastIndex);
+const b = /b/g; for (const li of [5, 1.5, -1, NaN, Infinity, '1', null, undefined, true, 2 ** 40]) { b.lastIndex = li; o.push(T(() => b.test('abcb')), b.lastIndex); }
+const c = /a/g; const log = []; c.lastIndex = { valueOf() { log.push('valueOf'); return 2; } }; o.push(c.test('aaaa'), c.lastIndex, log.length); const d = /a/; d.lastIndex = { valueOf() { log.push('nong'); return 9; } }; o.push(d.test('a'), typeof d.lastIndex, log.join());
+const e = /a/g; e.lastIndex = { valueOf() { return Symbol(); } }; o.push(T(() => e.test('a')));  const f = /a/; f.lastIndex = { valueOf() { throw new RangeError('x'); } }; o.push(T(() => f.test('a')));
+const h = /a/g; h.lastIndex = { valueOf() { h.compile('b', 'g'); return 0; } }; o.push(h.test('ab'), h.lastIndex, h.source, S());
+const n = /(a)/; n.lastIndex = { valueOf() { n.compile('(b)'); return 0; } }; o.push(n.test('ab'), n.source, S());
+const u = /(a)/; o.push(u.test('xa')); u.compile('(b)'); o.push(S(), u.test('xa'), u.test('xb'), S());
+const v = /(a)/; v.test('xa'); const w = /(q)/; o.push(w.test('zz'), S(), /(r)/.exec('r')[0], S(), /n/.test('n'), S());
+/(a)/.test('a'); RegExp.input = 'over'; o.push(RegExp.input, RegExp.$_, RegExp.$1, RegExp.lastMatch); /(z)/.test('z'); o.push(RegExp.input, RegExp.$_, RegExp.$1);
+/(a)/.test('a'); RegExp.$_ = 5; o.push(RegExp.input); /b/.test('b'); o.push(RegExp.input, RegExp.$1, RegExp.lastMatch);
+o.push(RegExp.$1, RegExp.lastMatch, RegExp.input, RegExp['$+']); o.push(/()/.test(''), S()); o.push(/(x*)/.test('aa'), S(), RegExp['$`'], RegExp["$'"]);
+/(\d)/.test('a1'); const s1 = RegExp.$1; /(\d)/.test('a2'); const s2 = RegExp.$1; /\d/.test('a3'); const s3 = RegExp.$1; /(x)/.test('zx'); o.push(s1, s2, s3, RegExp.$1, RegExp.lastMatch, RegExp['$`']);
+o.push('a1b2'.replace(/(\d)/g, m => { /(x)/.test('zxz'); return RegExp.$1 + RegExp.lastMatch; }), S()); o.push('a1'.replace(/(\d)/, () => RegExp.$1), S()); o.push(/(q)/.test('q') && 'p1'.split(/(\d)/).length, S());
+o.push(/k/i.test('K'), /K/i.test('k'), /k/i.test('K'), /(k)/i.test('é K'), S(), /é/i.test('É'), S()); const ig = /k/gi; ig.lastIndex = 1; o.push(ig.test('kék'), ig.lastIndex, S());
+const P = RegExp.prototype, orig = P.exec; const r = /a/; const out = () => [r.test('a'), r.test('b')]; o.push(out()); P.exec = function (s) { o.push('patched', s); return orig.call(this, s); }; o.push(out(), S()); P.exec = function () { return null; }; o.push(out()); P.exec = function () { return { 0: 'x' }; }; o.push(out()); P.exec = function () { return 1; }; o.push(T(() => r.test('a'))); P.exec = function () { return undefined; }; o.push(T(() => r.test('a'))); P.exec = 5; o.push(out()); P.exec = null; o.push(out()); P.exec = orig; o.push(out());
+const P2 = RegExp.prototype, orig2 = P2.exec, desc = Object.getOwnPropertyDescriptor(P2, 'exec'); const r2 = /(a)/g; Object.defineProperty(P2, 'exec', { get() { o.push('get'); return orig2; }, configurable: true }); o.push(r2.test('a'), r2.lastIndex, RegExp.$1); Object.defineProperty(P2, 'exec', desc); o.push(r2.test('a'), r2.lastIndex); delete P2.exec; o.push(/(b)/.test('b'), S(), T(() => /b/.exec)); Object.defineProperty(P2, 'exec', desc); o.push(/c/.test('c'), S());
+const P3 = RegExp.prototype, orig3 = P3.exec; delete P3.exec; P3.zzz = 1; P3.exec = orig3; o.push(/(b)/.test('b'), S()); P3.exec = function () { return null; }; o.push(/(b)/.test('b')); delete P3.zzz; o.push(/(c)/.test('c')); P3.exec = orig3; o.push(/(d)/.test('d'), S());
+const i1 = /a/; i1.exec = function () { o.push('own'); return null; }; o.push(i1.test('a'), /a/.test('a')); const i2 = /a/; i2.extra = 1; o.push(i2.test('a'), i2.extra, S()); const i3 = /a/; Object.defineProperty(i3, 'exec', { get() { o.push('ga'); return () => ({}); } }); o.push(i3.test('z'));
+const q1 = /a/; Object.setPrototypeOf(q1, null); o.push(T(() => RegExp.prototype.test.call(q1, 'a')));
+const q2 = /a/; Object.setPrototypeOf(q2, { exec() { return null; } }); o.push(RegExp.prototype.test.call(q2, 'a')); const q3 = /a/; Object.setPrototypeOf(q3, Object.create(RegExp.prototype)); o.push(q3.test('a'), S());
+class A extends RegExp {} const a = new A('b(c)', 'g'); o.push(a.test('xbc'), a.lastIndex, a.test('xbc'), a.lastIndex, a instanceof A);
+class B extends RegExp { exec(s) { o.push('B.exec', s); return super.exec(s); } } const bb = new B('(z)'); o.push(bb.test('z'), bb.test('y'));
+class C extends RegExp { get lastIndex() { return 1; } } const cc = new C('b', 'g'); o.push(cc.test('ab'), cc.lastIndex);
+class D extends RegExp { exec() { return null; } } const dd = new D('a'); Object.setPrototypeOf(dd, RegExp.prototype); o.push(dd.test('a'), dd.lastIndex);
+const T1 = RegExp.prototype.test; o.push(T(() => T1.call(1, 'a')), T(() => T1.call({}, 'a')), T(() => T1.call(Object.create(RegExp.prototype), 'a')), T1.call({ exec() { return {}; } }, 'a'), T1.call({ exec() { return null; } }, 'a'), T(() => T1.call({ exec: 1 }, 'a')));
+o.push(/undefined/.test(), /null/.test(null), /1/.test(1), /x/.test({ toString() { return 'x'; } }), T(() => /x/.test(Symbol()))); const log2 = []; const r3 = /a/g; r3.lastIndex = { valueOf() { log2.push('li'); return 0; } }; r3.test({ toString() { log2.push('str'); return 'a'; } }); o.push(log2.join());
+const fz = Object.freeze(/a/); o.push(fz.test('a'), fz.test('b'), S()); const fg = Object.freeze(/a/g); o.push(T(() => fg.test('a')), fg.lastIndex, T(() => fg.test('b')), S()); const fy = Object.freeze(/a/y); o.push(T(() => fy.test('a')), T(() => fy.test('b'))); o.push(/a/g.test('a'), Object.isFrozen(/a/));
+const ro = /(a)/g; Object.defineProperty(ro, 'lastIndex', { writable: false, value: 0 }); o.push(T(() => ro.test('xa')), ro.lastIndex, T(() => ro.test('b')), ro.lastIndex); const ro2 = /(a)/g; Object.defineProperty(ro2, 'lastIndex', { writable: false, value: 9 }); o.push(T(() => ro2.test('a')), ro2.lastIndex); const pe = Object.preventExtensions(/a/g); o.push(pe.test('a'), pe.lastIndex); const se = Object.seal(/a/y); o.push(se.test('a'), se.lastIndex);
+function lit() { return /a/g; } const l1 = lit(), l2 = lit(); o.push(l1 === l2, l1.test('a'), l1.lastIndex, l2.lastIndex, Object.getOwnPropertyNames(l1), JSON.stringify(Object.getOwnPropertyDescriptor(l2, 'lastIndex'))); l1.a = 1; l1.b = 2; l1.c = 3; l1.d = 4; l1.e = 5; o.push(Object.keys(l1), l1.e, l1.lastIndex, Object.keys(l2), Object.getOwnPropertyNames(lit()));
+const fr = []; for (let i = 0; i < 3; i++) { const x = /a/g; if (i === 1) Object.freeze(x); fr.push(Object.isFrozen(x), T(() => x.test('a')), x.lastIndex); } o.push(fr); const nr = new RegExp('a', 'g'); nr.z = 1; o.push(Object.getOwnPropertyNames(nr), new RegExp('b').lastIndex, Object.getOwnPropertyNames(new RegExp(/c/g)), delete nr.z, T(() => delete nr.lastIndex), RegExp('a') instanceof RegExp);
+function NT() {} NT.prototype = Object.create(RegExp.prototype); const nt = Reflect.construct(RegExp, ['(a)'], NT); o.push(Object.getPrototypeOf(nt) === NT.prototype, nt.test('a'), nt.lastIndex); const rp = Reflect.construct(RegExp, ['a'], RegExp); o.push(rp.test('a'), Object.getOwnPropertyNames(rp));
+const x1 = /b+/.exec('abbc'); o.push(x1.index, x1.input, x1[0], x1.length, x1.groups, S()); const x2 = /b/g; o.push(x2.exec('abb').index, x2.lastIndex, x2.exec('abb').index, x2.exec('abb'), x2.lastIndex); o.push('abcabc'.replace(/b/g, 'X'), 'abc'.replace(/b/, '[$&$`$\']'), 'a1b2'.split(/\d/), 'a,b'.split(/,/, 1), 'abc'.split(/(?:)/), ''.split(/x/), ''.split(/(?:)/), 'aXbX'.match(/X/g), 'aXb'.search(/b/), [...'a1b2'.matchAll(/\d/g)].map(m => m.index), S());
+const dI = /b/d.exec('abc'); o.push(dI.indices[0], /(?<=a)b/.exec('ab').index); const lb = /(?<=a)b/g; lb.lastIndex = 1; o.push(lb.test('ab'), lb.lastIndex, S()); const lc = /(?<!a)b/y; lc.lastIndex = 1; o.push(lc.test('ab'), lc.lastIndex); const hat = /^b/g; hat.lastIndex = 1; o.push(hat.test('ab'), hat.lastIndex); const hm = /^(b)/gm; hm.lastIndex = 1; o.push(hm.test('a\nb'), hm.lastIndex, S()); const wb = /\bb/g; wb.lastIndex = 1; o.push(wb.test('ab'), wb.lastIndex); const em = /(?:)/g; em.lastIndex = 2; o.push(em.test('abc'), em.lastIndex, S()); const us = /./gu; us.lastIndex = 0; o.push(us.test('\u{1F600}'), us.lastIndex, RegExp.lastMatch.length);
+const t = 'x'.repeat(5000) + '7'; o.push(/(\d)/.test(t), RegExp.$1, RegExp['$`'].length, /\d/.test(t), RegExp.lastMatch, RegExp["$'"]); let cnt = 0; for (let i = 0; i < 2000; i++) { if (/(\d)/.test('a' + (i % 10))) cnt += +RegExp.$1; if (/\d/.test('b')) cnt = -1; } o.push(cnt, RegExp.$1);
+let c2 = 0; const P4 = RegExp.prototype, o4 = P4.exec; for (let i = 0; i < 40; i++) { if (i === 20) P4.exec = function () { c2 += 100; return null; }; if (i === 30) P4.exec = o4; if (/a/.test('a')) c2++; } o.push(c2, RegExp.lastMatch);
+const O = Object.getOwnPropertyDescriptor(RegExp, '$1'); o.push(typeof O.get, O.get.call(RegExp) === RegExp.$1); /(a)/.test('a'); o.push(O.get.call(RegExp), Object.getOwnPropertyDescriptor(RegExp.prototype, 'test').value.length);
+""";
+
+    private const string RegExpTestExpected = """
+[true,",,,123,abc,,abc123",false,",,,123,abc,,abc123",true,"1,2,2,12,abc,3,abc123",false,"1,2,2,12,abc,3,abc123"]
+[true,",b,b,b,x,,xb",true,"a,,,a,x,,xa",true,"a,,,a,,,a"]
+[true,"i","k","k","abcdefghijk"]
+[true,"2024,05,05,2024-05,on ,!,on 2024-05!",""]
+[true,",y,y,y,,,y",true,",,,ab,,,ab",true]
+[true,"a,,a,b,za,,zab",true,"a,,a,aa,x,b,xaab",true,",,,٣,x,,x٣",true,"٣,,٣,٣,x,,x٣"]
+[true,1,"1","",true,3,"2","1a",true,5,"3","1a2b",false,0,"3","1a2b",true,1,"1",""]
+[true,1,true,3,"2","","2",false,0,"2,,2,2,1a,,1a2"]
+[false,0,",,,,,,",true,2,"b,,b,b,a,c,abc",false,0,"b,,b,b,a,c,abc"]
+[true,2,",,,b,a,c,abc",false,0,true,2,true,3,false,0]
+["false",0,"true",2,"true",2,"true",2,"false",0,"true",2,"true",2,"true",2,"true",2,"false",0]
+[true,3,1,true,"object","valueOf,nong"]
+["TypeError","RangeError"]
+[true,2,"b",",,,b,a,,ab"]
+[true,"(b)","b,,b,b,a,,ab"]
+[true,"a,,a,a,x,,xa",false,true,"b,,b,b,x,,xb"]
+[false,"a,,a,a,x,,xa","r","r,,r,r,,,r",true,",,,n,,,n"]
+["over","over","a","a","z","z","z"]
+["5","b","","b"]
+["","","","",true,",,,,,,",true,",,,,,aa,aa","","aa"]
+["1","2","","x","x","z"]
+["axxbxx","x,,x,x,z,z,zxz","a1","1,,1,1,a,,a1",3,"1,,1,1,p,,p1"]
+[false,false,true,true,"K,,K,K,é ,,é K",true,",,,É,,,É",true,3,",,,k,ké,,kék"]
+[[true,false],"patched","a","patched","b",[true,false],",,,a,,,a",[false,false],[true,true],"TypeError","TypeError",[true,false],[true,false],[true,false]]
+["get",true,1,"a",false,0,true,"b,,b,b,,,b","undefined",true,",,,c,,,c"]
+[true,"b,,b,b,,,b",false,false,true,"d,,d,d,,,d"]
+["own",false,true,true,1,",,,a,,,a","ga",true]
+["true"]
+[false,true,",,,a,,,a"]
+[true,3,false,0,true]
+["B.exec","z","B.exec","y",true,false]
+[true,2]
+[true,0]
+["TypeError","TypeError","TypeError",true,false,"TypeError"]
+[true,true,true,true,"TypeError","str,li"]
+[true,false,",,,a,,,a","TypeError",0,"TypeError",",,,a,,,a","TypeError","TypeError",true,false]
+["TypeError",0,"TypeError",0,"TypeError",9,true,1,true,1]
+[false,true,1,0,["lastIndex"],"{\"value\":0,\"writable\":true,\"enumerable\":false,\"configurable\":false}",["a","b","c","d","e"],5,1,[],["lastIndex"]]
+[[false,"true",1,true,"TypeError",0,false,"true",1],["lastIndex","z"],0,["lastIndex"],true,"false",true]
+[true,true,0,true,["lastIndex"]]
+[1,"abbc","bb",1,null,",,,bb,a,c,abbc",1,2,2,null,0,"aXcaXc","a[bac]c",["a","b",""],["a"],["a","b","c"],[""],[],["X","X"],2,[1,3],",,,2,a1b,,a1b2"]
+[[1,2],1,true,2,",,,b,a,,ab",false,0,false,0,true,3,"b,,b,b,a\n,,a\nb",false,0,true,2,",,,,ab,c,abc",true,2,2]
+[true,"7",5000,true,"7","",9000,"9"]
+[1030,"a"]
+["function",true,"a",1]
+""";
+
+    /// <summary>Each line runs in a new engine: the first read of a capture changes how <c>test</c> records them.</summary>
+    [Fact]
+    public void RegExpTestAndLegacyStaticsMatchReferenceBehavior()
+    {
+        var snippets = RegExpTestSnippets.ReplaceLineEndings("\n").Split('\n');
+        var expected = RegExpTestExpected.ReplaceLineEndings("\n").Split('\n');
+        Assert.Equal(expected.Length, snippets.Length);
+        for (int i = 0; i < snippets.Length; i++)
+        {
+            using var engine = new JsEngine();
+            var got = engine.Evaluate(RegExpTestPrelude + "\n" + snippets[i] + "\nJSON.stringify(o)").AsString();
+            Assert.True(expected[i] == got, $"line {i}: {snippets[i]}\nexpected {expected[i]}\nbut got  {got}");
+        }
+    }
 }

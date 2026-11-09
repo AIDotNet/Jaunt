@@ -44,6 +44,12 @@ internal sealed partial class Realm
     internal string? LegacyInput;
     /// <summary>Set by a match of a non-legacy (subclass) RegExp: the static properties throw until the next update.</summary>
     internal bool LegacyInvalid;
+    /// <summary>The one match object <c>test</c> records into, reused because nothing but <see cref="LegacyMatch"/> refers to it.</summary>
+    internal RegExpBuiltins.RegexMatch? LegacyTestMatch;
+    /// <summary>A capture was read from a match recorded by <c>test</c>: this code reads them, so finding them later would cost two searches.</summary>
+    internal bool LegacyCapturesRead;
+    /// <summary>The layout of a RegExp object with %RegExp.prototype% and only lastIndex, once one has been created.</summary>
+    internal Shape? RegExpInstanceShape;
     public JsObject? DisposableStackPrototype;
     public JsObject? AsyncDisposableStackPrototype;
     public JsObject? SharedArrayBufferConstructor;
@@ -458,6 +464,8 @@ internal sealed partial class Realm
 
     /// <summary>Shared time-budget callback for the native regex engine (one delegate per realm, not one per match).</summary>
     internal Action? RegexTick;
+    /// <summary>Backtracking stacks of the native regex engine, kept between matches (null while a search uses them).</summary>
+    internal Regex.JsRegex.MatcherStacks? RegexStacks;
 
     public void ChargeBytes(long bytes)
     {
