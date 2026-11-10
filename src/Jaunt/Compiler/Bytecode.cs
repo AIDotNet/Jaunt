@@ -81,6 +81,14 @@ internal enum Op : int
     /// </summary>
     LtJmpTrue, LeJmpTrue, GtJmpTrue, GeJmpTrue,
     LtIJmpTrue, LeIJmpTrue, GtIJmpTrue, GeIJmpTrue,
+    /// <summary>
+    /// One part of a multi-part string concatenation (a template literal, or a <c>+</c> chain that is a string from its first
+    /// operand): dst, value, block start, count, mode (0 ToString, 1 ToPrimitive then ToString). Converts the value as the
+    /// pairwise additions would, then throws the RangeError they would throw if the parts in [start, start + count) are too long.
+    /// </summary>
+    ToStrPart,
+    /// <summary>Converts the parts in [start, start + count) in order, as <see cref="ToStrPart"/> does, and concatenates them: dst, start, count, mode.</summary>
+    StrConcat,
     Count_,
 }
 
@@ -186,6 +194,7 @@ internal static class OpInfo
         S(Op.DynamicImport, R, R, O, I);
         S(Op.Debugger);
         S(Op.Intrinsic, R, I, R, N);
+        S(Op.ToStrPart, R, R, R, N, I); S(Op.StrConcat, R, R, N, I);
         for (int i = 0; i < t.Length; i++) t[i] ??= Array.Empty<OperandKind>();
         return t;
     }

@@ -157,6 +157,18 @@ internal sealed partial class Vm
                 regs[bp + code[pc + 1]] = a.IsString ? a : new JsValue(Operations.ToString(realm, a));
                 return pc + 3;
             }
+            case Op.ToStrPart:
+            {
+                // the conversion can run user code: store through the frame's current register file afterwards
+                var v = Operations.ToStringPart(realm, regs[bp + code[pc + 2]], code[pc + 5] != 0);
+                regs = f.Regs;
+                regs[bp + code[pc + 1]] = v;
+                Operations.CheckPartsLength(realm, new ReadOnlySpan<JsValue>(regs, bp + code[pc + 3], code[pc + 4]));
+                return pc + 6;
+            }
+            case Op.StrConcat:
+                StrConcat(f, code[pc + 1], code[pc + 2], code[pc + 3], code[pc + 4] != 0);
+                return pc + 5;
             case Op.AddConst:
                 regs[bp + code[pc + 1]] = Operations.Add(realm, regs[bp + code[pc + 2]], k[code[pc + 3]]);
                 return pc + 4;
@@ -362,5 +374,30 @@ internal sealed partial class Vm
             default:
                 throw new InvalidOperationException($"Jaunt internal error: unknown opcode {code[pc]}.");
         }
+    }
+
+    /// <summary>
+    /// <see cref="Op.StrConcat"/>: converts each part in order (parts already converted by <see cref="Op.ToStrPart"/> stay as
+    /// they are), throws the pairwise additions' RangeError at the part that makes the result too long, then concatenates.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private void StrConcat(Frame f, int dst, int start, int count, bool primitiveFirst)
+    {
+        var realm = Realm;
+        int bp = f.Base;
+        long total = 0;
+        for (int i = bp + start, end = i + count; i < end; i++)
+        {
+            var v = f.Regs[i];
+            if (!v.IsString && !(v.IsNumber && v.Num == (int)v.Num))
+            {
+                v = Operations.ToStringPart(realm, v, primitiveFirst);   // may run user code
+                f.Regs[i] = v;
+            }
+            total += Operations.PartLength(v);
+            if (total > realm.MaxStringLength) throw JsErrors.RangeError(realm, "Invalid string length");
+        }
+        var regs = f.Regs;
+        regs[bp + dst] = Operations.ConcatN(realm, regs, bp + start, count, (int)total);
     }
 }
