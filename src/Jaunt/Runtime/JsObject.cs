@@ -121,6 +121,16 @@ internal class JsObject
         realm.ChargeObject();
     }
 
+    /// <summary>Constructor used for exotic objects whose layout is a known shared root.</summary>
+    protected JsObject(Realm realm, bool exotic, Shape root)
+    {
+        Realm = realm;
+        IsExotic = exotic;
+        Shape = root;
+        Slots = NoSlots;
+        realm.ChargeObject();
+    }
+
     /// <summary>Constructor used for objects created with a pre-computed shape (object literals, function objects).</summary>
     internal JsObject(Realm realm, Shape shape, int slotCapacity)
     {
@@ -620,7 +630,12 @@ internal class JsObject
 
     // ------------------------------------------------------------------ indexed fast paths (overridden by arrays)
 
-    public virtual JsValue GetIndex(uint index, JsValue receiver) => Get(PropertyKey.FromIndex(index), receiver);
+    public virtual JsValue GetIndex(uint index, JsValue receiver)
+    {
+        // an array-like such as { length: n }: no key string to learn that neither it nor its prototypes have index keys
+        if (index != uint.MaxValue && GetType() == typeof(JsObject) && !JsArray.ProtoChainMayHaveIndices(this)) return JsValue.Undefined;
+        return Get(PropertyKey.FromIndex(index), receiver);
+    }
     public virtual bool SetIndex(uint index, JsValue value, JsValue receiver) => Set(PropertyKey.FromIndex(index), value, receiver);
 
     // ------------------------------------------------------------------ helpers

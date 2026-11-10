@@ -3793,4 +3793,71 @@ hashChain = -254617337
         Assert.Equal(expected.Length, got.Length);
         for (int i = 0; i < expected.Length; i++) Assert.True(expected[i] == got[i], $"line {i}: expected {expected[i]} but got {got[i]}");
     }
+
+    // Array-like index reads without a key string, the species shortcut, slice's relative indices; the expected values were produced by Node from the same script.
+    private const string ArrayLikeSpeciesSliceScript = """
+const out = {};
+const shape = a => { const r = []; for (let i = 0; i < a.length; i++) r.push(i in a ? a[i] : 'hole'); return r; };
+// reading an index of an array-like: no key string when neither it nor its prototypes have index keys
+out.fromLengthOnly = Array.from({ length: 3 }, (v, i) => [v, i]);
+out.fromOwnIndex = Array.from({ length: 3, 1: 'x' });
+out.fromProtoIndex = Array.from(Object.create({ 1: 'p', length: 3 }));
+out.fromProtoGetter = (() => { const log = []; const p = { get 2() { log.push('get'); return 'g'; } }; const o = Object.create(p); o.length = 3; return [Array.from(o), log]; })();
+out.fromObjectProtoIndex = (() => { Object.prototype[1] = 'op'; try { return Array.from({ length: 3 }); } finally { delete Object.prototype[1]; } })();
+out.fromAfterDelete = (() => { Object.prototype[1] = 'op'; delete Object.prototype[1]; return Array.from({ length: 3 }); })();
+out.fromProxyProto = (() => { const log = []; const o = Object.create(new Proxy({}, { get(t, k) { log.push(String(k)); return typeof k === 'symbol' ? undefined : 'px'; } })); o.length = 2; return [Array.from(o), log]; })();
+out.fromProxy = (() => { const log = []; const o = new Proxy({ length: 2 }, { get(t, k) { log.push(String(k)); return t[k]; } }); return [Array.from(o), log]; })();
+out.fromArrayProto = (() => { const o = Object.create(['a', 'b']); o.length = 3; return Array.from(o); })();
+out.fromStringProto = (() => { const o = Object.create(new String('ab')); o.length = 3; o[Symbol.iterator] = undefined; return Array.from(o); })();
+out.fromTypedProto = (() => { const o = Object.create(new Uint8Array([7, 8])); o.length = 3; o[Symbol.iterator] = undefined; try { return Array.from(o); } catch (e) { return e.constructor.name; } })();
+out.fromNullProto = (() => { const o = Object.create(null); o.length = 2; o[0] = 1; return Array.from(o); })();
+out.fromFunction = (() => { function f(a, b) {} f[1] = 'x'; return Array.from(f); })();
+out.fromDictProto = (() => { const p = {}; for (let i = 0; i < 100; i++) p['k' + i] = i; for (let i = 0; i < 90; i++) delete p['k' + i]; p[1] = 'dict'; const o = Object.create(p); o.length = 2; return Array.from(o); })();
+out.fromDictOwn = (() => { const o = { a: 1, length: 2 }; delete o.a; o[1] = 'own'; return Array.from(o); })();
+out.fromIndexAddedByCallback = (() => { const o = { length: 3 }; return Array.from(o, (v, i) => { o[i + 1] = 'n' + i; return v; }); })();
+out.fromProtoAddedByCallback = (() => { const p = {}; const o = Object.create(p); o.length = 3; return Array.from(o, (v, i) => { p[i + 1] = 'p' + i; return v; }); })();
+out.fromEdgeKeys = (() => { const o = { length: 2, 4294967295: 'not-index', '01': 'x', '-1': 'y' }; return [Array.from(o), Array.prototype.includes.call(o, 'x')]; })();
+out.includesArrayLike = [Array.prototype.includes.call({ length: 2 }, undefined), Array.prototype.includes.call({ length: 2, 1: 5 }, 5), Array.prototype.at.call({ length: 2 }, 1), Array.prototype.toReversed.call({ length: 2, 0: 'z' })];
+// species: the same result as the full steps for every change to the array or Array.prototype.constructor
+const speciesResult = f => { const r = f(); return [Array.isArray(r), r.constructor === Array, r instanceof Array, r.length, r.tag]; };
+out.speciesPlain = [speciesResult(() => [1, 2].slice()), speciesResult(() => [1, 2].map(x => x)), speciesResult(() => [1, 2].filter(x => x)), speciesResult(() => [1, 2].flatMap(x => x)), speciesResult(() => [[1], 2].flat()), speciesResult(() => [1, 2].splice(0, 1)), speciesResult(() => [1].concat(2))];
+out.speciesOwnConstructor = (() => { class C { constructor(n) { this.tag = 'C' + n; } } C[Symbol.species] = C; const a = [1, 2]; a.constructor = C; return speciesResult(() => a.slice(0, 1)); })();
+out.speciesOwnUndefined = (() => { const a = [1, 2]; a.constructor = undefined; return speciesResult(() => a.slice()); })();
+out.speciesOwnBad = (() => { const a = [1, 2]; a.constructor = 1; try { a.slice(); return 'no'; } catch (e) { return e.constructor.name; } })();
+out.speciesNullSpecies = (() => { const a = [1, 2]; a.constructor = { [Symbol.species]: null }; return speciesResult(() => a.slice()); })();
+out.speciesProtoValue = (() => { const saved = Array.prototype.constructor; class D { constructor(n) { this.tag = 'D' + n; } static get [Symbol.species]() { return D; } } Array.prototype.constructor = D; try { return [speciesResult(() => [1].slice()), speciesResult(() => [1].map(x => x)), speciesResult(() => [1].filter(x => x))]; } finally { Array.prototype.constructor = saved; } })();
+out.speciesProtoRestored = speciesResult(() => [1].slice());
+out.speciesProtoGetter = (() => { const saved = Object.getOwnPropertyDescriptor(Array.prototype, 'constructor'); const log = []; Object.defineProperty(Array.prototype, 'constructor', { get() { log.push('get'); return Array; }, configurable: true }); try { const r = speciesResult(() => [1].slice()); return [r, log]; } finally { Object.defineProperty(Array.prototype, 'constructor', saved); } })();
+out.speciesProtoDeleted = (() => { const saved = Object.getOwnPropertyDescriptor(Array.prototype, 'constructor'); delete Array.prototype.constructor; try { const r = [1].slice(); return [Array.isArray(r), r.constructor === Object, r.length]; } finally { Object.defineProperty(Array.prototype, 'constructor', saved); } })();
+out.speciesAfterProtoGrows = (() => { Array.prototype.extra1 = 1; try { return speciesResult(() => [1].slice()); } finally { delete Array.prototype.extra1; } })();
+out.speciesSubclass = (() => { class A extends Array { get tag() { return 'A'; } } const a = A.from([1, 2]); return [speciesResult(() => a.slice()), speciesResult(() => a.map(x => x))]; })();
+out.speciesSetProto = (() => { const p = Object.create(Array.prototype); p.constructor = function (n) { return { tag: 'P', length: 0 }; }; p.constructor[Symbol.species] = p.constructor; const a = [1]; Object.setPrototypeOf(a, p); return speciesResult(() => a.slice()); })();
+out.speciesFrozenSource = (() => { const a = Object.freeze([1, 2]); const r = a.slice(); r.push(3); return [r, Object.isFrozen(r)]; })();
+out.speciesExpando = (() => { const a = [1]; a.x = 1; const r = a.slice(); return [r.x === undefined, speciesResult(() => a.map(x => x))]; })();
+out.speciesSparse = (() => { const a = [1]; a[100000] = 2; const r = a.slice(0, 2); return [shape(r), r.length]; })();
+out.newArrayProtoAdded = (() => { const g = o => o.late; const before = g([]); Array.prototype.late = 'yes'; try { return [before, g([]), g(new Array(2)), g([1].slice()), Object.getPrototypeOf([]) === Array.prototype]; } finally { delete Array.prototype.late; } })();
+// slice's relative indices
+out.sliceArgs = (() => { const a = [0, 1, 2, 3, 4]; return [a.slice(-0), a.slice(NaN), a.slice(1.9), a.slice(-1.9), a.slice(Infinity), a.slice(-Infinity), a.slice(2, 1e300), a.slice(0, -1e300), a.slice(2 ** 53), a.slice(2 ** 63), a.slice(0, 2 ** 64), a.slice(0.5, 2.5), a.slice('1', '3'), a.slice(null, undefined), a.slice(0, null), a.slice({ valueOf() { return 3; } }), a.slice(5), a.slice(6), a.slice(3, 1), Array.prototype.slice.call({ length: 2 ** 53 - 1, 9007199254740990: 'e' }, 9007199254740990)].map(shape); })();
+out.sliceHoles = [shape([1, , 3].slice(0, 3)), shape([, , ,].slice(1)), (() => { const r = [1, 2, 3].slice(0, 2); r[3] = 9; return shape(r); })(), (() => { const r = [1, 2, 3].slice(1, 1); r.push('p'); return r; })()];
+out.sliceObjects = (() => { const o = {}, a = [o, 's', 1, null, undefined, true]; const r = a.slice(); return [r[0] === o, r.slice(1)]; })();
+out.literalValues = (() => { const f = () => 1; const o = { a: 1, b: 's', c: null, d: undefined, e: f, g: { h: 2 } }; return [Object.keys(o), o.a, o.b, o.c, o.d, o.e === f, o.g.h, o.e.name, Object.getOwnPropertyDescriptor(o, 'b')]; })();
+JSON.stringify(out);
+""";
+
+    private const string ArrayLikeSpeciesSliceExpected = """
+{"fromLengthOnly":[[null,0],[null,1],[null,2]],"fromOwnIndex":[null,"x",null],"fromProtoIndex":[null,"p",null],"fromProtoGetter":[[null,null,"g"],["get"]],"fromObjectProtoIndex":[null,"op",null],"fromAfterDelete":[null,null,null],"fromProxyProto":[["px","px"],["Symbol(Symbol.iterator)","0","1"]],"fromProxy":[[null,null],["Symbol(Symbol.iterator)","length","0","1"]],"fromArrayProto":["a","b",null],"fromStringProto":["a","b"],"fromTypedProto":"TypeError","fromNullProto":[1,null],"fromFunction":[null,"x"],"fromDictProto":[null,"dict"],"fromDictOwn":[null,"own"],"fromIndexAddedByCallback":[null,"n0","n1"],"fromProtoAddedByCallback":[null,"p0","p1"],"fromEdgeKeys":[[null,null],false],"includesArrayLike":[true,true,null,[null,"z"]],"speciesPlain":[[true,true,true,2,null],[true,true,true,2,null],[true,true,true,2,null],[true,true,true,2,null],[true,true,true,2,null],[true,true,true,1,null],[true,true,true,2,null]],"speciesOwnConstructor":[false,false,false,1,"C1"],"speciesOwnUndefined":[true,true,true,2,null],"speciesOwnBad":"TypeError","speciesNullSpecies":[true,true,true,2,null],"speciesProtoValue":[[false,false,false,1,"D1"],[false,false,false,null,"D1"],[false,false,false,null,"D0"]],"speciesProtoRestored":[true,true,true,1,null],"speciesProtoGetter":[[true,true,true,1,null],["get","get"]],"speciesProtoDeleted":[true,true,1],"speciesAfterProtoGrows":[true,true,true,1,null],"speciesSubclass":[[true,false,true,2,"A"],[true,false,true,2,"A"]],"speciesSetProto":[false,false,false,1,"P"],"speciesFrozenSource":[[1,2,3],false],"speciesExpando":[true,[true,true,true,1,null]],"speciesSparse":[[1,"hole"],2],"newArrayProtoAdded":[null,"yes","yes","yes",true],"sliceArgs":[[0,1,2,3,4],[0,1,2,3,4],[1,2,3,4],[4],[],[0,1,2,3,4],[2,3,4],[],[],[],[0,1,2,3,4],[0,1],[1,2],[0,1,2,3,4],[],[3,4],[],[],[],["e"]],"sliceHoles":[[1,"hole",3],["hole","hole"],[1,2,"hole",9],["p"]],"sliceObjects":[true,["s",1,null,null,true]],"literalValues":[["a","b","c","d","e","g"],1,"s",null,null,true,2,"f",{"value":"s","writable":true,"enumerable":true,"configurable":true}]}
+""";
+
+    [Fact]
+    public void ArrayLikeSpeciesSliceMatchReferenceBehavior()
+    {
+        using var engine = new JsEngine();
+        var exp = System.Text.Json.JsonDocument.Parse(ArrayLikeSpeciesSliceExpected).RootElement;
+        var got = System.Text.Json.JsonDocument.Parse(engine.Evaluate(ArrayLikeSpeciesSliceScript).AsString()).RootElement;
+        foreach (var p in exp.EnumerateObject())
+        {
+            Assert.True(got.TryGetProperty(p.Name, out var g), $"missing case {p.Name}");
+            Assert.True(p.Value.ToString() == g.ToString(), $"{p.Name}: expected {p.Value} got {g}");
+        }
+    }
 }

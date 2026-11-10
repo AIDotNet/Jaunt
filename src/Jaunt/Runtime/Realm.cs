@@ -391,6 +391,16 @@ internal sealed partial class Realm
 
     // ------------------------------------------------------------------ shapes
 
+    /// <summary>The layout of a new array of this realm; its Array.prototype exists and is marked as a prototype from here on.</summary>
+    internal Shape ArrayRootShape
+    {
+        get
+        {
+            _ = ArrayPrototype;
+            return Shapes.ArrayRoot;
+        }
+    }
+
     public Shape RootShapeFor(JsObject? proto)
     {
         if (proto == null) return _nullRoot ??= Shape.CreateRoot(null);

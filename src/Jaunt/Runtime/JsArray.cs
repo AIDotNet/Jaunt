@@ -321,16 +321,27 @@ internal sealed class JsArray : JsObject
         if (q != null && Length < MinQueueLength / 2) LeaveQueueMode();
     }
 
-    public JsArray(Realm realm, int capacity = 0, JsObject? proto = null)
+    /// <summary>An array with the realm's Array.prototype.</summary>
+    public JsArray(Realm realm, int capacity = 0)
+        : base(realm, exotic: true, realm.ArrayRootShape)
+    {
+        Items = NewStore(realm, capacity);
+    }
+
+    public JsArray(Realm realm, int capacity, JsObject? proto)
         : base(realm, proto ?? realm.ArrayPrototype, exotic: true, uniqueShape: false)
     {
-        if (capacity == 0) Items = Array.Empty<JsValue>();
-        else
-        {
-            Items = new JsValue[capacity];
-            MarkHoles(Items, 0); // slots beyond Length are holes
-            realm.ChargeBytes(capacity * 24L);
-        }
+        Items = NewStore(realm, capacity);
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static JsValue[] NewStore(Realm realm, int capacity)
+    {
+        if (capacity == 0) return Array.Empty<JsValue>();
+        var items = new JsValue[capacity];
+        MarkHoles(items, 0); // slots beyond Length are holes
+        realm.ChargeBytes(capacity * 24L);
+        return items;
     }
 
     /// <summary>A new array whose elements are exactly <paramref name="items"/>, which it takes over.</summary>
