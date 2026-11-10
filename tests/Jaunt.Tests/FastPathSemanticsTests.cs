@@ -3485,8 +3485,22 @@ getterArrowAndReceiver = ["object",true,false]
     [Fact]
     public void CallbacksSpeciesAndCustomIteratorsMatchReferenceBehavior()
     {
-        using var engine = new JsEngine();
-        var got = engine.Evaluate(CallbacksAndIteratorsScript).AsString().Split('\n');
+        // cbRecursive and iterRecursiveDepth nest 200 and 150 native re-entries. On a 1 MB test host thread the limit is about 172
+        // and 113 (the same before the callback changes), and CI hosts run tests on such threads, so give the script a known stack.
+        string[] got = [];
+        Exception? failure = null;
+        var thread = new Thread(() =>
+        {
+            try
+            {
+                using var engine = new JsEngine();
+                got = engine.Evaluate(CallbacksAndIteratorsScript).AsString().Split('\n');
+            }
+            catch (Exception ex) { failure = ex; }
+        }, 16 * 1024 * 1024);
+        thread.Start();
+        thread.Join();
+        if (failure is not null) throw new Exception("script failed", failure);
         var expected = CallbacksAndIteratorsExpected.ReplaceLineEndings("\n").TrimEnd('\n').Split('\n');
         Assert.Equal(expected.Length, got.Length);
         for (int i = 0; i < expected.Length; i++) Assert.True(expected[i] == got[i], $"line {i}: expected {expected[i]} but got {got[i]}");
