@@ -1172,9 +1172,11 @@ internal sealed partial class Vm
     private static bool TruthyInline(in JsValue v)
     {
         ulong bits = v.Bits;
+        // A number other than ±0 and NaN, tested on its bits in an integer register: without the sign bit, zero is 0, the
+        // infinities are 0xFFE0... and a NaN is above. Every non-number tag decodes to a NaN, so it fails this test too.
+        if (((bits ^ JsValue.NumberXor) << 1) - 1 < 0xFFE0_0000_0000_0000UL) return true;
         if (bits == JsValue.TrueBits) return true;
-        if (bits <= JsValue.FalseBits) return false;   // undefined, null, false
-        if (v.IsNumber) { double d = v.Num; return d != 0 && d == d; }
+        if (bits <= JsValue.FalseBits || bits > 15) return false;   // undefined, null, false; ±0 and NaN
         return ToBooleanSlow(v);
     }
 
