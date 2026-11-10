@@ -670,3 +670,38 @@ Still open: `/[xz]{2}/i` is about 48% slower than on .NET, which searches for bo
 such as `(a+)+$`, remain exponential, as in V8, bounded by the limits.
 
 Verified on the merged result: unit tests 636/636 plain and poisoned, test262 100,167/100,169, NativeAOT `verify`.
+
+## Tenth pass: generators, for-in, and a call-path investigation (2026-11-10)
+
+Against main at 0104abd, both on `OptimizationPreference=Speed`, three rounds over all 59 workloads: wall-time geometric mean −2.1%,
+nothing slower by 3% or more. `functional/control-flow` −29% (allocation 3.43 → 0.22 MB), `functional/iterators-generators` −20%
+(8.33 → 1.59 MB), `collections/weakmap-symbol` −14.5%.
+
+| Operation | Before | After | V8 jitless |
+| --- | ---: | ---: | ---: |
+| `for-in` over 3 keys | 407 ns | 64 ns | |
+| `for-of` over a 3-yield generator | 237 ns | 136 ns | 168 ns |
+| spread of a generator | 243 ns | 150 ns | 156 ns |
+| destructuring from a generator | 183 ns | 107 ns | 132 ns |
+| `yield*` step | 66 ns | 43 ns | 63 ns |
+
+`for-in` takes an ordinary object's enumerable string keys from a cache on its `Shape`, re-checking each key only if the object
+changed shape, and falls back to the full walk when a prototype has enumerable keys. Generators under `for-of`, spread, destructuring
+and `yield*` are stepped directly while `next` is the original builtin, guarded by a per-realm check of the generator shape and
+prototype. `switch` and `try`/`finally` were measured and showed no gap.
+
+Still slower than V8 jitless: creating a generator (37 against 18 ns, mostly the frame object), spreading a custom iterator class
+(2.3×, one nested interpreter run per `next`), and `it.next()` called from script (1.15×).
+
+**Call and construct paths.** After the ninth pass, call and construct micro-benchmarks looked 3–12% slower than in 1.0.2. Most of that
+was the method: each version subtracted its own empty loop, and the empty loop itself became about 9% faster because `i++` now runs
+through floating-point registers. Measured raw, `arguments.length` is −2.7%, `class new` +4%, `new F(a, b)` +2%. The machine code of the
+call, construct and return paths in `RunLoop` is identical between the two versions apart from relocations, and shifting `RunLoop` by
+32–96 bytes moved workloads ±3% in no consistent direction, so a layout explanation is not supported either. Copying property and array
+reads through floating-point registers gave `prototype-chain` −2.6 to −3.1%, inside the noise, and was not kept. The remaining
+`prototype-chain` difference of a few percent is unexplained. Single-operation figures in these reports now subtract the older version's
+empty loop from both versions.
+
+Verified: unit tests 637/637 plain and poisoned, test262 100,167/100,169, NativeAOT `verify`, and 56 cross-checks of `for-in` and
+generator edge cases that match main exactly. They match Node except where a key is made non-enumerable during the loop, which the
+specification leaves to the implementation.
