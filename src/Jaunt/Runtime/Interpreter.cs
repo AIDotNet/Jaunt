@@ -62,6 +62,7 @@ internal sealed partial class Vm
                 {
                     switch ((Op)ip)
                     {
+                        case Op.Nop: ip = ref Unsafe.Add(ref ip, 1); continue;   // a case for opcode 0 saves an instruction per dispatch
                         case Op.Mov: JsValue.Store(ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)), Unsafe.Add(ref r0, Unsafe.Add(ref ip, 2))); ip = ref Unsafe.Add(ref ip, 3); continue;
                         case Op.LoadUndef: Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = default; ip = ref Unsafe.Add(ref ip, 2); continue;
                         case Op.LoadNull: Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = JsValue.Null; ip = ref Unsafe.Add(ref ip, 2); continue;
@@ -138,9 +139,10 @@ internal sealed partial class Vm
                         case Op.GetGlobal:
                         {
                             ref var ic = ref f.Feedback.Ics[Unsafe.Add(ref ip, 3)];
-                            if (ic.Kind == IcKind.GlobalProp && ic.Epoch == Realm.GlobalVersion)
+                            var realm = Realm;
+                            if (ic.Kind == IcKind.GlobalProp && ic.Epoch == realm.GlobalVersion)
                             {
-                                var v = Realm.GlobalObject.Dict!.Values[ic.Slot];
+                                var v = realm.GlobalObject.Dict!.Values[ic.Slot];
                                 if (v.IsNotEmpty) { JsValue.Store(ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)), v); ip = ref Unsafe.Add(ref ip, 4); continue; }
                             }
                             else if (ic.Kind == IcKind.GlobalCell)
