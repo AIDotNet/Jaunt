@@ -1047,15 +1047,16 @@ internal sealed partial class CodeGen
         _fb.Position(w);
         int cm = Mark;
         var savedConsts = HoistLoopConstants(w.Test, w.Body);
-        int start = _fb.NewLabel(), end = _fb.NewLabel();
+        int start = _fb.NewLabel(), test = _fb.NewLabel(), end = _fb.NewLabel();
+        LoopEntry(w.Test, test, end);
         _fb.Mark(start);
-        int m = Mark;
-        Condition(w.Test, end);
-        ResetTo(m);
-        PushLoop(labels, end, start);
+        PushLoop(labels, end, test);
         Statement(w.Body);
         PopLoop();
-        _fb.Jump(start);
+        _fb.Mark(test);
+        int m = Mark;
+        ConditionTrue(w.Test, start);
+        ResetTo(m);
         _fb.Mark(end);
         (_loopConsts, _loopStringConsts) = savedConsts;
         ResetTo(cm);
@@ -1077,6 +1078,22 @@ internal sealed partial class CodeGen
         _fb.Mark(end);
     }
 
+    /// <summary>
+    /// Enters a loop whose test is compiled at its bottom (see <see cref="ConditionTrue"/>): a simple test is also compiled here,
+    /// jumping past the loop when it fails; any other test is reached by a jump.
+    /// </summary>
+    private void LoopEntry(Expression test, int testLabel, int endLabel)
+    {
+        int budget = 16;
+        if (CanDuplicateTest(test, ref budget))
+        {
+            int m = Mark;
+            Condition(test, endLabel);
+            ResetTo(m);
+        }
+        else _fb.Jump(testLabel);
+    }
+
     private void PushLoop(List<string>? labels, int breakLabel, int continueLabel)
     {
         _control.Add(new ControlEntry { Kind = EntryKind.Break, Labels = labels, Label = breakLabel, IsLoop = true });
@@ -1096,21 +1113,23 @@ internal sealed partial class CodeGen
         // CreatePerIterationEnvironment runs once before the first test: closures created by the initializer
         // keep the loop environment, the first iteration gets a copy
         if (scope != null && scope.HasEnv && f.Init is VariableDeclaration { Kind: VariableDeclarationKind.Let }) _fb.Emit(Op.CopyEnv);
-        int start = _fb.NewLabel(), cont = _fb.NewLabel(), end = _fb.NewLabel();
+        int start = _fb.NewLabel(), cont = _fb.NewLabel(), test = _fb.NewLabel(), end = _fb.NewLabel();
+        if (f.Test != null) LoopEntry(f.Test, test, end);
         _fb.Mark(start);
-        if (f.Test != null)
-        {
-            int mm = Mark;
-            Condition(f.Test, end);
-            ResetTo(mm);
-        }
         PushLoop(labels, end, cont);
         Statement(f.Body);
         PopLoop();
         _fb.Mark(cont);
         if (scope != null && scope.HasEnv) _fb.Emit(Op.CopyEnv);
         if (f.Update != null) ExprDiscard(f.Update);
-        _fb.Jump(start);
+        if (f.Test != null)
+        {
+            _fb.Mark(test);
+            int mm = Mark;
+            ConditionTrue(f.Test, start);
+            ResetTo(mm);
+        }
+        else _fb.Jump(start);
         _fb.Mark(end);
         (_loopConsts, _loopStringConsts) = savedConsts;
         ExitScope(scope, m);

@@ -623,7 +623,8 @@ public class ApiTests
         using var engine = new JsEngine();
         engine.Evaluate("let s = 0; for (let i = 0; i < 10000; i++) s += i;");
         var stats = engine.GetStatistics();
-        Assert.True(stats.LastWorkUnits >= 10000);
+        // one unit per taken backward jump: the loop tests at its bottom, so 10000 iterations jump back 9999 times
+        Assert.True(stats.LastWorkUnits >= 9999);
         Assert.Equal(1, stats.Executions);
     }
 

@@ -174,10 +174,11 @@ internal sealed class JsTypedArray : JsObject
     /// <summary>
     /// Interpreter fast path for <c>ta[key]</c> with a number key on a fixed-length view: one bounds check against the
     /// backing store and a direct read. False for anything else (fractional or out-of-range keys, length-tracking
-    /// views, detached buffers, big-endian hosts), which the generic path handles with the full semantics.
+    /// views, detached buffers, big-endian hosts), which the generic path handles with the full semantics. A number is written to
+    /// <paramref name="dst"/> from a floating-point register (see <see cref="JsValue.LoadNumber"/>); nothing is written on false.
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    internal bool TryGetElementFast(double key, out JsValue value)
+    internal bool TryGetElementFast(double key, ref JsValue dst)
     {
         int idx = (int)key;
         if (idx == key && BitConverter.IsLittleEndian && !Buffer.Detached)
@@ -194,21 +195,20 @@ internal sealed class JsTypedArray : JsObject
                 ref byte b = ref Unsafe.Add(ref MemoryMarshal.GetArrayDataReference(data), (nint)(ByteOffset + ((long)idx << shift)));
                 switch (Kind)
                 {
-                    case TypedKind.Float64: value = JsValue.FromExternalDouble(Unsafe.ReadUnaligned<double>(ref b)); return true;
-                    case TypedKind.Int32: value = new JsValue(Unsafe.ReadUnaligned<int>(ref b)); return true;
-                    case TypedKind.Uint32: value = new JsValue(Unsafe.ReadUnaligned<uint>(ref b)); return true;
-                    case TypedKind.Uint8: case TypedKind.Uint8Clamped: value = new JsValue(b); return true;
-                    case TypedKind.Int8: value = new JsValue((sbyte)b); return true;
-                    case TypedKind.Int16: value = new JsValue(Unsafe.ReadUnaligned<short>(ref b)); return true;
-                    case TypedKind.Uint16: value = new JsValue(Unsafe.ReadUnaligned<ushort>(ref b)); return true;
-                    case TypedKind.Float32: value = JsValue.FromExternalDouble(Unsafe.ReadUnaligned<float>(ref b)); return true;
+                    case TypedKind.Float64: { double d = Unsafe.ReadUnaligned<double>(ref b); JsValue.StoreNumber(ref dst, double.IsNaN(d) ? JsValue.CanonicalNaN : d); return true; }
+                    case TypedKind.Int32: JsValue.StoreNumber(ref dst, Unsafe.ReadUnaligned<int>(ref b)); return true;
+                    case TypedKind.Uint32: JsValue.StoreNumber(ref dst, Unsafe.ReadUnaligned<uint>(ref b)); return true;
+                    case TypedKind.Uint8: case TypedKind.Uint8Clamped: JsValue.StoreNumber(ref dst, b); return true;
+                    case TypedKind.Int8: JsValue.StoreNumber(ref dst, (sbyte)b); return true;
+                    case TypedKind.Int16: JsValue.StoreNumber(ref dst, Unsafe.ReadUnaligned<short>(ref b)); return true;
+                    case TypedKind.Uint16: JsValue.StoreNumber(ref dst, Unsafe.ReadUnaligned<ushort>(ref b)); return true;
+                    case TypedKind.Float32: { double d = Unsafe.ReadUnaligned<float>(ref b); JsValue.StoreNumber(ref dst, double.IsNaN(d) ? JsValue.CanonicalNaN : d); return true; }
                 }
             }
         }
     Slow:
         // kinds without a direct case (Float16, BigInt views), length-tracking views: the checked element read
-        if (idx == key && (uint)idx < (uint)Length) { value = GetElement(idx); return true; }
-        value = default;
+        if (idx == key && (uint)idx < (uint)Length) { dst = GetElement(idx); return true; }
         return false;
     }
 
