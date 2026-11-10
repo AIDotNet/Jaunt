@@ -733,7 +733,9 @@ internal sealed partial class Vm
         f.Flags = flags;
         if ((t.Flags & FunctionFlags.Arrow) != 0)
         {
-            f.This = c.BoundThis;
+            // usually unchanged: a builtin calls the same arrow function again at the same depth
+            ref readonly var bt = ref c.BoundThis;
+            if (!ReferenceEquals(f.This.Ref, bt.Ref) || f.This.Bits != bt.Bits) f.This = bt;
         }
         else
         {
