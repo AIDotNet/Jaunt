@@ -1694,11 +1694,23 @@ internal sealed partial class CodeGen
         _fb.Emit(Op.LoadInt, mode, 0);
         // obtain the raw iterator object (iter register holds an iterator record; ops below treat it as object)
         int loop = _fb.NewLabel(), done = _fb.NewLabel(), notNext = _fb.NewLabel(), notThrow = _fb.NewLabel(), haveRes = _fb.NewLabel();
+        int notValue = _fb.NewLabel(), nextDone = _fb.NewLabel(), end = _fb.NewLabel();
         _fb.Mark(loop);
         _fb.JumpIf(Op.JmpTrue, mode, notNext);
-        _fb.Emit(Op.CallMethod, res, iter, _fb.Const("next"), _fb.NewIc(), received, 1);
-        _fb.Emit(Op.ThrowIfNotObject, res, _fb.Const("Iterator result is not an object"));
-        _fb.Jump(haveRes);
+        // next: kind 0 yields a value (a generator inner iterator, resumed directly), 1 the inner result object, 2 is done
+        _fb.Emit(Op.DelegateNext, res, iter, received, tmp);
+        _fb.JumpIf(Op.JmpTrue, tmp, notValue);
+        _fb.Emit(Op.Yield, res, received, mode);
+        _fb.Jump(loop);
+        _fb.Mark(notValue);
+        _fb.Emit(Op.LoadInt, fn, 2);
+        _fb.Emit(Op.StrictEq, fn, tmp, fn);
+        _fb.JumpIf(Op.JmpTrue, fn, nextDone);
+        _fb.Emit(Op.YieldRaw, res, received, mode);
+        _fb.Jump(loop);
+        _fb.Mark(nextDone);
+        _fb.Emit(Op.Mov, d, res);
+        _fb.Jump(end);
         _fb.Mark(notNext);
         _fb.Emit(Op.LoadInt, tmp, 1);
         _fb.Emit(Op.StrictEq, tmp, mode, tmp);
@@ -1745,6 +1757,7 @@ internal sealed partial class CodeGen
         _fb.Jump(loop);
         _fb.Mark(done);
         _fb.Emit(Op.GetProp, d, res, _fb.Const("value"), _fb.NewIc());
+        _fb.Mark(end);
         ResetTo(Math.Max(m, d + 1));
         return d;
     }

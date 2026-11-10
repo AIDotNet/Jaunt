@@ -81,6 +81,12 @@ internal enum Op : int
     /// </summary>
     LtJmpTrue, LeJmpTrue, GtJmpTrue, GeJmpTrue,
     LtIJmpTrue, LeIJmpTrue, GtIJmpTrue, GeIJmpTrue,
+    /// <summary>
+    /// One next step of yield*: dst, iterator, received, kind. Kind 0: dst is a value the generator yields; 1: dst is the inner
+    /// iterator's result object, yielded as is; 2: the inner iterator is done and dst is its value. A generator whose next is the
+    /// original one is resumed without a result object.
+    /// </summary>
+    DelegateNext,
     Count_,
 }
 
@@ -186,6 +192,7 @@ internal static class OpInfo
         S(Op.DynamicImport, R, R, O, I);
         S(Op.Debugger);
         S(Op.Intrinsic, R, I, R, N);
+        S(Op.DelegateNext, R, R, R, R);
         for (int i = 0; i < t.Length; i++) t[i] ??= Array.Empty<OperandKind>();
         return t;
     }

@@ -140,6 +140,10 @@ internal sealed partial class Realm
     /// <summary>Original Map.prototype.entries / Set.prototype.values and the iterator prototypes' next (for-of fast path).</summary>
     public JsBuiltin? MapProtoEntries, MapIteratorNext, SetProtoValues, SetIteratorNext;
     public JsBuiltin? StringProtoIterator, StringIteratorNext;
+    /// <summary>The original %IteratorPrototype%[@@iterator] and %GeneratorPrototype%.next / .return (for-of fast path).</summary>
+    public JsBuiltin? IteratorProtoIterator, GeneratorNext, GeneratorReturn;
+    /// <summary>The layout of the last iterator result a for-of, spread or destructuring step read from a user next (one per realm, not per loop).</summary>
+    internal IterResultLayout IterResultLayout = IterResultLayout.None;
     private JsBuiltin? _throwTypeErrorFunction;
     /// <summary>The callee accessor of every unmapped arguments object (non-configurable, so no one can replace its functions).</summary>
     internal Accessor ThrowTypeErrorAccessor => _throwTypeErrorAccessor ??= new Accessor(ThrowTypeErrorFunction, ThrowTypeErrorFunction);
@@ -674,6 +678,42 @@ internal sealed partial class Realm
         if (_iterSlot < 0 || _nextSlot < 0) return false;
         return ReferenceEquals(ArrayPrototype.ReadSlot(_iterSlot).Ref, ArrayProtoValues)
             && ReferenceEquals(ArrayIteratorPrototype.ReadSlot(_nextSlot).Ref, ArrayIteratorNext);
+    }
+
+    private int _genPristineEpoch = -1, _genNextSlot = -1, _genIterSlot = -1;
+    /// <summary>The last generator function prototype layout seen to have neither an own next nor an own @@iterator.</summary>
+    private Shape? _genOwnerShape;
+
+    /// <summary>
+    /// Whether for-of, spread and yield* over <paramref name="g"/> may resume it directly: reading its @@iterator and next
+    /// runs no code and finds %IteratorPrototype%[@@iterator] and %GeneratorPrototype%.next. The generator has no own
+    /// properties, and its prototype is %GeneratorPrototype% or an ordinary object without those keys whose prototype that is.
+    /// </summary>
+    public bool IsGeneratorIterationPristine(JsGenerator g)
+    {
+        var gp = _generatorPrototype;
+        if (g.Dict != null || g.Shape.Count != 0 || gp == null || GeneratorNext == null || IteratorProtoIterator == null) return false;
+        var p = g.Proto;
+        if (!ReferenceEquals(p, gp))
+        {
+            if (p == null || p.GetType() != typeof(JsObject) || p.Dict != null || !ReferenceEquals(p.Proto, gp)) return false;
+            var ps = p.Shape;
+            if (!ReferenceEquals(ps, _genOwnerShape))
+            {
+                if (ps.IsUnique || ps.IndexOf("next") >= 0 || ps.IndexOf(JsSymbol.Iterator) >= 0) return false;
+                _genOwnerShape = ps;
+            }
+        }
+        if (_genPristineEpoch != ProtoEpoch)
+        {
+            var ip = IteratorPrototype;
+            _genNextSlot = gp.Dict == null ? gp.FindOwn("next", out _) : -1;
+            _genIterSlot = gp.Dict == null && ip.Dict == null && gp.FindOwn(JsSymbol.Iterator, out _) < 0 && ReferenceEquals(gp.Proto, ip) ? ip.FindOwn(JsSymbol.Iterator, out _) : -1;
+            _genPristineEpoch = ProtoEpoch;
+        }
+        return _genNextSlot >= 0 && _genIterSlot >= 0
+            && ReferenceEquals(gp.ReadSlot(_genNextSlot).Ref, GeneratorNext)
+            && ReferenceEquals(IteratorPrototype.ReadSlot(_genIterSlot).Ref, IteratorProtoIterator);
     }
 
     private int _mapPristineEpoch = -1;

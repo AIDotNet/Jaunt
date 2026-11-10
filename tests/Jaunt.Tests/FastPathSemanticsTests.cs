@@ -3130,4 +3130,217 @@ nestedStarsOrder = [[0,"aaab","aaa","",0],[0,"aaaa","aaa","a",0],[0,"aac","aa",0
         Assert.Equal(expected.Length, got.Length);
         for (int i = 0; i < expected.Length; i++) Assert.True(expected[i] == got[i], $"line {i}: expected {expected[i]} but got {got[i]}");
     }
+
+    // Generators resumed without result objects, the for-in key cache, iterator result layouts and yield*: patched next,
+    // return and throw, closing on break and on throws in destructuring, re-entrancy, switch and finally. Expected output from Node.
+    private const string GeneratorsControlFlowScript = """
+const L = [];
+const T = (name, fn) => { let r; try { r = fn(); } catch (e) { r = 'threw ' + (e && e.constructor ? e.constructor.name : typeof e) + (e instanceof Error ? '' : ' ' + String(e)); } L.push(name + ' = ' + JSON.stringify(r)); };
+const GP = Object.getPrototypeOf(function* () {}).prototype;
+const IP = Object.getPrototypeOf(GP);
+function* g3() { yield 1; yield 2; yield 3; }
+function* logged(log, n) { try { for (let i = 0; i < n; i++) { log.push('y' + i); yield i; } return 'ret'; } finally { log.push('fin'); } }
+// for-of, spread, destructuring, builtins over plain generators
+T('forOf', () => { const r = []; for (const x of g3()) r.push(x); return r; });
+T('spread', () => [...g3(), ...logged([], 2)]);
+T('spreadReturnValueDropped', () => { function* g() { yield 1; return 9; } return [...g()]; });
+T('destruct', () => { const log = []; const [a, b] = logged(log, 5); return [a, b, log]; });
+T('destructRest', () => { const log = []; const [a, ...r] = logged(log, 4); return [a, r, log]; });
+T('destructHoles', () => { const log = []; const [, , c, d, e] = logged(log, 3); return [c, d, e, log]; });
+T('builtins', () => [Array.from(g3()), Math.max(...g3()), [...new Set(g3())], [...new Map([[1, 2]].values())], Object.fromEntries((function* () { yield ['a', 1]; })())]);
+T('breakCloses', () => { const log = []; for (const x of logged(log, 5)) { if (x === 1) break; } return log; });
+T('returnInLoopCloses', () => { const log = []; (() => { for (const x of logged(log, 5)) if (x === 2) return; })(); return log; });
+T('throwInLoopCloses', () => { const log = []; try { for (const x of logged(log, 5)) if (x === 1) throw new Error('x'); } catch (e) { log.push(e.message); } return log; });
+T('continueLabelled', () => { const log = []; outer: for (const a of [1, 2]) { for (const x of logged(log, 3)) { if (x === 1) continue outer; log.push('b' + a + x); } } return log; });
+T('destructDefaultThrows', () => { const log = []; try { const [a, b = (() => { throw new Error('d'); })()] = (function* () { try { yield 1; yield undefined; yield 3; } finally { log.push('fin'); } })(); } catch (e) { log.push(e.message); } return log; });
+T('finallyYieldOnReturn', () => { function* g() { try { yield 1; } finally { yield 'f'; } } const it = g(); return [it.next(), it.return(5), it.next(), it.next()]; });
+T('finallyOverridesBreak', () => { const log = []; function* g() { try { yield 1; yield 2; } finally { log.push('cleanup'); } } for (const x of g()) { log.push(x); break; } return log; });
+// return and throw
+T('returnStart', () => { const log = []; const it = logged(log, 3); return [it.return(7), it.next(), log]; });
+T('throwStart', () => { const it = g3(); let e; try { it.throw(new Error('t')); } catch (x) { e = x.message; } return [e, it.next()]; });
+T('throwCaught', () => { function* g() { for (;;) { try { yield 1; } catch (e) { yield 'c' + e; } } } const it = g(); return [it.next(), it.throw(4), it.next(), it.throw(5)]; });
+T('throwDone', () => { const it = g3(); [...it]; try { it.throw(3); } catch (e) { return ['rethrown', e]; } });
+T('nextArgs', () => { function* g(a) { const b = yield a; const c = yield b * 2; return [a, b, c]; } const it = g(1); return [it.next('ignored'), it.next(10), it.next(20), it.next(30)]; });
+T('reentrant', () => { let it; function* g() { yield 1; it.next(); } it = g(); try { for (const x of it) {} } catch (e) { return [e.constructor.name, it.next()]; } });
+T('reentrantReturn', () => { let it; function* g() { try { yield 1; } finally { it.return(); } } it = g(); it.next(); try { it.return(); } catch (e) { return [e.constructor.name, it.next()]; } });
+T('paramsBeforeStart', () => { const log = []; function* g(a = log.push('def'), { b } = { b: 2 }) { log.push('body'); yield a + b; } const it = g(); log.push('created'); return [it.next(), log]; });
+T('argumentsAndThis', () => { function* g() { yield arguments.length; yield typeof this; } return [...g(1, 2), ...g.call(5)]; });
+T('protoFromFunction', () => { function* g() { yield 1; } const p = { next() { return { value: 'mine', done: false }; } }; g.prototype = p; const it = g(); return [Object.getPrototypeOf(it) === p, it.next().value]; });
+T('protoNotObject', () => { function* g() { yield 1; } g.prototype = 3; const it = g(); return [Object.getPrototypeOf(it) === GP, [...it]]; });
+// yield*
+T('yieldStar', () => { function* inner() { const x = yield 1; yield x; return 'r'; } function* outer() { const r = yield* inner(); yield r; } const it = outer(); return [it.next(), it.next('s'), it.next(), it.next()]; });
+T('yieldStarCustom', () => { const log = []; const inner = { [Symbol.iterator]() { return this; }, i: 0, next(v) { log.push('n' + v); return this.i++ < 2 ? { get value() { log.push('gv'); return 'v'; }, get done() { log.push('gd'); return false; } } : { value: 'end', done: true }; } }; function* outer() { log.push('ret ' + (yield* inner)); } const r = []; for (const x of outer()) r.push(x); return [r, log]; });
+T('yieldStarResultIdentity', () => { const res = { value: 1, done: false }; const inner = { [Symbol.iterator]() { return this; }, next() { return res; } }; function* outer() { yield* inner; } return outer().next() === res; });
+T('yieldStarReturn', () => { const log = []; function* inner() { try { yield 1; yield 2; } finally { log.push('inner fin'); } } function* outer() { try { yield* inner(); } finally { log.push('outer fin'); } } for (const x of outer()) { if (x === 1) break; } return log; });
+T('yieldStarThrow', () => { function* inner() { try { yield 1; } catch (e) { yield 'caught ' + e; } } function* outer() { yield* inner(); } const it = outer(); return [it.next(), it.throw('E'), it.next()]; });
+T('tree', () => { function* tree(d) { if (d === 0) { yield 1; return; } yield* tree(d - 1); yield d; yield* tree(d - 1); } let s = 0, n = 0; for (const v of tree(6)) { s += v; n++; } return [s, n]; });
+// patched protocol
+T('patchedNext', () => { const save = GP.next; const log = []; GP.next = function (v) { log.push('next'); return save.call(this, v); }; try { const r = [...g3()]; for (const x of g3()) r.push(x); const [a] = g3(); r.push(a); return [r, log.length]; } finally { GP.next = save; } });
+T('patchedReturn', () => { const save = GP.return; const log = []; GP.return = function (v) { log.push('return'); return save.call(this, v); }; try { for (const x of g3()) break; const [a] = g3(); return log; } finally { GP.return = save; } });
+T('returnNotCallable', () => { const save = GP.return; GP.return = 5; try { for (const x of g3()) break; return 'no throw'; } catch (e) { return e.constructor.name; } finally { GP.return = save; } });
+T('returnUndefined', () => { const save = GP.return; GP.return = undefined; const log = []; try { for (const x of logged(log, 3)) break; return log; } finally { GP.return = save; } });
+T('patchedOnFunctionPrototype', () => { function* g() { yield 1; yield 2; } g.prototype.next = function () { return { value: 'own', done: this.n = (this.n || 0) + 1, get x() { return 1; } }; }; let c = 0; const r = []; for (const x of g()) { r.push(x); if (++c > 3) break; } return r; });
+T('nextGetterOnce', () => { let reads = 0; function* g() { yield 1; yield 2; } Object.defineProperty(g.prototype, 'next', { get() { reads++; return GP.next; } }); const r = [...g()]; return [r, reads]; });
+T('patchedIteratorMethod', () => { const save = IP[Symbol.iterator]; IP[Symbol.iterator] = function () { return { next: () => ({ done: true }) }; }; try { return [...g3()]; } finally { IP[Symbol.iterator] = save; } });
+T('ownIteratorOnGenerator', () => { const it = g3(); it[Symbol.iterator] = function* () { yield 'other'; }; return [...it]; });
+T('nextOnOtherReceiver', () => { const it = g3(); try { GP.next.call({}); } catch (e) { return [e.constructor.name, it.next()]; } });
+T('iteratorProtoOnPrimitive', () => { try { const s = Object.create(IP); return [...s]; } catch (e) { return e.constructor.name; } });
+// custom iterators: result shapes and getters
+T('customShapes', () => { const log = []; let i = 0; const seq = [{ value: 1, done: false }, { done: false, value: 2 }, Object.defineProperty({ value: 0, done: false }, 'value', { get() { log.push('getter'); return 3; } }), Object.create({ done: false, value: 4 }), { value: 5, done: 0 }, { value: 6, done: '' }, { value: 7, done: false }, { value: 8, done: 'yes' }]; const it = { [Symbol.iterator]() { return { next() { return seq[i++]; } }; } }; return [[...it], log]; });
+T('customDoneGetter', () => { let i = 0; const log = []; const res = { value: 1 }; let d = false; Object.defineProperty(res, 'done', { get() { log.push('done'); return d; }, configurable: true }); const it = { [Symbol.iterator]() { return { next() { if (i++ === 2) d = true; return res; } }; } }; return [[...it], log]; });
+T('customProxyResult', () => { let i = 0; const log = []; const it = { [Symbol.iterator]() { return { next() { return new Proxy({ value: i, done: i++ > 1 }, { get(t, k) { log.push(String(k)); return t[k]; } }); } }; } }; return [[...it], log]; });
+T('customNonObject', () => { const it = { [Symbol.iterator]() { return { next() { return 1; } }; } }; try { [...it]; } catch (e) { return e.constructor.name; } });
+T('collSpread', () => { class Coll { constructor(n) { this.n = n; } [Symbol.iterator]() { let i = 0, n = this.n; return { next: () => i < n ? { value: i++, done: false } : { value: undefined, done: true } }; } } return [[...new Coll(5)].length, Math.max(...new Coll(30))]; });
+T('cacheThenPatchFnProto', () => { function* g() { yield 1; yield 2; } const a = [...g()]; g.prototype.next = function () { this.k = (this.k || 0) + 1; return { value: 'p', done: this.k > 2 }; }; return [a, [...g()]]; });
+T('cacheThenProtoIterator', () => { function* g() { yield 1; } const a = [...g()]; g.prototype[Symbol.iterator] = function* () { yield 'it'; }; return [a, [...g()]]; });
+T('cacheThenGPNext', () => { function* g() { yield 1; } const a = [...g()]; const save = GP.next; let n = 0; GP.next = function (v) { n++; return save.call(this, v); }; try { const b = [...g()]; function* o() { yield* g(); } const c = [...o()]; return [a, b, c, n]; } finally { GP.next = save; } });
+T('cacheThenSetProto', () => { function* g() { yield 1; } const a = [...g()]; Object.setPrototypeOf(g.prototype, { next() { return { value: 'swapped', done: (this.d = !this.d) === false }; }, [Symbol.iterator]() { return this; } }); return [a, [...g()]]; });
+T('generatorOwnProps', () => { function* g() { yield 1; yield 2; } const it = g(); it.extra = 1; const it2 = g(); it2.next = () => ({ value: 'own', done: (it2.c = (it2.c || 0) + 1) > 1 }); return [[...it], [...it2]]; });
+T('yieldStarInnerPatched', () => { function* inner() { yield 1; yield 2; } function* outer() { return yield* inner(); } const a = [...outer()]; inner.prototype.next = function (v) { return { value: 'x' + v, done: v === 'stop' }; }; const it = outer(); return [a, it.next('a'), it.next('b'), it.next('stop')]; });
+T('yieldStarNextArgs', () => { function* inner() { let v = yield 'first'; while (v !== 'end') v = yield 'got ' + v; return 'inner done'; } function* outer() { const r = yield* inner(); yield r; } const it = outer(); return [it.next('ignored'), it.next(1), it.next(2), it.next('end'), it.next()]; });
+T('yieldStarNonGenerator', () => { function* outer() { yield* [1, 2]; yield* 'ab'; yield* new Set([3]); } return [...outer()]; });
+T('yieldStarNotCallableNext', () => { function* outer() { yield* { [Symbol.iterator]() { return { next: 5 }; } }; } try { [...outer()]; } catch (e) { return e.constructor.name; } });
+T('yieldStarResultNotObject', () => { function* outer() { yield* { [Symbol.iterator]() { return { next() { return 3; } }; } }; } try { [...outer()]; } catch (e) { return e.constructor.name; } });
+T('yieldStarReentrant', () => { let it; function* inner() { yield 1; it.next(); } function* outer() { yield* inner(); } it = outer(); try { [...it]; } catch (e) { return e.constructor.name; } });
+T('crossRealmLike', () => { function* g() { yield 1; } const it = g(); const fakeNext = GP.next.bind(it); return [fakeNext(), [...{ [Symbol.iterator]: () => ({ next: fakeNext }) }]]; });
+// for-in
+T('forInBasic', () => { const r = []; for (const k in { b: 1, a: 2, 1: 3, 0: 4, [Symbol('s')]: 5 }) r.push(k); return r; });
+T('forInProto', () => { const p = { p1: 1, sh: 2 }; const o = Object.create(p); o.own = 1; Object.defineProperty(o, 'sh', { value: 3, enumerable: false }); const r = []; for (const k in o) r.push(k); return r; });
+T('forInDelete', () => { const o = { a: 1, b: 2, c: 3, d: 4 }; const r = []; for (const k in o) { r.push(k); if (k === 'a') delete o.c; } return r; });
+T('forInDeleteReadd', () => { const o = { a: 1, b: 2, c: 3 }; const r = []; for (const k in o) { r.push(k); if (k === 'a') { delete o.c; o.c = 5; } } return r; });
+T('forInAdd', () => { const o = { a: 1, b: 2 }; const r = []; for (const k in o) { r.push(k); if (k === 'a') o.z = 1; } return r; });
+T('forInProtoDeleteShadow', () => { const p = { a: 'p', b: 'p' }; const o = Object.create(p); o.a = 1; const r = []; for (const k in o) { r.push(k); if (k === 'a') delete o.a; } return r; });
+T('forInObjectPrototypePolluted', () => { Object.prototype.polluted = 1; try { const r = []; for (const k in { a: 1 }) r.push(k); for (const k in []) r.push(k); return r; } finally { delete Object.prototype.polluted; } });
+T('forInAfterUnpollute', () => { const r = []; for (const k in { a: 1 }) r.push(k); return r; });
+T('forInNullProto', () => { const o = Object.create(null); o.x = 1; o[2] = 2; const r = []; for (const k in o) r.push(k); return r; });
+T('forInClassInstance', () => { class A { constructor() { this.x = 1; } m() {} } class B extends A { constructor() { super(); this.y = 2; } } A.prototype.protoField = 3; const r = []; for (const k in new B()) r.push(k); return r; });
+T('forInDictionary', () => { const o = {}; for (let i = 0; i < 80; i++) o['k' + i] = i; for (let i = 0; i < 75; i++) delete o['k' + i]; const r = []; for (const k in o) r.push(k); return r; });
+T('forInMixed', () => { const r = []; for (const k in [5, 6]) r.push(k); for (const k in 'ab') r.push(k); for (const k in new String('xy')) r.push(k); for (const k in null) r.push(k); for (const k in 5) r.push(k); for (const k in function f() {}) r.push(k); return r; });
+T('forInProxyProto', () => { const log = []; const p = new Proxy({ q: 1 }, { ownKeys(t) { log.push('ownKeys'); return Reflect.ownKeys(t); }, getOwnPropertyDescriptor(t, k) { log.push('gopd ' + String(k)); return Reflect.getOwnPropertyDescriptor(t, k); } }); const o = Object.create(p); o.a = 1; const r = []; for (const k in o) r.push(k); return [r, log]; });
+T('forInSameShapeTwice', () => { const mk = () => ({ a: 1, b: 2 }); const r = []; for (let i = 0; i < 3; i++) for (const k in mk()) r.push(k); return r.join(''); });
+T('forInIndexOrder', () => { const o = { b: 1 }; o[10] = 1; o[2] = 1; o.a = 1; o['01'] = 1; o[4294967295] = 1; o[4294967294] = 1; const r = []; for (const k in o) r.push(k); return r; });
+T('forInFrozen', () => { const o = Object.freeze({ a: 1, b: 2 }); const r = []; for (const k in o) r.push(k); return r; });
+// switch
+const sw = v => { const r = []; switch (v) { case 1: r.push('one'); case '1': r.push('str1'); break; default: r.push('def'); case 2: r.push('two'); break; case -0: r.push('zero'); break; case NaN: r.push('nan'); } return r; };
+T('switchFallthrough', () => [1, '1', 2, 3, 0, -0, NaN, undefined, null, true].map(sw));
+const sws = s => { switch (s) { case 'a': return 1; case 'bb': return 2; case 'a' + 'b': return 3; case String(5): return 4; default: return 0; } };
+T('switchStrings', () => ['a', 'bb', 'ab', '5', 5, new String('a'), '', 'A'].map(sws));
+T('switchCaseOrderSideEffects', () => { const log = []; const c = x => (log.push(x), x); switch (3) { case c(1): log.push('m1'); case c(3): log.push('m3'); case c(4): log.push('m4'); break; case c(5): log.push('m5'); } return log; });
+T('switchDefaultFirst', () => { const f = v => { let s = ''; switch (v) { default: s += 'd'; case 1: s += '1'; break; case 2: s += '2'; } return s; }; return [f(1), f(2), f(3)]; });
+T('switchDense', () => { const f = n => { switch (n) { case 0: return 'a'; case 1: case 2: return 'b'; case 3: return n > 50 ? 'c' : 'd'; case 4.5: return 'half'; case 7: return 'seven'; default: return 'e'; } }; return [0, 1, 2, 3, 4, 4.5, 5, 6, 7, 8, -1, '1', 1.0000001].map(f).join(''); });
+T('switchLexical', () => { const f = v => { switch (v) { case 1: let x = 'one'; return x; case 2: try { return x; } catch (e) { return e.constructor.name; } } }; return [f(1), f(2)]; });
+T('switchBreakLabel', () => { let s = ''; out: for (let i = 0; i < 4; i++) { switch (i) { case 1: continue out; case 2: break out; default: s += i; } s += '.'; } return s; });
+// labelled loops, try/finally, try/catch
+T('labels', () => { let t = 0; outer: for (let i = 0; i < 20; i++) { for (let j = 0; j < 20; j++) { if (j > i) continue outer; if (i * j > 150) break outer; t += (i ^ j) & 3; } } return t; });
+T('labelBlock', () => { let s = ''; blk: { s += 'a'; if (s) break blk; s += 'b'; } return s; });
+T('finallyLoop', () => { const log = []; for (let i = 0; i < 4; i++) { try { if (i === 1) continue; if (i === 3) break; log.push('body' + i); } finally { log.push('fin' + i); } } return log; });
+T('finallyReturnOverride', () => { const f = () => { try { return 1; } finally { return 2; } }; const g = () => { for (;;) { try { return 'r'; } finally { break; } } return 'broke'; }; return [f(), g()]; });
+T('finallyThrowOverride', () => { const f = () => { try { throw new Error('a'); } finally { return 'swallowed'; } }; return f(); });
+T('nestedFinallyOrder', () => { const log = []; const f = () => { try { try { return 'x'; } finally { log.push('inner'); } } finally { log.push('outer'); } }; log.push(f()); return log; });
+T('tryCatchNoThrow', () => { let r = 0; for (let i = 0; i < 10; i++) { try { r += i; } catch (e) { r = -1; } } return r; });
+T('doWhileContinue', () => { let k = 0, s = ''; do { k++; if (k === 2) continue; s += k; } while (k < 4); return s; });
+L.join('\n');
+""";
+
+    private const string GeneratorsControlFlowExpected = """
+forOf = [1,2,3]
+spread = [1,2,3,0,1]
+spreadReturnValueDropped = [1]
+destruct = [0,1,["y0","y1","fin"]]
+destructRest = [0,[1,2,3],["y0","y1","y2","y3","fin"]]
+destructHoles = [2,null,null,["y0","y1","y2","fin"]]
+builtins = [[1,2,3],3,[1,2,3],[[1,2]],{"a":1}]
+breakCloses = ["y0","y1","fin"]
+returnInLoopCloses = ["y0","y1","y2","fin"]
+throwInLoopCloses = ["y0","y1","fin","x"]
+continueLabelled = ["y0","b10","y1","fin","y0","b20","y1","fin"]
+destructDefaultThrows = ["fin","d"]
+finallyYieldOnReturn = [{"value":1,"done":false},{"value":"f","done":false},{"value":5,"done":true},{"done":true}]
+finallyOverridesBreak = [1,"cleanup"]
+returnStart = [{"value":7,"done":true},{"done":true},[]]
+throwStart = ["t",{"done":true}]
+throwCaught = [{"value":1,"done":false},{"value":"c4","done":false},{"value":1,"done":false},{"value":"c5","done":false}]
+throwDone = ["rethrown",3]
+nextArgs = [{"value":1,"done":false},{"value":20,"done":false},{"value":[1,10,20],"done":true},{"done":true}]
+reentrant = ["TypeError",{"done":true}]
+reentrantReturn = ["TypeError",{"done":true}]
+paramsBeforeStart = [{"value":3,"done":false},["def","created","body"]]
+argumentsAndThis = [2,"object",0,"object"]
+protoFromFunction = [true,"mine"]
+protoNotObject = [true,[1]]
+yieldStar = [{"value":1,"done":false},{"value":"s","done":false},{"value":"r","done":false},{"done":true}]
+yieldStarCustom = [["v","v"],["nundefined","gd","gd","gv","nundefined","gd","gd","gv","nundefined","ret end"]]
+yieldStarResultIdentity = true
+yieldStarReturn = ["inner fin","outer fin"]
+yieldStarThrow = [{"value":1,"done":false},{"value":"caught E","done":false},{"done":true}]
+tree = [184,127]
+patchedNext = [[1,2,3,1,2,3,1],9]
+patchedReturn = ["return","return"]
+returnNotCallable = "TypeError"
+returnUndefined = ["y0"]
+patchedOnFunctionPrototype = []
+nextGetterOnce = [[1,2],1]
+patchedIteratorMethod = []
+ownIteratorOnGenerator = ["other"]
+nextOnOtherReceiver = ["TypeError",{"value":1,"done":false}]
+iteratorProtoOnPrimitive = "TypeError"
+customShapes = [[1,2,3,4,5,6,7],["getter"]]
+customDoneGetter = [[1,1],["done","done","done"]]
+customProxyResult = [[0,1],["done","value","done","value","done"]]
+customNonObject = "TypeError"
+collSpread = [5,29]
+cacheThenPatchFnProto = [[1,2],["p","p"]]
+cacheThenProtoIterator = [[1],["it"]]
+cacheThenGPNext = [[1],[1],[1],6]
+cacheThenSetProto = [[1],["swapped"]]
+generatorOwnProps = [[1,2],["own"]]
+yieldStarInnerPatched = [[1,2],{"value":"xundefined","done":false},{"value":"xb","done":false},{"value":"xstop","done":true}]
+yieldStarNextArgs = [{"value":"first","done":false},{"value":"got 1","done":false},{"value":"got 2","done":false},{"value":"inner done","done":false},{"done":true}]
+yieldStarNonGenerator = [1,2,"a","b",3]
+yieldStarNotCallableNext = "TypeError"
+yieldStarResultNotObject = "TypeError"
+yieldStarReentrant = "TypeError"
+crossRealmLike = [{"value":1,"done":false},[]]
+forInBasic = ["0","1","b","a"]
+forInProto = ["own","p1"]
+forInDelete = ["a","b","d"]
+forInDeleteReadd = ["a","b","c"]
+forInAdd = ["a","b"]
+forInProtoDeleteShadow = ["a","b"]
+forInObjectPrototypePolluted = ["a","polluted","polluted"]
+forInAfterUnpollute = ["a"]
+forInNullProto = ["2","x"]
+forInClassInstance = ["x","y","protoField"]
+forInDictionary = ["k75","k76","k77","k78","k79"]
+forInMixed = ["0","1","0","1","0","1"]
+forInProxyProto = [["a","q"],["ownKeys","gopd q"]]
+forInSameShapeTwice = "ababab"
+forInIndexOrder = ["2","10","4294967294","b","a","01","4294967295"]
+forInFrozen = ["a","b"]
+switchFallthrough = [["one","str1"],["str1"],["two"],["def","two"],["zero"],["zero"],["def","two"],["def","two"],["def","two"],["def","two"]]
+switchStrings = [1,2,3,4,0,0,0,0]
+switchCaseOrderSideEffects = [1,3,"m3","m4"]
+switchDefaultFirst = ["1","2","d1"]
+switchDense = "abbdehalfeeseveneeee"
+switchLexical = ["one","ReferenceError"]
+switchBreakLabel = "0."
+labels = 144
+labelBlock = "a"
+finallyLoop = ["body0","fin0","fin1","body2","fin2","fin3"]
+finallyReturnOverride = [2,"broke"]
+finallyThrowOverride = "swallowed"
+nestedFinallyOrder = ["inner","outer","x"]
+tryCatchNoThrow = 45
+doWhileContinue = "134"
+""";
+
+    [Fact]
+    public void GeneratorsForInAndControlFlowMatchReferenceBehavior()
+    {
+        using var engine = new JsEngine();
+        var got = engine.Evaluate(GeneratorsControlFlowScript).AsString().Split('\n');
+        var expected = GeneratorsControlFlowExpected.ReplaceLineEndings("\n").TrimEnd('\n').Split('\n');
+        Assert.Equal(expected.Length, got.Length);
+        for (int i = 0; i < expected.Length; i++) Assert.True(expected[i] == got[i], $"line {i}: expected {expected[i]} but got {got[i]}");
+    }
 }

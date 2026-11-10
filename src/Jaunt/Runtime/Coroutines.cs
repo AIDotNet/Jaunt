@@ -1,4 +1,5 @@
 using System;
+using Jaunt.Compiler;
 
 namespace Jaunt.Runtime;
 
@@ -24,8 +25,21 @@ internal static class Coroutines
         var frame = vm.PushFrame(c, thisValue, args, JsValue.Undefined, FrameFlags.OwnsRegs | FrameFlags.Coroutine);
         // runs parameter initialization up to the InitialYield; the generator object (and its prototype lookup)
         // is created afterwards (FunctionDeclarationInstantiation precedes OrdinaryCreateFromConstructor)
-        vm.Run(frame);
-        var protoV = c.Get("prototype");
+        var code = frame.Code;
+        if (code[0] == (int)Op.InitialYield)
+        {
+            // nothing to initialize: suspend at the InitialYield as the interpreter would, without entering it
+            frame.ResumeSentReg = code[1];
+            frame.ResumeModeReg = code[2];
+            frame.Pc = 3;
+            frame.Suspend = SuspendKind.Initial;
+            vm.LastSuspend = SuspendKind.Initial;
+            vm.DetachFrame(frame);
+        }
+        else vm.Run(frame);
+        // an own data property (the usual case) is read from its slot; anything else through [[Get]]
+        int pi = c.FindOwn("prototype", out var pf);
+        var protoV = pi >= 0 && (pf & PropFlags.Accessor) == 0 ? c.ReadSlot(pi) : c.Get("prototype");
         var proto = protoV.IsObject ? protoV.AsObjectUnchecked : realm.GeneratorPrototype;
         var gen = new JsGenerator(realm, proto) { Frame = frame, State = GeneratorState.SuspendedStart };
         return JsValue.FromObject(gen);
@@ -43,6 +57,19 @@ internal static class Coroutines
     {
         if (thisValue.IsNotObject || thisValue.Ref is not JsGenerator gen)
             throw JsErrors.TypeError(realm, $"{method} method called on incompatible receiver {thisValue}");
+        int kind = ResumeStep(realm, gen, mode, value, out var r);
+        return kind == StepRaw ? r : CreateIterResult(realm, r, kind == StepDone);
+    }
+
+    /// <summary>What <see cref="ResumeStep"/> produced: a yielded value, an iterator result object from yield*, or the completion value.</summary>
+    public const int StepYield = 0, StepRaw = 1, StepDone = 2;
+
+    /// <summary>
+    /// GeneratorResume / GeneratorResumeAbrupt without the iterator result object, which a caller that only reads its
+    /// value and done (for-of, spread, destructuring) does not need: the object would be fresh and unreachable from JS.
+    /// </summary>
+    public static int ResumeStep(Realm realm, JsGenerator gen, int mode, JsValue value, out JsValue result)
+    {
         var vm = realm.Vm;
         switch (gen.State)
         {
@@ -50,12 +77,14 @@ internal static class Coroutines
                 throw JsErrors.TypeError(realm, "Generator is already running");
             case GeneratorState.Completed:
                 if (mode == ModeThrow) throw new JsThrowException(value);
-                return CreateIterResult(realm, mode == ModeReturn ? value : JsValue.Undefined, true);
+                result = mode == ModeReturn ? value : JsValue.Undefined;
+                return StepDone;
             case GeneratorState.SuspendedStart when mode != ModeNext:
                 gen.State = GeneratorState.Completed;
                 gen.Frame = null;
                 if (mode == ModeThrow) throw new JsThrowException(value);
-                return CreateIterResult(realm, value, true);
+                result = value;
+                return StepDone;
         }
         vm.EnsureNativeStack();
         var frame = gen.Frame!;
@@ -80,14 +109,15 @@ internal static class Coroutines
                 gen.Frame = null;
             }
         }
+        result = r;
         switch (frame.Suspend)
         {
             case SuspendKind.Yield:
                 gen.State = GeneratorState.SuspendedYield;
-                return CreateIterResult(realm, r, false);
+                return StepYield;
             case SuspendKind.YieldRaw:
                 gen.State = GeneratorState.SuspendedYield;
-                return r;
+                return StepRaw;
             case SuspendKind.Await:
                 gen.State = GeneratorState.Completed;
                 throw new InvalidOperationException("Jaunt internal error: await in generator.");
@@ -95,7 +125,7 @@ internal static class Coroutines
                 gen.State = GeneratorState.Completed;
                 gen.Frame = null;
                 vm.ReleaseCoroutineFrame(frame);
-                return CreateIterResult(realm, r, true);
+                return StepDone;
         }
     }
 
