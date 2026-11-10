@@ -705,3 +705,42 @@ empty loop from both versions.
 Verified: unit tests 637/637 plain and poisoned, test262 100,167/100,169, NativeAOT `verify`, and 56 cross-checks of `for-in` and
 generator edge cases that match main exactly. They match Node except where a key is made non-enumerable during the loop, which the
 specification leaves to the implementation.
+
+## Eleventh pass: string building, builtin callbacks, nqueens (2026-11-10)
+
+Three changes, built in parallel and measured merged against the tenth pass, three rounds over 59 workloads plus seven rounds on the
+targets. Wall-time geometric mean −0.8% against the tenth pass, and −4.3% against 1.0.2 for everything since that release.
+
+| Workload | Change, 7 rounds |
+| --- | ---: |
+| `strings/concat-build` | −12.6% |
+| `compute/nqueens` | −5.8% |
+| `apps/state-reducer` | −4.2% |
+| `functional/higher-order` | −3.3% |
+| `strings/regex` | −4.6% (3 rounds) |
+| `apps/graph-algos` | −4.3% (3 rounds) |
+| `functional/iterators-generators` | +0.4% |
+
+`compute/matmul` read +6.3% in the 3-round run; it alternates between about 3.4 and 3.7 ms in unchanged builds as well, so it is
+treated as noise. `closures` and `mandelbrot` read +3.0 to +3.1%, at the noise level.
+
+**Strings.** Jaunt already had a rope for results of 256 characters or more, flattened once and iteratively. Template literals and `+`
+chains that are strings from their first operand now convert their parts in source order and build the result in one allocation
+of the exact size (`ToStrPart`/`StrConcat`, handled outside `RunLoop`). Results of 256 characters or more still concatenate pairwise, so
+ropes and memory charges are unchanged. When a later operand can run code, earlier parts are converted first, and the
+`MaxStringLength` RangeError is raised at the same point as before: with the limit at 1000, nine probes of throw position and side
+effects match the previous build exactly, and 28 evaluation-order cases match both Node and the previous build. `join` of dense string
+arrays sizes the result in one pass. Single operations: template literals −50 to −57%, `join` −51%. An append buffer for `s += x` helped
+long loops by 21–44% but slowed `string-hash-codec` by 9–10% and was not kept.
+
+**Builtin callbacks.** A callback from a builtin already cost less than a JS-to-JS call (12.5–15 ns against 19 ns). The gap was a fixed
+cost per builtin call: `ArraySpeciesCreate` read `constructor` on every `map` or `slice`. It is now skipped while the array is ordinary
+and `Array.prototype.constructor` is the original data property. `[].map(cb)` −29%, `map-3` −19%. Limits and stack depth inside long
+`map`, `forEach` and spread loops are covered by new tests.
+
+**nqueens.** A shorter `ToInt32` decode, checked against a BigInteger reference on 20 million random doubles, and number truthiness
+tested on the integer bits. A dependent bitwise operation still costs about 18 cycles here (decode, encode, then store-to-load
+forwarding), and removing that dependency made a model interpreter 2.5 times faster, so closing the gap to QuickJS (about 1.49 times
+slower) likely needs an int32 representation rather than handler tuning.
+
+Verified on the merged result: unit tests 649/649 plain and poisoned, test262 100,167/100,169, NativeAOT `verify`.

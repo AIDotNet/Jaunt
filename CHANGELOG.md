@@ -15,6 +15,12 @@ counts as public API.
 - `for-in` over ordinary objects takes enumerable keys from a cache on the object's shape: about six times faster for a small object.
 - Generators consumed by `for-of`, spread, destructuring and `yield*` are resumed directly, without allocating result objects or
   looking up `next` on every step, while `next` is the original builtin. Creating a generator does not enter the interpreter.
+- Template literals and `+` chains of three or more string parts build their result in one allocation. `Array.prototype.join`
+  sizes its result in one pass. `split` with a one-character separator searches for the character.
+- `map`, `filter`, `slice` and the other species-creating array methods skip the `constructor` lookup while `Array.prototype` is
+  unmodified. Custom iterators with a plain `next` method are called directly.
+- Bitwise operators decode their operands with a shorter dependency chain, and number truthiness is tested without leaving integer
+  registers.
 
 ### Changed
 
