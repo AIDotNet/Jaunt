@@ -709,7 +709,7 @@ internal sealed partial class Vm
         {
             int slot = ic.Slot;
             if (slot >= obj.Slots.Length) GrowSlots(obj, slot);
-            obj.Slots[slot] = value;
+            JsValue.Store(ref obj.Slots[slot], value);
             obj.Shape = ic.NewShape!;
             Realm.ChargeProperty();
             return;

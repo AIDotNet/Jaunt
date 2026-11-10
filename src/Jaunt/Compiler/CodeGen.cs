@@ -182,6 +182,7 @@ internal sealed partial class CodeGen
         _fb.Finish(t);
         _fb.Return();
         BytecodeVerifier.Verify(t);
+        BytecodeVerifier.MarkThisBinding(t);
         _script.FunctionCount++;
         _script.IcTotal += t.IcCount;
         return t;

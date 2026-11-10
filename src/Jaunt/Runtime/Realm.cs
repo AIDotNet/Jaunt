@@ -391,6 +391,16 @@ internal sealed partial class Realm
 
     // ------------------------------------------------------------------ shapes
 
+    /// <summary>The layout of a new array of this realm; its Array.prototype exists and is marked as a prototype from here on.</summary>
+    internal Shape ArrayRootShape
+    {
+        get
+        {
+            _ = ArrayPrototype;
+            return Shapes.ArrayRoot;
+        }
+    }
+
     public Shape RootShapeFor(JsObject? proto)
     {
         if (proto == null) return _nullRoot ??= Shape.CreateRoot(null);
@@ -735,6 +745,22 @@ internal sealed partial class Realm
         return _genNextSlot >= 0 && _genIterSlot >= 0
             && ReferenceEquals(gp.ReadSlot(_genNextSlot).Ref, GeneratorNext)
             && ReferenceEquals(IteratorPrototype.ReadSlot(_genIterSlot).Ref, IteratorProtoIterator);
+    }
+
+    private int _noIndicesEpoch = -1;
+
+    /// <summary>
+    /// Whether <paramref name="p"/> is this realm's Array.prototype, known to have no index keys on it or on Object.prototype
+    /// above it. A prototype's named layout only changes with <see cref="ProtoEpoch"/>; the prototype's own elements are read here.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal bool IsArrayPrototypeWithoutIndices(JsObject p) =>
+        ReferenceEquals(p, _arrayPrototype) && _noIndicesEpoch == ProtoEpoch && Unsafe.As<JsArray>(p).Length == 0;
+
+    /// <summary>A walk from <paramref name="p"/> found no index keys.</summary>
+    internal void NoteNoIndicesFrom(JsObject p)
+    {
+        if (ReferenceEquals(p, _arrayPrototype) && ReferenceEquals(p.Proto, _objectPrototype)) _noIndicesEpoch = ProtoEpoch;
     }
 
     private int _mapPristineEpoch = -1;

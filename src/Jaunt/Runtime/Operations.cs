@@ -237,6 +237,13 @@ internal static class Operations
     public static long RelativeIndex(Realm realm, in JsValue v, long len, long defaultValue)
     {
         if (v.IsUndefined) return defaultValue;
+        if (v.IsNumber)
+        {
+            // a non-negative whole number (NaN converts to 0 and is not equal to it)
+            double d = v.Num;
+            long whole = (long)d;
+            if (whole == d && whole >= 0) return Math.Min(whole, len);
+        }
         double rel = ToIntegerOrInfinity(realm, v);
         if (rel < 0) return (long)Math.Max(len + rel, 0);
         return (long)Math.Min(rel, len);

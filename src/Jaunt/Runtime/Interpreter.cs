@@ -49,6 +49,8 @@ internal sealed partial class Vm
         JsValue thrown;
         JsValue result;
         JsClosure callee;
+        FunctionTemplate calleeTemplate;
+        FunctionFlags calleeFlags;
         int callThis, callArgs, callArgc;
 
         if (recovering)
@@ -62,6 +64,7 @@ internal sealed partial class Vm
                 {
                     switch ((Op)ip)
                     {
+                        case Op.Nop: ip = ref Unsafe.Add(ref ip, 1); continue;   // a case for opcode 0 saves an instruction per dispatch
                         case Op.Mov: JsValue.Store(ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)), Unsafe.Add(ref r0, Unsafe.Add(ref ip, 2))); ip = ref Unsafe.Add(ref ip, 3); continue;
                         case Op.LoadUndef: Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = default; ip = ref Unsafe.Add(ref ip, 2); continue;
                         case Op.LoadNull: Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)) = JsValue.Null; ip = ref Unsafe.Add(ref ip, 2); continue;
@@ -138,9 +141,10 @@ internal sealed partial class Vm
                         case Op.GetGlobal:
                         {
                             ref var ic = ref f.Feedback.Ics[Unsafe.Add(ref ip, 3)];
-                            if (ic.Kind == IcKind.GlobalProp && ic.Epoch == Realm.GlobalVersion)
+                            var realm = Realm;
+                            if (ic.Kind == IcKind.GlobalProp && ic.Epoch == realm.GlobalVersion)
                             {
-                                var v = Realm.GlobalObject.Dict!.Values[ic.Slot];
+                                var v = realm.GlobalObject.Dict!.Values[ic.Slot];
                                 if (v.IsNotEmpty) { JsValue.Store(ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 1)), v); ip = ref Unsafe.Add(ref ip, 4); continue; }
                             }
                             else if (ic.Kind == IcKind.GlobalCell)
@@ -881,14 +885,19 @@ internal sealed partial class Vm
                         {
                             ref readonly var fv = ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 2));
                             f.Pc = PcAt(ref code0, ref ip) + 6;
-                            if (fv.IsObject && fv.Ref is JsClosure c && (c.Template.Flags & InlineCallMask) == 0)
+                            if (fv.Ref is JsClosure c)
                             {
-                                callee = c;
-                                int tr = Unsafe.Add(ref ip, 3);
-                                callThis = tr;
-                                callArgs = Unsafe.Add(ref ip, 4);
-                                callArgc = Unsafe.Add(ref ip, 5);
-                                goto EnterClosure;
+                                calleeTemplate = c.Template;
+                                calleeFlags = calleeTemplate.Flags;
+                                if ((calleeFlags & InlineCallMask) == 0)
+                                {
+                                    callee = c;
+                                    int tr = Unsafe.Add(ref ip, 3);
+                                    callThis = tr;
+                                    callArgs = Unsafe.Add(ref ip, 4);
+                                    callArgc = Unsafe.Add(ref ip, 5);
+                                    goto EnterClosure;
+                                }
                             }
                             var rf = CallOutOfLoop(f, PcAt(ref code0, ref ip), fv);
                             if (rf != null) { f = rf; goto Reload; }
@@ -922,13 +931,18 @@ internal sealed partial class Vm
                                 fv = GetPropSlow(ov, f.K[Unsafe.Add(ref ip, 3)], ref ic);
                             }
                             f.Pc = PcAt(ref code0, ref ip) + 7;
-                            if (fv.IsObject && fv.Ref is JsClosure c && (c.Template.Flags & InlineCallMask) == 0)
+                            if (fv.Ref is JsClosure c)
                             {
-                                callee = c;
-                                callThis = Unsafe.Add(ref ip, 2);
-                                callArgs = Unsafe.Add(ref ip, 5);
-                                callArgc = Unsafe.Add(ref ip, 6);
-                                goto EnterClosure;
+                                calleeTemplate = c.Template;
+                                calleeFlags = calleeTemplate.Flags;
+                                if ((calleeFlags & InlineCallMask) == 0)
+                                {
+                                    callee = c;
+                                    callThis = Unsafe.Add(ref ip, 2);
+                                    callArgs = Unsafe.Add(ref ip, 5);
+                                    callArgc = Unsafe.Add(ref ip, 6);
+                                    goto EnterClosure;
+                                }
                             }
                             // arr.push(v) on a plain array: append without building NativeArgs
                             if (Unsafe.Add(ref ip, 6) == 1 && fv.Ref is JsBuiltin pb && ReferenceEquals(pb.Fn, ArrayBuiltins.PushFn) && ov.Ref is JsArray pa
@@ -1108,34 +1122,98 @@ internal sealed partial class Vm
 
     EnterClosure:
         {
+            // A call is about a third of the instructions of call-heavy code, so this is PushCallFrame with everything rare moved
+            // out of the way, and such a frame keeps FrameFlags clear for Return's single test. See Vm.BindCallWindow for
+            // the overlapping register window. A callee with an arguments array, or a caller whose registers are not the top of the
+            // shared stack (a coroutine, or the chunk is full), takes the general path.
             if (--_ticks <= 0) Checkpoint();
             int bp = f.Base;
             int dst = bp + Unsafe.Add(ref ip, 1);
-            f = PushCallFrame(callee, f.Regs, callThis < 0 ? -1 : bp + callThis, bp + callArgs, callArgc);
+            JsValue[] regs = f.Regs;
+            int argStart = bp + callArgs;
+            int d = Sp;
+            if (d >= _spLimit) StackOverflowFrame();
+            // the new frame goes to f at once: it is live across the rare calls below, and f has a callee-saved register
+            f = _frames[d] ?? RentFrameSlow();
+            int end = argStart + calleeTemplate.RegisterCount;
+            if ((calleeFlags & FunctionFlags.NeedsArgsArray) != 0 || !ReferenceEquals(regs, _chunk) || end > regs.Length)
+            {
+                f = PushCallFrameOutOfLine(callee, regs, callThis < 0 ? -1 : bp + callThis, argStart, callArgc);
+                f.RetIndex = dst;
+                goto Reload;
+            }
+            Sp = d + 1;
+            f.SavedTop = _top;
+            f.Flags = FrameFlags.None;
+            _top = end;
+            if (end > _hwm) CallWindowHighWater(f, calleeTemplate, regs, argStart, end);
+            f.Base = argStart;
+            if (!ReferenceEquals(f.Regs, regs)) f.Regs = regs;
+            // the bindings and missing parameters start as undefined, every other register is written before it is read
+            int n = callArgc < calleeTemplate.ParamCount ? callArgc : calleeTemplate.ParamCount;
+            int initEnd = calleeTemplate.InitUndefEnd;
+            while (n < initEnd) { regs[argStart + n] = default; n++; }
+            if (!ReferenceEquals(f.Callee, callee))
+            {
+                f.Callee = callee;
+                var fb = callee.Feedback;
+                if (!ReferenceEquals(f.Feedback, fb)) f.Feedback = fb;
+            }
+            f.Pc = 0;
+            var env = callee.Env;
+            if (!ReferenceEquals(f.Env, env)) f.Env = env;
+            f.EnvDepth = 0;
+            f.Suspend = SuspendKind.None;
+            var calleeRealm = callee.Realm;
+            if (!ReferenceEquals(Realm, calleeRealm)) SwitchCallRealm(f, calleeRealm);
+            if ((calleeFlags & FunctionFlags.NoThisBinding) == 0)
+            {
+                if (callThis < 0 || (calleeFlags & FunctionFlags.Arrow) != 0 || callee.HasRareParts || f.ThisBox != null)
+                    BindThisSlow(f, callee, regs, callThis < 0 ? -1 : bp + callThis);
+                else
+                {
+                    ref readonly var tv = ref regs[bp + callThis];
+                    if ((calleeFlags & FunctionFlags.Strict) != 0 || tv.IsObject)
+                    {
+                        if (!ReferenceEquals(f.This.Ref, tv.Ref) || f.This.Bits != tv.Bits) f.This = tv;
+                    }
+                    else f.This = CoerceSloppyThis(calleeRealm, tv);
+                }
+            }
             f.RetIndex = dst;
-            code0 = ref MemoryMarshal.GetArrayDataReference(f.Code);
+            code0 = ref MemoryMarshal.GetArrayDataReference(calleeTemplate.Code);
             ip = ref code0;
-            r0 = ref Unsafe.Add(ref MemoryMarshal.GetArrayDataReference(f.Regs), f.Base);
+            r0 = ref Unsafe.Add(ref MemoryMarshal.GetArrayDataReference(regs), argStart);
             goto Dispatch;
         }
 
     Return:
         {
             var flags = f.Flags;
-            if ((flags & FrameFlags.Construct) != 0 && result.IsNotObject)
-            {
-                result = ConstructReturnValue(f, result);
-                if (result.IsEmpty) { f = ConstructReturnThrow(f); goto Reload; }
-            }
-            if ((flags & FrameFlags.Coroutine) != 0 && (flags & FrameFlags.Entry) != 0)
-            {
-                FinishCoroutine(f);
-                return result;
-            }
             int ret = f.RetIndex;
-            PopFrame(f);
-            if ((flags & FrameFlags.Entry) != 0) return result;
-            f = FrameAt(Sp - 1);
+            if (flags == FrameFlags.None)
+            {
+                _top = f.SavedTop;
+                int d = Sp - 1;
+                Sp = d;
+                f = _frames[d - 1]!;
+            }
+            else
+            {
+                if ((flags & FrameFlags.Construct) != 0 && result.IsNotObject)
+                {
+                    result = ConstructReturnValue(f, result);
+                    if (result.IsEmpty) { f = ConstructReturnThrow(f); goto Reload; }
+                }
+                if ((flags & FrameFlags.Coroutine) != 0 && (flags & FrameFlags.Entry) != 0)
+                {
+                    FinishCoroutine(f);
+                    return result;
+                }
+                PopFrame(f);
+                if ((flags & FrameFlags.Entry) != 0) return result;
+                f = FrameAt(Sp - 1);
+            }
             ref JsValue regs0 = ref MemoryMarshal.GetArrayDataReference(f.Regs);
             JsValue.Store(ref Unsafe.Add(ref regs0, ret), result);
             r0 = ref Unsafe.Add(ref regs0, f.Base);

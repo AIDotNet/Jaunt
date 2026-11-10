@@ -236,7 +236,7 @@ internal static class ArrayBuiltins
                 if (count > 0)
                 {
                     res.EnsureCapacity((uint)count);
-                    Array.Copy(arr.Items, k, res.Items, 0, count);
+                    arr.Items.AsSpan((int)k, (int)count).CopyTo(res.Items);
                 }
                 realm.Vm.Tick((int)Math.Min(count / 64, 1000));
                 return JsValue.FromObject(res);

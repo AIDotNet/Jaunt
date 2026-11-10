@@ -321,16 +321,27 @@ internal sealed class JsArray : JsObject
         if (q != null && Length < MinQueueLength / 2) LeaveQueueMode();
     }
 
-    public JsArray(Realm realm, int capacity = 0, JsObject? proto = null)
+    /// <summary>An array with the realm's Array.prototype.</summary>
+    public JsArray(Realm realm, int capacity = 0)
+        : base(realm, exotic: true, realm.ArrayRootShape)
+    {
+        Items = NewStore(realm, capacity);
+    }
+
+    public JsArray(Realm realm, int capacity, JsObject? proto)
         : base(realm, proto ?? realm.ArrayPrototype, exotic: true, uniqueShape: false)
     {
-        if (capacity == 0) Items = Array.Empty<JsValue>();
-        else
-        {
-            Items = new JsValue[capacity];
-            MarkHoles(Items, 0); // slots beyond Length are holes
-            realm.ChargeBytes(capacity * 24L);
-        }
+        Items = NewStore(realm, capacity);
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static JsValue[] NewStore(Realm realm, int capacity)
+    {
+        if (capacity == 0) return Array.Empty<JsValue>();
+        var items = new JsValue[capacity];
+        MarkHoles(items, 0); // slots beyond Length are holes
+        realm.ChargeBytes(capacity * 24L);
+        return items;
     }
 
     /// <summary>A new array whose elements are exactly <paramref name="items"/>, which it takes over.</summary>
@@ -373,6 +384,7 @@ internal sealed class JsArray : JsObject
         return _queue != null && TryGetPaged(index, out value);
     }
 
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private bool TryGetPaged(uint index, out JsValue value)
     {
         value = default;
@@ -643,8 +655,16 @@ internal sealed class JsArray : JsObject
         return Get(PropertyKey.FromIndex(index), receiver);
     }
 
+    [MethodImpl(MethodImplOptions.NoInlining)]   // not worth a place in the interpreter's hole paths
     internal static bool ProtoChainMayHaveIndices(JsObject? p)
     {
+        if (p != null && p.Realm.IsArrayPrototypeWithoutIndices(p)) return false;
+        return ProtoChainMayHaveIndicesWalk(p);
+    }
+
+    private static bool ProtoChainMayHaveIndicesWalk(JsObject? first)
+    {
+        var p = first;
         while (p != null)
         {
             if (p.IsExotic && p is not JsArray) return true;
@@ -652,6 +672,7 @@ internal sealed class JsArray : JsObject
             if (p.Dict != null ? p.Dict.HasIndexKeys : p.Shape.HasIndexKeys) return true;
             p = p.Proto;
         }
+        first?.Realm.NoteNoIndicesFrom(first);
         return false;
     }
 

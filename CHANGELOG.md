@@ -21,6 +21,10 @@ counts as public API.
   unmodified. Custom iterators with a plain `next` method are called directly.
 - Bitwise operators decode their operands with a shorter dependency chain, and number truthiness is tested without leaving integer
   registers.
+- Calls through a call instruction set up only what a plain call needs, and the call path keeps the new frame in a register:
+  `fib` about 20% faster, plain and method calls about 18–23% faster.
+- Stores that do not change a reference skip the write barrier. `Array.prototype.push` and `pop` skip the prototype walk, and
+  `Array.from({ length })` and array-like index reads avoid key strings.
 
 ### Changed
 

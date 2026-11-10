@@ -3793,4 +3793,215 @@ hashChain = -254617337
         Assert.Equal(expected.Length, got.Length);
         for (int i = 0; i < expected.Length; i++) Assert.True(expected[i] == got[i], $"line {i}: expected {expected[i]} but got {got[i]}");
     }
+
+    // Array-like index reads without a key string, the species shortcut, slice's relative indices; the expected values were produced by Node from the same script.
+    private const string ArrayLikeSpeciesSliceScript = """
+const out = {};
+const shape = a => { const r = []; for (let i = 0; i < a.length; i++) r.push(i in a ? a[i] : 'hole'); return r; };
+// reading an index of an array-like: no key string when neither it nor its prototypes have index keys
+out.fromLengthOnly = Array.from({ length: 3 }, (v, i) => [v, i]);
+out.fromOwnIndex = Array.from({ length: 3, 1: 'x' });
+out.fromProtoIndex = Array.from(Object.create({ 1: 'p', length: 3 }));
+out.fromProtoGetter = (() => { const log = []; const p = { get 2() { log.push('get'); return 'g'; } }; const o = Object.create(p); o.length = 3; return [Array.from(o), log]; })();
+out.fromObjectProtoIndex = (() => { Object.prototype[1] = 'op'; try { return Array.from({ length: 3 }); } finally { delete Object.prototype[1]; } })();
+out.fromAfterDelete = (() => { Object.prototype[1] = 'op'; delete Object.prototype[1]; return Array.from({ length: 3 }); })();
+out.fromProxyProto = (() => { const log = []; const o = Object.create(new Proxy({}, { get(t, k) { log.push(String(k)); return typeof k === 'symbol' ? undefined : 'px'; } })); o.length = 2; return [Array.from(o), log]; })();
+out.fromProxy = (() => { const log = []; const o = new Proxy({ length: 2 }, { get(t, k) { log.push(String(k)); return t[k]; } }); return [Array.from(o), log]; })();
+out.fromArrayProto = (() => { const o = Object.create(['a', 'b']); o.length = 3; return Array.from(o); })();
+out.fromStringProto = (() => { const o = Object.create(new String('ab')); o.length = 3; o[Symbol.iterator] = undefined; return Array.from(o); })();
+out.fromTypedProto = (() => { const o = Object.create(new Uint8Array([7, 8])); o.length = 3; o[Symbol.iterator] = undefined; try { return Array.from(o); } catch (e) { return e.constructor.name; } })();
+out.fromNullProto = (() => { const o = Object.create(null); o.length = 2; o[0] = 1; return Array.from(o); })();
+out.fromFunction = (() => { function f(a, b) {} f[1] = 'x'; return Array.from(f); })();
+out.fromDictProto = (() => { const p = {}; for (let i = 0; i < 100; i++) p['k' + i] = i; for (let i = 0; i < 90; i++) delete p['k' + i]; p[1] = 'dict'; const o = Object.create(p); o.length = 2; return Array.from(o); })();
+out.fromDictOwn = (() => { const o = { a: 1, length: 2 }; delete o.a; o[1] = 'own'; return Array.from(o); })();
+out.fromIndexAddedByCallback = (() => { const o = { length: 3 }; return Array.from(o, (v, i) => { o[i + 1] = 'n' + i; return v; }); })();
+out.fromProtoAddedByCallback = (() => { const p = {}; const o = Object.create(p); o.length = 3; return Array.from(o, (v, i) => { p[i + 1] = 'p' + i; return v; }); })();
+out.fromEdgeKeys = (() => { const o = { length: 2, 4294967295: 'not-index', '01': 'x', '-1': 'y' }; return [Array.from(o), Array.prototype.includes.call(o, 'x')]; })();
+out.includesArrayLike = [Array.prototype.includes.call({ length: 2 }, undefined), Array.prototype.includes.call({ length: 2, 1: 5 }, 5), Array.prototype.at.call({ length: 2 }, 1), Array.prototype.toReversed.call({ length: 2, 0: 'z' })];
+// species: the same result as the full steps for every change to the array or Array.prototype.constructor
+const speciesResult = f => { const r = f(); return [Array.isArray(r), r.constructor === Array, r instanceof Array, r.length, r.tag]; };
+out.speciesPlain = [speciesResult(() => [1, 2].slice()), speciesResult(() => [1, 2].map(x => x)), speciesResult(() => [1, 2].filter(x => x)), speciesResult(() => [1, 2].flatMap(x => x)), speciesResult(() => [[1], 2].flat()), speciesResult(() => [1, 2].splice(0, 1)), speciesResult(() => [1].concat(2))];
+out.speciesOwnConstructor = (() => { class C { constructor(n) { this.tag = 'C' + n; } } C[Symbol.species] = C; const a = [1, 2]; a.constructor = C; return speciesResult(() => a.slice(0, 1)); })();
+out.speciesOwnUndefined = (() => { const a = [1, 2]; a.constructor = undefined; return speciesResult(() => a.slice()); })();
+out.speciesOwnBad = (() => { const a = [1, 2]; a.constructor = 1; try { a.slice(); return 'no'; } catch (e) { return e.constructor.name; } })();
+out.speciesNullSpecies = (() => { const a = [1, 2]; a.constructor = { [Symbol.species]: null }; return speciesResult(() => a.slice()); })();
+out.speciesProtoValue = (() => { const saved = Array.prototype.constructor; class D { constructor(n) { this.tag = 'D' + n; } static get [Symbol.species]() { return D; } } Array.prototype.constructor = D; try { return [speciesResult(() => [1].slice()), speciesResult(() => [1].map(x => x)), speciesResult(() => [1].filter(x => x))]; } finally { Array.prototype.constructor = saved; } })();
+out.speciesProtoRestored = speciesResult(() => [1].slice());
+out.speciesProtoGetter = (() => { const saved = Object.getOwnPropertyDescriptor(Array.prototype, 'constructor'); const log = []; Object.defineProperty(Array.prototype, 'constructor', { get() { log.push('get'); return Array; }, configurable: true }); try { const r = speciesResult(() => [1].slice()); return [r, log]; } finally { Object.defineProperty(Array.prototype, 'constructor', saved); } })();
+out.speciesProtoDeleted = (() => { const saved = Object.getOwnPropertyDescriptor(Array.prototype, 'constructor'); delete Array.prototype.constructor; try { const r = [1].slice(); return [Array.isArray(r), r.constructor === Object, r.length]; } finally { Object.defineProperty(Array.prototype, 'constructor', saved); } })();
+out.speciesAfterProtoGrows = (() => { Array.prototype.extra1 = 1; try { return speciesResult(() => [1].slice()); } finally { delete Array.prototype.extra1; } })();
+out.speciesSubclass = (() => { class A extends Array { get tag() { return 'A'; } } const a = A.from([1, 2]); return [speciesResult(() => a.slice()), speciesResult(() => a.map(x => x))]; })();
+out.speciesSetProto = (() => { const p = Object.create(Array.prototype); p.constructor = function (n) { return { tag: 'P', length: 0 }; }; p.constructor[Symbol.species] = p.constructor; const a = [1]; Object.setPrototypeOf(a, p); return speciesResult(() => a.slice()); })();
+out.speciesFrozenSource = (() => { const a = Object.freeze([1, 2]); const r = a.slice(); r.push(3); return [r, Object.isFrozen(r)]; })();
+out.speciesExpando = (() => { const a = [1]; a.x = 1; const r = a.slice(); return [r.x === undefined, speciesResult(() => a.map(x => x))]; })();
+out.speciesSparse = (() => { const a = [1]; a[100000] = 2; const r = a.slice(0, 2); return [shape(r), r.length]; })();
+out.newArrayProtoAdded = (() => { const g = o => o.late; const before = g([]); Array.prototype.late = 'yes'; try { return [before, g([]), g(new Array(2)), g([1].slice()), Object.getPrototypeOf([]) === Array.prototype]; } finally { delete Array.prototype.late; } })();
+// slice's relative indices
+out.sliceArgs = (() => { const a = [0, 1, 2, 3, 4]; return [a.slice(-0), a.slice(NaN), a.slice(1.9), a.slice(-1.9), a.slice(Infinity), a.slice(-Infinity), a.slice(2, 1e300), a.slice(0, -1e300), a.slice(2 ** 53), a.slice(2 ** 63), a.slice(0, 2 ** 64), a.slice(0.5, 2.5), a.slice('1', '3'), a.slice(null, undefined), a.slice(0, null), a.slice({ valueOf() { return 3; } }), a.slice(5), a.slice(6), a.slice(3, 1), Array.prototype.slice.call({ length: 2 ** 53 - 1, 9007199254740990: 'e' }, 9007199254740990)].map(shape); })();
+out.sliceHoles = [shape([1, , 3].slice(0, 3)), shape([, , ,].slice(1)), (() => { const r = [1, 2, 3].slice(0, 2); r[3] = 9; return shape(r); })(), (() => { const r = [1, 2, 3].slice(1, 1); r.push('p'); return r; })()];
+out.sliceObjects = (() => { const o = {}, a = [o, 's', 1, null, undefined, true]; const r = a.slice(); return [r[0] === o, r.slice(1)]; })();
+out.literalValues = (() => { const f = () => 1; const o = { a: 1, b: 's', c: null, d: undefined, e: f, g: { h: 2 } }; return [Object.keys(o), o.a, o.b, o.c, o.d, o.e === f, o.g.h, o.e.name, Object.getOwnPropertyDescriptor(o, 'b')]; })();
+JSON.stringify(out);
+""";
+
+    private const string ArrayLikeSpeciesSliceExpected = """
+{"fromLengthOnly":[[null,0],[null,1],[null,2]],"fromOwnIndex":[null,"x",null],"fromProtoIndex":[null,"p",null],"fromProtoGetter":[[null,null,"g"],["get"]],"fromObjectProtoIndex":[null,"op",null],"fromAfterDelete":[null,null,null],"fromProxyProto":[["px","px"],["Symbol(Symbol.iterator)","0","1"]],"fromProxy":[[null,null],["Symbol(Symbol.iterator)","length","0","1"]],"fromArrayProto":["a","b",null],"fromStringProto":["a","b"],"fromTypedProto":"TypeError","fromNullProto":[1,null],"fromFunction":[null,"x"],"fromDictProto":[null,"dict"],"fromDictOwn":[null,"own"],"fromIndexAddedByCallback":[null,"n0","n1"],"fromProtoAddedByCallback":[null,"p0","p1"],"fromEdgeKeys":[[null,null],false],"includesArrayLike":[true,true,null,[null,"z"]],"speciesPlain":[[true,true,true,2,null],[true,true,true,2,null],[true,true,true,2,null],[true,true,true,2,null],[true,true,true,2,null],[true,true,true,1,null],[true,true,true,2,null]],"speciesOwnConstructor":[false,false,false,1,"C1"],"speciesOwnUndefined":[true,true,true,2,null],"speciesOwnBad":"TypeError","speciesNullSpecies":[true,true,true,2,null],"speciesProtoValue":[[false,false,false,1,"D1"],[false,false,false,null,"D1"],[false,false,false,null,"D0"]],"speciesProtoRestored":[true,true,true,1,null],"speciesProtoGetter":[[true,true,true,1,null],["get","get"]],"speciesProtoDeleted":[true,true,1],"speciesAfterProtoGrows":[true,true,true,1,null],"speciesSubclass":[[true,false,true,2,"A"],[true,false,true,2,"A"]],"speciesSetProto":[false,false,false,1,"P"],"speciesFrozenSource":[[1,2,3],false],"speciesExpando":[true,[true,true,true,1,null]],"speciesSparse":[[1,"hole"],2],"newArrayProtoAdded":[null,"yes","yes","yes",true],"sliceArgs":[[0,1,2,3,4],[0,1,2,3,4],[1,2,3,4],[4],[],[0,1,2,3,4],[2,3,4],[],[],[],[0,1,2,3,4],[0,1],[1,2],[0,1,2,3,4],[],[3,4],[],[],[],["e"]],"sliceHoles":[[1,"hole",3],["hole","hole"],[1,2,"hole",9],["p"]],"sliceObjects":[true,["s",1,null,null,true]],"literalValues":[["a","b","c","d","e","g"],1,"s",null,null,true,2,"f",{"value":"s","writable":true,"enumerable":true,"configurable":true}]}
+""";
+
+    [Fact]
+    public void ArrayLikeSpeciesSliceMatchReferenceBehavior()
+    {
+        using var engine = new JsEngine();
+        var exp = System.Text.Json.JsonDocument.Parse(ArrayLikeSpeciesSliceExpected).RootElement;
+        var got = System.Text.Json.JsonDocument.Parse(engine.Evaluate(ArrayLikeSpeciesSliceScript).AsString()).RootElement;
+        foreach (var p in exp.EnumerateObject())
+        {
+            Assert.True(got.TryGetProperty(p.Name, out var g), $"missing case {p.Name}");
+            Assert.True(p.Value.ToString() == g.ToString(), $"{p.Name}: expected {p.Value} got {g}");
+        }
+    }
+
+
+    // The remembered absence of index keys on the array prototypes, an arrow's this in a pooled frame, state moved to ObjectExtras, one-step object literals; the expected values were produced by Node from the same script.
+    private const string LiteralIndicesArrowThisExtrasScript = """
+const out = {};
+const log = [];
+const t = (k, v) => { log.push(k); return v; };
+// object literals built in one step: evaluation order, names, keys, attributes
+out.litOrder = (() => { log.length = 0; const o = { a: t('a', 1), b: t('b', 2), c: t('c', 3) }; return [log.slice(), Object.keys(o), o]; })();
+out.litThrowMidway = (() => { log.length = 0; let saw; try { saw = { a: t('a', 1), b: (() => { throw new RangeError('x'); })(), c: t('c', 3) }; } catch (e) { return [e.message, log.slice(), saw === undefined]; } })();
+out.litNames = (() => { const o = { f: function () {}, g: () => 1, C: class {}, h: function named() {}, i: 1, D: class { static name = 'own'; } }; return [o.f.name, o.g.name, o.C.name, o.h.name, o.D.name]; })();
+out.litDuplicate = (() => { log.length = 0; const o = { a: t('a1', 1), b: t('b', 2), a: t('a2', 3) }; return [log.slice(), Object.keys(o), o.a]; })();
+out.litProto = (() => { const p = { inh: 1 }; const a = { __proto__: p, x: 1, y: 2 }; const __proto__ = { own: 1 }; const b = { __proto__, x: 1, y: 2 }; const c = { '__proto__': p, x: 1, y: 2 }; const d = { ['__proto__']: p, x: 1, y: 2 }; return [a.inh, Object.keys(a), Object.getPrototypeOf(b) === Object.prototype, Object.keys(b), c.inh, Object.keys(d)]; })();
+out.litIndexKeys = [Object.keys({ b: 1, 2: 2, a: 3, 1: 4 }), Object.keys({ x: 1, 1.5: 2, '01': 3 }), Object.keys({ 4294967295: 1, 4294967294: 2, z: 3 }), { 'a b': 1, 'c-d': 2, e: 3 }['a b'], { 1e3: 'k', y: 1, z: 2 }[1000], { 0x10: 'h', y: 1, z: 2 }['16']];
+out.litAttrs = Object.getOwnPropertyDescriptors({ a: 1, b: 's', c: null });
+out.litSetterOnProto = (() => { const seen = []; Object.defineProperty(Object.prototype, 'zz', { set(v) { seen.push(v); }, get() { return 'inherited'; }, configurable: true }); try { const o = { zz: 1, b: 2, c: 3 }; return [seen, o.zz, Object.keys(o)]; } finally { delete Object.prototype.zz; } })();
+out.litReadonlyOnProto = (() => { Object.defineProperty(Object.prototype, 'ro', { value: 1, writable: false, configurable: true }); try { const o = { ro: 2, b: 2, c: 3 }; return [o.ro, Object.getOwnPropertyDescriptor(o, 'ro').writable]; } finally { delete Object.prototype.ro; } })();
+out.litMixed = (() => { const k = 'dyn', s = { sp: 1 }; const o1 = { a: 1, [k]: 2, c: 3 }, o2 = { a: 1, ...s, c: 3 }, o3 = { a: 1, m() { return super.toString === Object.prototype.toString; }, c: 3 }, o4 = { a: 1, get g() { return 5; }, c: 3 }, o5 = { a: 1, set g(v) {}, c: 3 }, o6 = { async *ag() {}, b: 1, c: 2 }, o7 = { *gen() {}, b: 1, c: 2 }; return [Object.keys(o1), Object.keys(o2), o3.m(), o4.g, Object.keys(o5), Object.keys(o6), Object.keys(o7)]; })();
+out.litSelfReference = (() => { let o = { a: 1, b: 2, c: 3 }; o = { a: o.a + 1, b: o, c: o.c }; let x = 5; x = { x, y: x, z: x }; return [o.a, o.b.a, o.c, x]; })();
+out.litThis = (function () { const o = { a: this.v, b: (() => this.v)(), c: 1 }; return [o.a, o.b]; }).call({ v: 'tv' });
+out.litNested = (() => { const o = { a: { b: { c: 1, d: 2, e: 3 }, f: [1, { g: 1, h: 2, i: 3 }], j: 5 }, k: 6, l: 7 }; return JSON.stringify(o); })();
+out.litInLoop = (() => { const r = []; for (let i = 0; i < 3; i++) r.push({ a: 1, b: 2.5, c: i, d: 'k', e: null }); r[0].a = 9; return r; })();
+out.litAssignInValue = (() => { let a, b; const o = { x: a = 1, y: b = a + 1, z: a + b }; return [o, a, b]; })();
+out.litConditional = (b => { const f = b => ({ a: b ? 1 : 2, b: b && 'y', c: b ?? 'n', d: b?.x }); return [f(true), f(false), f(null)]; })();
+out.litGenerator = (() => { function* g() { const o = { a: yield 1, b: yield 2, c: yield 3 }; return o; } const it = g(); it.next(); it.next('x'); it.next('y'); return it.next('z').value; })();
+out.litGeneratorReturn = (() => { function* g() { try { return { a: 1, b: yield 2, c: 3 }; } finally { log.push('fin'); } } const it = g(); it.next(); return [it.return('r'), it.next()]; })();
+out.litArguments = (function () { return { a: arguments.length, b: arguments[0], c: arguments }; })(7, 8).b;
+out.litShapeShared = (() => { const f = (a, b, c) => ({ a, b, c }), g = (a, b, c) => ({ a, b, c }), h = (a, c, b) => ({ a, c, b }); const r = f(1, 2, 3); r.extra = 1; delete r.a; return [Object.keys(f(1, 2, 3)), Object.keys(g(1, 2, 3)), Object.keys(h(1, 2, 3)), Object.keys(r), f(1, 2, 3).b, h(1, 2, 3).b]; })();
+out.litIcAcrossSites = (() => { const get = o => o.b; const r = []; for (let i = 0; i < 4; i++) { r.push(get({ a: 1, b: i, c: 3 }), get({ b: i + 10, a: 1, c: 3 }), get({ x: 1, y: 2, z: 3 })); } return r; })();
+out.litFrozenAfter = (() => { const o = Object.freeze({ a: 1, b: 2, c: 3 }); 'use strict'; o.a = 2; const p = { a: 1, b: 2, c: 3 }; return [o.a, p.a, Object.isFrozen(p), Object.isFrozen(o)]; })();
+out.litLong = (() => { const src = n => 'return {' + Array.from({ length: n }, (_, i) => 'p' + i + ':' + i).join(',') + '}'; const r = []; for (const n of [3, 31, 32, 33, 64, 65, 100]) { const o = new Function(src(n))(); r.push([Object.keys(o).length, o['p' + (n - 1)], Object.keys(o)[n - 1]]); } return r; })();
+out.litManyLayouts = (() => { let sum = 0, keys = 0; for (let i = 0; i < 400; i++) { const o = new Function('return { same' + ': 1, k' + i + ': 2, c: 3 }')(); sum += o.c + o['k' + i]; keys += Object.keys(o).length; } return [sum, keys]; })();
+out.litDeleteAndGrow = (() => { const o = { a: 1, b: 2, c: 3 }; delete o.b; o.d = 4; o.b = 5; for (let i = 0; i < 80; i++) o['n' + i] = i; return [Object.keys(o).slice(0, 5), o.n79, JSON.stringify({ a: 1, b: 2, c: 3 })]; })();
+out.litJson = JSON.stringify({ a: undefined, b: () => 1, c: Symbol('s'), d: NaN, e: new Date(0), f: [{ g: 1, h: 2, i: 3 }] });
+out.litHoleLike = (() => { const a = [, 1]; const o = { x: a[0], y: a[1], z: void 0 }; return [Object.keys(o), o.x === undefined, 'x' in o]; })();
+// Array.prototype and Object.prototype index keys seen by push, slice and friends, with the answer remembered between changes
+const pushes = () => { const a = []; a.push(1); a.push(2); return [a.length, a[0], a[1]]; };
+out.indicesBaseline = [pushes(), [1, , 3].slice(), Array.from({ length: 2 })];
+out.indicesArrayProtoElement = (() => { pushes(); Array.prototype[1] = 'ap'; try { return [Array.from({ length: 2 }), [1, , 3].slice(0, 3), (() => { const r = [0, , 2].map(x => x); return [1 in r, r[1]]; })(), [, 1].includes('ap')]; } finally { delete Array.prototype[1]; Array.prototype.length = 0; } })();
+out.indicesAfterRemoved = [pushes(), [1, , 3].slice().length, 1 in [1, , 3].slice()];
+out.indicesArrayProtoSetter = (() => { let seen = ''; pushes(); Object.defineProperty(Array.prototype, '1', { set(v) { seen += v; }, get() { return 'g'; }, configurable: true }); try { const a = []; a.push(1); a.push(2); return [a.length, seen, a[1], Object.keys(a)]; } finally { delete Array.prototype[1]; Array.prototype.length = 0; } })();
+out.indicesObjectProto = (() => { pushes(); Object.prototype[0] = 'op'; try { const a = new Array(2); return [a[0], Array.from(a), [, 1].slice()[0], [, 1].findIndex(x => x === 'op')]; } finally { delete Object.prototype[0]; } })();
+out.indicesObjectProtoSetter = (() => { let seen = ''; pushes(); Object.defineProperty(Object.prototype, '0', { set(v) { seen += v; }, configurable: true }); try { const a = []; a.push(5); return [seen, a.length, 0 in a]; } finally { delete Object.prototype[0]; } })();
+out.indicesProtoSwapped = (() => { pushes(); const p = Object.create(Object.prototype, { 1: { value: 'sw', configurable: true } }); Object.setPrototypeOf(Array.prototype, p); try { return [[, ,].length, new Array(2)[1], Array.from(new Array(2))]; } finally { Object.setPrototypeOf(Array.prototype, Object.prototype); } })();
+out.indicesProxyProto = (() => { let seen = ''; const p = new Proxy({}, { get(t, k, r) { if (typeof k === 'string' && /^[0-9]/.test(k)) seen += 'get' + k; return Reflect.get(t, k, r); }, has(t, k) { if (typeof k === 'string' && /^[0-9]/.test(k)) seen += 'has' + k; return Reflect.has(t, k); }, set(t, k, v, r) { seen += 'set' + String(k); return Reflect.set(t, k, v, r); } }); pushes(); Object.setPrototypeOf(Array.prototype, p); try { const a = []; a.push(1); const b = [, 1].slice(); return [seen, a.length, b.length]; } finally { Object.setPrototypeOf(Array.prototype, Object.prototype); } })();
+out.indicesPushOnProto = (() => { pushes(); Array.prototype.push('e0'); try { const a = new Array(1); return [a[0], Array.from(a), [].concat(new Array(1))[0]]; } finally { Array.prototype.length = 0; } })();
+out.indicesDictMode = (() => { pushes(); const saved = Object.getOwnPropertyDescriptor(Array.prototype, 'at'); Array.prototype.tmp1 = 1; delete Array.prototype.tmp1; delete Array.prototype.at; Array.prototype[1] = 'dm'; try { return [new Array(2)[1], pushes()]; } finally { delete Array.prototype[1]; Array.prototype.length = 0; Object.defineProperty(Array.prototype, 'at', saved); } })();
+out.indicesLast = [pushes(), new Array(2)[1], [].concat([1, , 3]).length, Array.from(new Array(1))];
+// an arrow's this kept in the pooled frame between calls
+out.arrowThis = (() => { const f = function () { return [1, 2].map(() => this); }; return [f.call(1).map(x => typeof x), f.call('s').map(x => typeof x), f.call({ v: 2 })[1].v, (function () { 'use strict'; return [1].map(() => this)[0]; })(), (function () { 'use strict'; return [1].map(() => this)[0]; }).call(0), Object.is((function () { 'use strict'; return [1].map(() => this)[0]; }).call(-0), -0), Number.isNaN((function () { 'use strict'; return [1].map(() => this)[0]; }).call(NaN))]; })();
+out.arrowThisAlternates = (() => { const mk = v => () => v === undefined ? 0 : this === undefined ? v : v; const strict = function () { 'use strict'; return () => this; }; const a = strict.call(1), b = strict.call(2), c = strict.call(undefined), d = strict.call('t'); const r = []; for (const f of [a, b, a, c, d, c, a]) r.push([0].map(() => [0].map(f)[0])[0]); return r; })();
+out.arrowThisConstructor = (() => { class A { constructor() { this.got = this.f ? this.f() : 0; } } class B extends A { constructor() { const before = () => this; let threw = false; try { [0].forEach(before); } catch (e) { threw = e.constructor.name; } super(); this.same = [0].map(before)[0] === this; this.threw = threw; } } const b = new B(); return [b.same, b.threw]; })();
+out.arrowNewTarget = (() => { function F() { return [0].map(() => new.target === F)[0]; } const r = new F(); function G() { this.nt = [0].map(() => new.target)[0] === G; } return [typeof r, new G().nt, (function () { return [0].map(() => new.target)[0]; })()]; })();
+out.arrowThisAfterThrow = (function () { const r = []; for (const v of [1, 2]) { try { [0].map(function () { const g = () => { throw v; }; return [0].map(g); }, v); } catch (e) { r.push(e); } r.push((function () { 'use strict'; return [0].map(() => this)[0]; }).call(v * 10)); } return r; })();
+// what moved out of each object: dictionary mode, queue and page mode, private elements and prototype roots on one object
+const manyProps = (o, n = 100) => { for (let i = 0; i < n; i++) o['p' + i] = i; for (let i = 0; i < n - 2; i++) delete o['p' + i]; return o; };
+out.extrasDictChild = (() => { const p = { x: 1 }; const c = Object.create(p); manyProps(p); const d = Object.create(p); return [c.x, d.x, c.p99, d.p98, Object.keys(p).length, Object.getPrototypeOf(d) === p]; })();
+out.extrasDictAddDeleteBack = (() => { const o = manyProps({ a: 1 }); o.z = 2; delete o.a; const r = Object.keys(o); o.a = 3; return [r, Object.keys(o), o.a, JSON.stringify(o), Object.getOwnPropertyDescriptor(o, 'z')]; })();
+out.extrasPrivateDict = (() => { class B { constructor(o) { return o; } } class P extends B { #v = 7; static read(o) { return o.#v; } static has(o) { return #v in o; } } const o = manyProps({ k: 1 }); new P(o); manyProps(o); const a = []; new P(a); const q = new Array(100).fill(1); new P(q); q.shift(); q.shift(); const s = new Array(10000).fill(2); const paged = s.filter(x => x); new P(paged); paged.push(3); return [P.read(o), P.has(o), P.has({}), Object.keys(o).length, P.read(a), P.read(q), q.length, q[0], P.read(paged), paged.length, paged[9999], paged[10000]]; })();
+out.extrasArrayModes = (() => { const q = new Array(200).fill(0).map((_, i) => i); q.shift(); q.x = 1; manyProps(q, 70); const k = Object.getOwnPropertyNames(q).length; q.shift(); const sum = q.reduce((a, b) => a + b, 0); q[5000000] = 'far'; const sparse = q.length; q.length = 3; return [k, sum, sparse, q, q.x, q.p68]; })();
+out.extrasArrayAsProto = (() => { const q = new Array(200).fill(7); q.shift(); const c = Object.create(q); const c2 = Object.create(q); q.shift(); const c3 = Object.create(q); const s = new Array(10000).fill(5).filter(x => x); const c4 = Object.create(s); return [c.length, c[0], c2[197], c3.length, c4[9999], c4.length, Array.isArray(c), Object.getPrototypeOf(c3) === q]; })();
+out.extrasPagedExpando = (() => { const s = new Array(10000).fill(1).filter(x => x); s.e = 'exp'; manyProps(s); s.push(2); const r = s.slice(9999); delete s[0]; const f = s.flatMap(x => x === 2 ? [x, x] : []); return [s.e, s.length, r, 0 in s, s.p99, f]; })();
+out.extrasFunctionDict = (() => { function f() { return 1; } manyProps(f); const g = Object.create(f); class C { static s = 1; } manyProps(C); return [f.p99, f(), f.name, f.length, g.p98, C.s, new C() instanceof C, Object.keys(f).length]; })();
+out.extrasSealFreeze = (() => { const o = Object.freeze(manyProps({ a: 1 })); const a = Object.freeze(new Array(100).fill(1).map((_, i) => i)); const q = new Array(100).fill(1); q.shift(); Object.seal(q); let err; try { q.shift(); } catch (e) { err = e.constructor.name; } return [Object.isFrozen(o), a.slice(98), Object.isSealed(q), err, q.length]; })();
+out.extrasDefineOnPrototype = (() => { function F() {} const a = new F(); F.prototype.m = () => 'm1'; manyProps(F.prototype); const b = new F(); F.prototype.m = () => 'm2'; return [a.m(), b.m(), a.p99, b.p98, Object.keys(F.prototype).length]; })();
+JSON.stringify(out);
+""";
+
+    private const string LiteralIndicesArrowThisExtrasExpected = """
+{"litOrder":[["a","b","c"],["a","b","c"],{"a":1,"b":2,"c":3}],"litThrowMidway":["x",["a"],true],"litNames":["f","g","C","named","own"],"litDuplicate":[["a1","b","a2"],["a","b"],3],"litProto":[1,["x","y"],true,["__proto__","x","y"],1,["__proto__","x","y"]],"litIndexKeys":[["1","2","b","a"],["x","1.5","01"],["4294967294","4294967295","z"],1,"k","h"],"litAttrs":{"a":{"value":1,"writable":true,"enumerable":true,"configurable":true},"b":{"value":"s","writable":true,"enumerable":true,"configurable":true},"c":{"value":null,"writable":true,"enumerable":true,"configurable":true}},"litSetterOnProto":[[],1,["zz","b","c"]],"litReadonlyOnProto":[2,true],"litMixed":[["a","dyn","c"],["a","sp","c"],true,5,["a","g","c"],["ag","b","c"],["gen","b","c"]],"litSelfReference":[2,1,3,{"x":5,"y":5,"z":5}],"litThis":["tv","tv"],"litNested":"{\"a\":{\"b\":{\"c\":1,\"d\":2,\"e\":3},\"f\":[1,{\"g\":1,\"h\":2,\"i\":3}],\"j\":5},\"k\":6,\"l\":7}","litInLoop":[{"a":9,"b":2.5,"c":0,"d":"k","e":null},{"a":1,"b":2.5,"c":1,"d":"k","e":null},{"a":1,"b":2.5,"c":2,"d":"k","e":null}],"litAssignInValue":[{"x":1,"y":2,"z":3},1,2],"litConditional":[{"a":1,"b":"y","c":true},{"a":2,"b":false,"c":false},{"a":2,"b":null,"c":"n"}],"litGenerator":{"a":"x","b":"y","c":"z"},"litGeneratorReturn":[{"value":"r","done":true},{"done":true}],"litArguments":7,"litShapeShared":[["a","b","c"],["a","b","c"],["a","c","b"],["b","c","extra"],2,3],"litIcAcrossSites":[0,10,null,1,11,null,2,12,null,3,13,null],"litFrozenAfter":[1,1,false,true],"litLong":[[3,2,"p2"],[31,30,"p30"],[32,31,"p31"],[33,32,"p32"],[64,63,"p63"],[65,64,"p64"],[100,99,"p99"]],"litManyLayouts":[2000,1200],"litDeleteAndGrow":[["a","c","d","b","n0"],79,"{\"a\":1,\"b\":2,\"c\":3}"],"litJson":"{\"d\":null,\"e\":\"1970-01-01T00:00:00.000Z\",\"f\":[{\"g\":1,\"h\":2,\"i\":3}]}","litHoleLike":[["x","y","z"],true,true],"indicesBaseline":[[2,1,2],[1,null,3],[null,null]],"indicesArrayProtoElement":[[null,null],[1,"ap",3],[true,"ap"],false],"indicesAfterRemoved":[[2,1,2],3,false],"indicesArrayProtoSetter":[2,"2","g",["0"]],"indicesObjectProto":["op",["op",null],"op",0],"indicesObjectProtoSetter":["5",1,true],"indicesProtoSwapped":[2,"sw",[null,"sw"]],"indicesProxyProto":["set0has0",1,2],"indicesPushOnProto":["e0",["e0"],"e0"],"indicesDictMode":["dm",[2,1,2]],"indicesLast":[[2,1,2],null,3,[null]],"arrowThis":[["object","object"],["object","object"],2,null,0,true,true],"arrowThisAlternates":[1,2,1,null,"t",null,1],"arrowThisConstructor":[true,"ReferenceError"],"arrowNewTarget":["object",true,null],"arrowThisAfterThrow":[1,10,2,20],"extrasDictChild":[1,1,99,98,3,true],"extrasDictAddDeleteBack":[["p98","p99","z"],["p98","p99","z","a"],3,"{\"p98\":98,\"p99\":99,\"z\":2,\"a\":3}",{"value":2,"writable":true,"enumerable":true,"configurable":true}],"extrasPrivateDict":[7,true,false,3,7,7,98,1,7,10001,2,3],"extrasArrayModes":[203,19899,5000001,[2,3,4],1,68],"extrasArrayAsProto":[198,7,7,198,5,10000,false,true],"extrasPagedExpando":["exp",10001,[1,2],false,99,[2,2]],"extrasFunctionDict":[99,1,"f",0,98,1,true,2],"extrasSealFreeze":[true,[98,99],true,"TypeError",99],"extrasDefineOnPrototype":["m2","m2",99,98,3]}
+""";
+
+    [Fact]
+    public void LiteralIndicesArrowThisExtrasMatchReferenceBehavior()
+    {
+        using var engine = new JsEngine();
+        var exp = System.Text.Json.JsonDocument.Parse(LiteralIndicesArrowThisExtrasExpected).RootElement;
+        var got = System.Text.Json.JsonDocument.Parse(engine.Evaluate(LiteralIndicesArrowThisExtrasScript).AsString()).RootElement;
+        foreach (var p in exp.EnumerateObject())
+        {
+            Assert.True(got.TryGetProperty(p.Name, out var g), $"missing case {p.Name}");
+            Assert.True(p.Value.ToString() == g.ToString(), $"{p.Name}: expected {p.Value} got {g}");
+        }
+    }
+
+
+    // The interpreter's call and return fast paths: which frames skip the this binding, overlapping register windows, chunks of the
+    // register stack, returning through every kind of frame. The expected values were produced by Node from the same script.
+    private const string CallPathScript = """
+const out = {};
+const tag = v => v === globalThis ? 'global' : v === undefined ? 'undefined' : typeof v === 'object' || typeof v === 'function' ? (v && v.name) || typeof v : typeof v + ':' + String(v);
+// the this binding when frames are reused by functions that do and do not read it
+function noThis(a) { return a; }
+function sloppyThis() { return tag(this); }
+function strictThis() { 'use strict'; return tag(this); }
+function evalThis() { return tag(eval('this')); }
+function nestedArrowThis() { return (() => tag(this))(); }
+out.thisAtOneDepth = (() => { const o = { name: 'o', noThis, sloppyThis, strictThis, evalThis, nestedArrowThis }, p = { name: 'p', sloppyThis }; const r = []; for (let i = 0; i < 3; i++) r.push(o.noThis(i), o.sloppyThis(), p.sloppyThis(), noThis(i), sloppyThis(), strictThis(), o.strictThis(), evalThis(), o.evalThis(), nestedArrowThis(), o.nestedArrowThis()); return r; })();
+out.primitiveReceivers = (() => { Number.prototype.st = sloppyThis; Number.prototype.tt = strictThis; String.prototype.st = sloppyThis; Number.prototype.nt = noThis; try { return [(5).st(), (5).tt(), 'x'.st(), (5).nt(1), sloppyThis.call(7), strictThis.call(7), sloppyThis.call(null), strictThis.call(null), sloppyThis.apply(undefined), noThis.call(8, 9)]; } finally { delete Number.prototype.st; delete Number.prototype.tt; delete String.prototype.st; delete Number.prototype.nt; } })();
+out.detached = (() => { const o = { name: 'o', sloppyThis, strictThis }; const f = o.sloppyThis, g = o.strictThis; return [f(), g(), (0, o.sloppyThis)(), (o.sloppyThis)(), (o.strictThis)()]; })();
+out.arrowThis = (function () { const a = () => tag(this), b = () => 1, c = () => () => tag(this); const r = []; for (let i = 0; i < 3; i++) r.push(a(), b(), c()()); return r; }).call({ name: 'recv' });
+out.newTargetInArrow = (() => { function F() { const a = () => new.target === F; this.v = a(); } function G() { const a = () => new.target; return a(); } const plain = () => 1; const r = [new F().v, G(), plain(), new F().v, G()]; return r; })();
+out.newNoThis = (() => { function F() { return; } function H() { return { k: 1 }; } function N() { return 5; } F.prototype.m = 1; return [new F().m, new H().k, typeof new N(), F(), N()]; })();
+class A { constructor() { this.k = 'A'; } who() { return 'A' + this.k; } static s() { return tag(this); } noth() { return 1; } }
+class B extends A { constructor() { const f = () => { super(); return this; }; f(); this.k += 'B'; } who() { return super.who() + 'B'; } arrow() { return (() => super.who())(); } }
+out.classes = (() => { const b = new B(); return [b.k, b.who(), b.arrow(), A.s(), b.noth(), (() => { try { A(); return 'no'; } catch (e) { return e.constructor.name; } })()]; })();
+out.superTooEarly = (() => { class D extends A { constructor() { const t = () => this; try { t(); } catch (e) { super(); this.e = e.constructor.name; } } } return new D().e; })();
+// registers: missing and extra arguments, hoisted bindings, arguments objects and rest
+function locals(a, b) { var c; let r = [a, b, c]; if (a) { var d = a + 1; c = d; } r.push(c, d); return r; }
+out.registers = [locals(1), locals(), locals(1, 2, 3, 4, 5), locals(undefined, 2), locals(2)];
+out.argsObjects = (() => { function ar() { return [arguments.length, arguments[0], arguments[2]]; } function re(a, ...b) { return [a, b]; } function de(a, b = a + 1) { return [a, b]; } function ma(a) { arguments[0] = 9; return a; } function sa(a) { 'use strict'; arguments[0] = 9; return a; } const r = []; for (let i = 0; i < 2; i++) r.push(ar(1, 2, 3), ar(), re(1, 2, 3), re(), de(1), de(1, 5), ma(1), sa(1), noThis(4, 5)); return r; })();
+out.extraArgsDoNotLeak = (() => { function callee(a) { var x; let y; try { y = 1; } catch { } return [a, x]; } const r = []; for (let i = 0; i < 3; i++) r.push(callee(i, 'e1', 'e2', 'e3', 'e4')); return r; })();
+out.argsAndCalleeRegister = (() => { function f(a, b) { return a - b; } let g = f; const r = []; for (let i = 0; i < 3; i++) { r.push(g(g(5, i), g(i, 1))); } return r; })();
+// a non-function and getters on the call paths
+out.notCallable = (() => { const r = []; for (const v of [1, 'x', null, undefined, {}, [], Symbol.iterator]) { try { v(); r.push('no'); } catch (e) { r.push(e.constructor.name); } try { ({ m: v }).m(); r.push('no'); } catch (e) { r.push(e.constructor.name); } } return r; })();
+out.getterCallable = (() => { const o = { get f() { return function () { return tag(this); }; }, name: 'o' }; return [o.f(), (0, o.f)()]; })();
+// returning through the frames of every kind
+out.returns = (() => { function* gen() { const x = helper(1); yield x; yield helper(2) + deep(40); } function helper(a) { return a * 2; } function deep(n) { return n === 0 ? 0 : 1 + deep(n - 1); } const it = gen(); const r = [it.next().value, it.next().value, it.next().done]; r.push([3, 1, 2].sort((a, b) => helper(a) - helper(b)), [1, 2].map(function (x) { return helper(x) + deep(5); })); async function as() { return helper(5); } r.push(typeof as().then); return r; })();
+// deep recursion beyond the first chunks of the register stack, through a throw and in again
+out.deepChunks = (() => { function d(n, a, b, c, e, f, g) { var l1 = n, l2 = n + 1, l3 = n + 2, l4 = n + 3; return n === 0 ? a : l1 - l1 + l2 - l2 + l3 - l3 + l4 - l4 + d(n - 1, a + 1, b, c, e, f, g); } const r = [d(50, 0), d(3000, 0), d(10, 0)]; function t(n) { if (n === 0) throw new RangeError('bottom'); return t(n - 1) + 1; } for (let i = 0; i < 3; i++) { try { t(2500); } catch (e) { r.push(e.message); } r.push(d(100, i)); } return r; })();
+out.throwAcrossKinds = (() => { const r = []; function thrower() { throw new TypeError('t'); } function viaMap() { return [1].map(thrower); } function viaGetter() { return ({ get g() { return thrower(); } }).g; } function* viaGen() { thrower(); } for (const f of [thrower, viaMap, viaGetter, () => viaGen().next()]) { try { f(); } catch (e) { r.push(e.message); } r.push(noThis(1)); } return r; })();
+out.fib = (() => { function fib(n) { return n < 2 ? n : fib(n - 1) + fib(n - 2); } return [fib(10), fib(1), fib(0), fib(15)]; })();
+// the global as a register's value, overwritten and deleted
+var gv = function () { return 'first'; };
+out.globals = (() => { const r = [gv()]; gv = function () { return 'second'; }; r.push(gv()); globalThis.gv2 = function () { return 'g2'; }; r.push(gv2()); delete globalThis.gv2; try { gv2(); } catch (e) { r.push(e.constructor.name); } globalThis.gv2 = 5; r.push(gv2 + 1); delete globalThis.gv2; return r; })();
+JSON.stringify(out);
+""";
+
+    private const string CallPathExpected = """
+{"thisAtOneDepth":[0,"o","p",0,"global","undefined","o","global","o","global","o",1,"o","p",1,"global","undefined","o","global","o","global","o",2,"o","p",2,"global","undefined","o","global","o","global","o"],"primitiveReceivers":["object","number:5","object",1,"object","number:7","global","object","global",9],"detached":["global","undefined","global","o","o"],"arrowThis":["recv",1,"recv","recv",1,"recv","recv",1,"recv"],"newTargetInArrow":[true,null,1,true,null],"newNoThis":[1,1,"object",null,5],"classes":["AB","AABB","AAB","A",1,"TypeError"],"superTooEarly":"ReferenceError","registers":[[1,null,null,2,2],[null,null,null,null,null],[1,2,null,2,2],[null,2,null,null,null],[2,null,null,3,3]],"argsObjects":[[3,1,3],[0,null,null],[1,[2,3]],[null,[]],[1,2],[1,5],9,1,4,[3,1,3],[0,null,null],[1,[2,3]],[null,[]],[1,2],[1,5],9,1,4],"extraArgsDoNotLeak":[[0,null],[1,null],[2,null]],"argsAndCalleeRegister":[6,4,2],"notCallable":["TypeError","TypeError","TypeError","TypeError","TypeError","TypeError","TypeError","TypeError","TypeError","TypeError","TypeError","TypeError","TypeError","TypeError"],"getterCallable":["o","global"],"returns":[2,44,true,[1,2,3],[7,9],"function"],"deepChunks":[50,3000,10,"bottom",100,"bottom",101,"bottom",102],"throwAcrossKinds":["t",1,"t",1,"t",1,"t",1],"fib":[55,1,0,610],"globals":["first","second","g2","ReferenceError",6]}
+""";
+
+    [Fact]
+    public void CallFastPathsMatchReferenceBehavior()
+    {
+        using var engine = new JsEngine();
+        var exp = System.Text.Json.JsonDocument.Parse(CallPathExpected).RootElement;
+        var got = System.Text.Json.JsonDocument.Parse(engine.Evaluate(CallPathScript).AsString()).RootElement;
+        foreach (var p in exp.EnumerateObject())
+        {
+            Assert.True(got.TryGetProperty(p.Name, out var g), $"missing case {p.Name}");
+            Assert.True(p.Value.ToString() == g.ToString(), $"{p.Name}: expected {p.Value} got {g}");
+        }
+    }
 }

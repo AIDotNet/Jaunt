@@ -99,13 +99,16 @@ public readonly struct JsValue : IEquatable<JsValue>
     }
 
     /// <summary>
-    /// <c>slot = value</c> that skips the GC write barrier when the value holds no reference: storing a null never needs
-    /// one, and the barrier (a call, a store-release and several loads of GC globals) is a large part of copying a number.
+    /// <c>slot = value</c> that skips the GC write barrier when the store does not change a reference: storing a null never
+    /// needs one, and neither does storing the reference the slot already holds (a loop or a recursive call reloading the same
+    /// function or object into the same register). The barrier is about 30 instructions: a call, a store-release and several loads of GC globals.
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     internal static void Store(ref JsValue slot, in JsValue value)
     {
-        if (value.Ref == null) slot = new JsValue((object?)null, value.Bits);
+        object? r = value.Ref;
+        if (r == null) slot = new JsValue((object?)null, value.Bits);
+        else if (ReferenceEquals(slot.Ref, r)) Unsafe.AsRef(in slot.Bits) = value.Bits;
         else slot = value;
     }
 

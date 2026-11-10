@@ -23,6 +23,12 @@ internal enum FrameFlags : byte
     ThrowAsResult = 32,
     /// <summary>A class's field initializer run in the loop, on top of the constructor frame it runs for: its <see cref="Op.RetFieldInit"/> resumes that frame and stores nothing.</summary>
     NoResult = 64,
+    /// <summary>
+    /// Popping the frame takes more than restoring the top of the register stack: <see cref="Frame.SavedChunkIndex"/> is valid, and
+    /// the frame may hold an arguments array. Every frame has it except those the interpreter's call instruction
+    /// pushes itself (see the EnterClosure block of <see cref="Vm.RunLoop"/>), so a frame whose flags are all clear returns on one test.
+    /// </summary>
+    Restore = 128,
 }
 
 internal enum SuspendKind : byte { None, Yield, YieldRaw, Await, Initial, Thrown }
@@ -78,7 +84,7 @@ internal sealed class Frame
     public int RetIndex;
     public FrameFlags Flags;
     public int ChunkIndex;
-    /// <summary>The register stack position (<c>Vm._chunkIndex</c>, <c>Vm._top</c>) before this frame was pushed; restored when it is popped.</summary>
+    /// <summary>The register stack position (<c>Vm._chunkIndex</c>, <c>Vm._top</c>) before this frame was pushed; restored when it is popped. The chunk only with <see cref="FrameFlags.Restore"/>: otherwise the frame did not change chunk.</summary>
     public int SavedChunkIndex;
     public int SavedTop;
     /// <summary>
@@ -121,10 +127,13 @@ internal sealed partial class Vm
     private Frame?[] _frames = new Frame?[16];
     /// <summary>Number of active bytecode frames: <c>_frames[0..Sp)</c>.</summary>
     public int Sp;
-    /// <summary>Native (CLR) nesting levels entered through <see cref="EnterNative"/>; they count toward <see cref="MaxDepth"/>.</summary>
-    private int _nativeDepth;
+    /// <summary>
+    /// <see cref="MaxDepth"/> less the native (CLR) nesting levels entered through <see cref="EnterNative"/>, which count toward it:
+    /// a call may push a frame while <c>Sp &lt; _spLimit</c>, one comparison of two fields on the call path.
+    /// </summary>
+    private int _spLimit = DefaultMaxDepth;
     /// <summary>Call depth charged against <see cref="MaxDepth"/>: bytecode frames plus native nesting levels.</summary>
-    public int Depth => Sp + _nativeDepth;
+    public int Depth => Sp + (_maxDepth - _spLimit);
     /// <summary>The innermost active frame, or null when no bytecode is running.</summary>
     public Frame? Current => Sp == 0 ? null : _frames[Sp - 1];
     /// <summary>The frame at the given depth (0 is the outermost); valid for <c>depth &lt; Depth</c>.</summary>
@@ -132,7 +141,13 @@ internal sealed partial class Vm
     internal Frame FrameAt(int depth) => _frames[depth]!;
 
     // ---- budget
-    public int MaxDepth = 10_000;
+    private const int DefaultMaxDepth = 10_000;
+    private int _maxDepth = DefaultMaxDepth;
+    public int MaxDepth
+    {
+        get => _maxDepth;
+        set { _spLimit += value - _maxDepth; _maxDepth = value; }
+    }
     private int _ticks = int.MaxValue;
     private int _tickChunk = int.MaxValue;
     private long _workUsed;
@@ -333,12 +348,12 @@ internal sealed partial class Vm
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public void EnterNative()
     {
-        if (Sp + ++_nativeDepth > MaxDepth) StackOverflow();
+        if (Sp > --_spLimit) StackOverflow();
         if (!StackIsSufficient()) StackOverflow();
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    public void ExitNative() => _nativeDepth--;
+    public void ExitNative() => _spLimit++;
 
     /// <summary>Guards native (CLR-stack) recursion: nested interpreter runs, bound/proxy chains, recursive builtins.</summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -383,7 +398,7 @@ internal sealed partial class Vm
     [MethodImpl(MethodImplOptions.NoInlining)]
     private void StackOverflow()
     {
-        _nativeDepth--;
+        _spLimit++;
         throw new JsTerminationException(TerminationKind.StackDepth, $"Maximum call stack depth ({MaxDepth}) exceeded.", Depth + 1, MaxDepth);
     }
 
@@ -399,12 +414,21 @@ internal sealed partial class Vm
         chunkIndex = _chunkIndex;
         top += count;
         _top = top;
-        if (top > _hwm) _hwm = top;
+        if (top > _hwm) NoteHighWater(top);
         return chunk;
     }
 
-    /// <summary>Highest register index used in the current chunk since the last clear (see <see cref="ClearRegisterStack"/>).</summary>
+    /// <summary>
+    /// Highest register index used in the current chunk since the last clear (see <see cref="ClearRegisterStack"/>). With
+    /// <see cref="_poisonRegisters"/> it stays 0 and the chunk is cleared whole: every pushed frame then takes the path of a new
+    /// high-water mark, which is where the call instruction checks for poisoning, so it does not test the flag itself.
+    /// </summary>
     private int _hwm;
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private void NoteHighWater(int top)
+    {
+        if (!_poisonRegisters) _hwm = top;
+    }
     private int _chunkHwm;
 
     /// <summary>
@@ -424,7 +448,7 @@ internal sealed partial class Vm
     /// </summary>
     internal void ClearRegisterStack()
     {
-        if (_chunks.Count > 0 && _chunks[0].Length > 0) Array.Clear(_chunks[0], 0, Math.Min(_hwm, _chunks[0].Length));
+        if (_chunks.Count > 0 && _chunks[0].Length > 0) Array.Clear(_chunks[0], 0, _poisonRegisters ? _chunks[0].Length : Math.Min(_hwm, _chunks[0].Length));
         for (int i = 1; i <= _chunkHwm && i < _chunks.Count; i++) Array.Clear(_chunks[i]);
         _hwm = 0;
         _chunkHwm = 0;
@@ -442,7 +466,8 @@ internal sealed partial class Vm
             baseIndex = 0;
             chunkIndex = 0;
             _top = count;
-            _hwm = count;   // the previous chunk 0 is gone
+            _hwm = 0;   // the previous chunk 0 is gone
+            NoteHighWater(count);
             return chunk;
         }
         _chunkIndex++;
@@ -486,11 +511,20 @@ internal sealed partial class Vm
         return RentFrameSlow();
     }
 
+    /// <summary>
+    /// A frame at depth <paramref name="d"/> also makes room for the slot above it, so <c>Sp</c> is always a valid index of
+    /// <see cref="_frames"/> and the call path's element access is its only check.
+    /// </summary>
+    private void EnsureFrameSlots(int d)
+    {
+        if (d + 1 >= _frames.Length) Array.Resize(ref _frames, Math.Max(_frames.Length * 2, d + 2));
+    }
+
     [MethodImpl(MethodImplOptions.NoInlining)]
     private Frame RentFrameSlow()
     {
         int d = Sp;
-        if (d >= _frames.Length) Array.Resize(ref _frames, Math.Max(_frames.Length * 2, d + 1));
+        EnsureFrameSlots(d);
         return _frames[d] ??= new Frame();
     }
 
@@ -498,7 +532,7 @@ internal sealed partial class Vm
     private void PlaceHeapFrame(Frame f)
     {
         int d = Sp;
-        if (d >= _frames.Length) Array.Resize(ref _frames, Math.Max(_frames.Length * 2, d + 1));
+        EnsureFrameSlots(d);
         f.Displaced = _frames[d];
         _frames[d] = f;
     }
@@ -605,7 +639,7 @@ internal sealed partial class Vm
         return f;
     }
 
-    /// <summary><see cref="PushCallFrame"/> for the paths other than the interpreter's own call instruction, which is the one place it is inlined.</summary>
+    /// <summary><see cref="PushCallFrame"/> for the paths other than the fast path of the interpreter's own call instruction.</summary>
     [MethodImpl(MethodImplOptions.NoInlining)]
     private Frame PushCallFrameOutOfLine(JsClosure c, JsValue[] callerRegs, int thisIndex, int argStart, int argc) =>
         PushCallFrame(c, callerRegs, thisIndex, argStart, argc);
@@ -662,7 +696,7 @@ internal sealed partial class Vm
             b = argStart;
             f.ChunkIndex = _chunkIndex;
             _top = end;
-            if (end > _hwm) _hwm = end;
+            if (end > _hwm) NoteHighWater(end);
         }
         else
         {
@@ -730,7 +764,7 @@ internal sealed partial class Vm
             Realm = calleeRealm;
             flags |= FrameFlags.RealmSwitch;
         }
-        f.Flags = flags;
+        f.Flags = flags | FrameFlags.Restore;
         if ((t.Flags & FunctionFlags.Arrow) != 0)
         {
             // usually unchanged: a builtin calls the same arrow function again at the same depth
@@ -772,14 +806,24 @@ internal sealed partial class Vm
         if (c.HasRareParts || f.ThisBox != null) BindRareParts(f, c);
         var realm = Realm;
         var calleeRealm = c.Realm;
-        var flags = FrameFlags.None;
+        var flags = FrameFlags.Restore;
         if (!ReferenceEquals(realm, calleeRealm))
         {
             f.CallerRealm = realm;
             Realm = calleeRealm;
-            flags = FrameFlags.RealmSwitch;
+            flags |= FrameFlags.RealmSwitch;
         }
         f.Flags = flags;
+        BindCallThis(f, c, t, calleeRealm, callerRegs, thisIndex);
+        Sp++;
+    }
+
+    /// <summary>
+    /// Sets the this binding of a frame pushed by a call instruction, see <see cref="SetupCallFrame"/>.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void BindCallThis(Frame f, JsClosure c, FunctionTemplate t, Realm calleeRealm, JsValue[] callerRegs, int thisIndex)
+    {
         if ((t.Flags & FunctionFlags.Arrow) != 0)
         {
             f.This = c.BoundThis;
@@ -805,7 +849,39 @@ internal sealed partial class Vm
             }
             else f.This = CoerceSloppyThis(calleeRealm, tv);
         }
-        Sp++;
+    }
+
+    /// <summary>The part of the EnterClosure block of <see cref="RunLoop"/> that is off its fast path: a receiver-less or arrow callee that reads its this binding, or a frame or closure with a <see cref="ThisBox"/>.</summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private void BindThisSlow(Frame f, JsClosure c, JsValue[] callerRegs, int thisIndex)
+    {
+        var box = c.ThisBox;
+        if (box != null || f.ThisBox != null) f.ThisBox = box;
+        var t = c.Template;
+        BindCallThis(f, c, t, c.Realm, callerRegs, thisIndex);
+    }
+
+    /// <summary>The EnterClosure block of <see cref="RunLoop"/> for a callee in another realm.</summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private void SwitchCallRealm(Frame f, Realm calleeRealm)
+    {
+        f.CallerRealm = Realm;
+        Realm = calleeRealm;
+        f.Flags |= FrameFlags.RealmSwitch;
+    }
+
+    /// <summary>
+    /// The EnterClosure block of <see cref="RunLoop"/> at a new high-water mark of the register stack, or for every frame with
+    /// <see cref="_poisonRegisters"/> (see <see cref="_hwm"/>), which also needs the state <see cref="PoisonReleasedWindow"/> reads.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private void CallWindowHighWater(Frame f, FunctionTemplate t, JsValue[] regs, int b, int end)
+    {
+        NoteHighWater(end);
+        if (!_poisonRegisters) return;
+        f.ChunkIndex = f.SavedChunkIndex = _chunkIndex;
+        f.Flags |= FrameFlags.Restore;
+        for (int i = t.InitUndefEnd; i < t.RegisterCount; i++) regs[b + i] = s_poison;
     }
 
     /// <summary>The per-call state of the closures that have rare parts, and clearing what a pooled frame kept from an earlier call. Out of line: frame setup is inlined into the interpreter loop.</summary>
@@ -833,8 +909,11 @@ internal sealed partial class Vm
         if ((flags & FrameFlags.RealmSwitch) != 0) Realm = f.CallerRealm;
         if ((flags & FrameFlags.OwnsRegs) == 0)
         {
-            int ci = f.SavedChunkIndex;
-            if (_chunkIndex != ci) { _chunkIndex = ci; _chunk = _chunks[ci]; }
+            if ((flags & FrameFlags.Restore) != 0)
+            {
+                int ci = f.SavedChunkIndex;
+                if (_chunkIndex != ci) { _chunkIndex = ci; _chunk = _chunks[ci]; }
+            }
             _top = f.SavedTop;
             if (_poisonRegisters) PoisonReleasedWindow(f);
             f.Args = null;
@@ -1233,7 +1312,7 @@ internal sealed partial class Vm
         _top = 0;
         Realm = _homeRealm;
         Sp = 0;
-        _nativeDepth = 0;
+        _spLimit = _maxDepth;
     }
 
     /// <summary>Drops oversized register chunks so a single deep request does not keep memory alive.</summary>
