@@ -747,6 +747,22 @@ internal sealed partial class Realm
             && ReferenceEquals(IteratorPrototype.ReadSlot(_genIterSlot).Ref, IteratorProtoIterator);
     }
 
+    private int _noIndicesEpoch = -1;
+
+    /// <summary>
+    /// Whether <paramref name="p"/> is this realm's Array.prototype, known to have no index keys on it or on Object.prototype
+    /// above it. A prototype's named layout only changes with <see cref="ProtoEpoch"/>; the prototype's own elements are read here.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    internal bool IsArrayPrototypeWithoutIndices(JsObject p) =>
+        ReferenceEquals(p, _arrayPrototype) && _noIndicesEpoch == ProtoEpoch && Unsafe.As<JsArray>(p).Length == 0;
+
+    /// <summary>A walk from <paramref name="p"/> found no index keys.</summary>
+    internal void NoteNoIndicesFrom(JsObject p)
+    {
+        if (ReferenceEquals(p, _arrayPrototype) && ReferenceEquals(p.Proto, _objectPrototype)) _noIndicesEpoch = ProtoEpoch;
+    }
+
     private int _mapPristineEpoch = -1;
     private int _mapIterSlot = -1, _mapNextSlot = -1, _setIterSlot = -1, _setNextSlot = -1;
 

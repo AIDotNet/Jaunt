@@ -384,6 +384,7 @@ internal sealed class JsArray : JsObject
         return _queue != null && TryGetPaged(index, out value);
     }
 
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
     private bool TryGetPaged(uint index, out JsValue value)
     {
         value = default;
@@ -654,8 +655,16 @@ internal sealed class JsArray : JsObject
         return Get(PropertyKey.FromIndex(index), receiver);
     }
 
+    [MethodImpl(MethodImplOptions.NoInlining)]   // not worth a place in the interpreter's hole paths
     internal static bool ProtoChainMayHaveIndices(JsObject? p)
     {
+        if (p != null && p.Realm.IsArrayPrototypeWithoutIndices(p)) return false;
+        return ProtoChainMayHaveIndicesWalk(p);
+    }
+
+    private static bool ProtoChainMayHaveIndicesWalk(JsObject? first)
+    {
+        var p = first;
         while (p != null)
         {
             if (p.IsExotic && p is not JsArray) return true;
@@ -663,6 +672,7 @@ internal sealed class JsArray : JsObject
             if (p.Dict != null ? p.Dict.HasIndexKeys : p.Shape.HasIndexKeys) return true;
             p = p.Proto;
         }
+        first?.Realm.NoteNoIndicesFrom(first);
         return false;
     }
 
