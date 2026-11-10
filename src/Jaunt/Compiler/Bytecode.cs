@@ -243,6 +243,11 @@ internal enum FunctionFlags
     RestOnlyArgs = 524288,
     /// <summary>The arguments object of this function has the mapped form (sloppy, simple parameters).</summary>
     MappedArguments = 1048576,
+    /// <summary>
+    /// The code never reads the frame's this binding, new.target or <see cref="Runtime.ThisBox"/>, directly or through an arrow
+    /// function, class or direct eval it creates: a plain call need not set them (see <c>BytecodeVerifier.MarkThisBinding</c>).
+    /// </summary>
+    NoThisBinding = 2097152,
 }
 
 internal struct HandlerEntry

@@ -3944,4 +3944,64 @@ JSON.stringify(out);
             Assert.True(p.Value.ToString() == g.ToString(), $"{p.Name}: expected {p.Value} got {g}");
         }
     }
+
+
+    // The interpreter's call and return fast paths: which frames skip the this binding, overlapping register windows, chunks of the
+    // register stack, returning through every kind of frame. The expected values were produced by Node from the same script.
+    private const string CallPathScript = """
+const out = {};
+const tag = v => v === globalThis ? 'global' : v === undefined ? 'undefined' : typeof v === 'object' || typeof v === 'function' ? (v && v.name) || typeof v : typeof v + ':' + String(v);
+// the this binding when frames are reused by functions that do and do not read it
+function noThis(a) { return a; }
+function sloppyThis() { return tag(this); }
+function strictThis() { 'use strict'; return tag(this); }
+function evalThis() { return tag(eval('this')); }
+function nestedArrowThis() { return (() => tag(this))(); }
+out.thisAtOneDepth = (() => { const o = { name: 'o', noThis, sloppyThis, strictThis, evalThis, nestedArrowThis }, p = { name: 'p', sloppyThis }; const r = []; for (let i = 0; i < 3; i++) r.push(o.noThis(i), o.sloppyThis(), p.sloppyThis(), noThis(i), sloppyThis(), strictThis(), o.strictThis(), evalThis(), o.evalThis(), nestedArrowThis(), o.nestedArrowThis()); return r; })();
+out.primitiveReceivers = (() => { Number.prototype.st = sloppyThis; Number.prototype.tt = strictThis; String.prototype.st = sloppyThis; Number.prototype.nt = noThis; try { return [(5).st(), (5).tt(), 'x'.st(), (5).nt(1), sloppyThis.call(7), strictThis.call(7), sloppyThis.call(null), strictThis.call(null), sloppyThis.apply(undefined), noThis.call(8, 9)]; } finally { delete Number.prototype.st; delete Number.prototype.tt; delete String.prototype.st; delete Number.prototype.nt; } })();
+out.detached = (() => { const o = { name: 'o', sloppyThis, strictThis }; const f = o.sloppyThis, g = o.strictThis; return [f(), g(), (0, o.sloppyThis)(), (o.sloppyThis)(), (o.strictThis)()]; })();
+out.arrowThis = (function () { const a = () => tag(this), b = () => 1, c = () => () => tag(this); const r = []; for (let i = 0; i < 3; i++) r.push(a(), b(), c()()); return r; }).call({ name: 'recv' });
+out.newTargetInArrow = (() => { function F() { const a = () => new.target === F; this.v = a(); } function G() { const a = () => new.target; return a(); } const plain = () => 1; const r = [new F().v, G(), plain(), new F().v, G()]; return r; })();
+out.newNoThis = (() => { function F() { return; } function H() { return { k: 1 }; } function N() { return 5; } F.prototype.m = 1; return [new F().m, new H().k, typeof new N(), F(), N()]; })();
+class A { constructor() { this.k = 'A'; } who() { return 'A' + this.k; } static s() { return tag(this); } noth() { return 1; } }
+class B extends A { constructor() { const f = () => { super(); return this; }; f(); this.k += 'B'; } who() { return super.who() + 'B'; } arrow() { return (() => super.who())(); } }
+out.classes = (() => { const b = new B(); return [b.k, b.who(), b.arrow(), A.s(), b.noth(), (() => { try { A(); return 'no'; } catch (e) { return e.constructor.name; } })()]; })();
+out.superTooEarly = (() => { class D extends A { constructor() { const t = () => this; try { t(); } catch (e) { super(); this.e = e.constructor.name; } } } return new D().e; })();
+// registers: missing and extra arguments, hoisted bindings, arguments objects and rest
+function locals(a, b) { var c; let r = [a, b, c]; if (a) { var d = a + 1; c = d; } r.push(c, d); return r; }
+out.registers = [locals(1), locals(), locals(1, 2, 3, 4, 5), locals(undefined, 2), locals(2)];
+out.argsObjects = (() => { function ar() { return [arguments.length, arguments[0], arguments[2]]; } function re(a, ...b) { return [a, b]; } function de(a, b = a + 1) { return [a, b]; } function ma(a) { arguments[0] = 9; return a; } function sa(a) { 'use strict'; arguments[0] = 9; return a; } const r = []; for (let i = 0; i < 2; i++) r.push(ar(1, 2, 3), ar(), re(1, 2, 3), re(), de(1), de(1, 5), ma(1), sa(1), noThis(4, 5)); return r; })();
+out.extraArgsDoNotLeak = (() => { function callee(a) { var x; let y; try { y = 1; } catch { } return [a, x]; } const r = []; for (let i = 0; i < 3; i++) r.push(callee(i, 'e1', 'e2', 'e3', 'e4')); return r; })();
+out.argsAndCalleeRegister = (() => { function f(a, b) { return a - b; } let g = f; const r = []; for (let i = 0; i < 3; i++) { r.push(g(g(5, i), g(i, 1))); } return r; })();
+// a non-function and getters on the call paths
+out.notCallable = (() => { const r = []; for (const v of [1, 'x', null, undefined, {}, [], Symbol.iterator]) { try { v(); r.push('no'); } catch (e) { r.push(e.constructor.name); } try { ({ m: v }).m(); r.push('no'); } catch (e) { r.push(e.constructor.name); } } return r; })();
+out.getterCallable = (() => { const o = { get f() { return function () { return tag(this); }; }, name: 'o' }; return [o.f(), (0, o.f)()]; })();
+// returning through the frames of every kind
+out.returns = (() => { function* gen() { const x = helper(1); yield x; yield helper(2) + deep(40); } function helper(a) { return a * 2; } function deep(n) { return n === 0 ? 0 : 1 + deep(n - 1); } const it = gen(); const r = [it.next().value, it.next().value, it.next().done]; r.push([3, 1, 2].sort((a, b) => helper(a) - helper(b)), [1, 2].map(function (x) { return helper(x) + deep(5); })); async function as() { return helper(5); } r.push(typeof as().then); return r; })();
+// deep recursion beyond the first chunks of the register stack, through a throw and in again
+out.deepChunks = (() => { function d(n, a, b, c, e, f, g) { var l1 = n, l2 = n + 1, l3 = n + 2, l4 = n + 3; return n === 0 ? a : l1 - l1 + l2 - l2 + l3 - l3 + l4 - l4 + d(n - 1, a + 1, b, c, e, f, g); } const r = [d(50, 0), d(3000, 0), d(10, 0)]; function t(n) { if (n === 0) throw new RangeError('bottom'); return t(n - 1) + 1; } for (let i = 0; i < 3; i++) { try { t(2500); } catch (e) { r.push(e.message); } r.push(d(100, i)); } return r; })();
+out.throwAcrossKinds = (() => { const r = []; function thrower() { throw new TypeError('t'); } function viaMap() { return [1].map(thrower); } function viaGetter() { return ({ get g() { return thrower(); } }).g; } function* viaGen() { thrower(); } for (const f of [thrower, viaMap, viaGetter, () => viaGen().next()]) { try { f(); } catch (e) { r.push(e.message); } r.push(noThis(1)); } return r; })();
+out.fib = (() => { function fib(n) { return n < 2 ? n : fib(n - 1) + fib(n - 2); } return [fib(10), fib(1), fib(0), fib(15)]; })();
+// the global as a register's value, overwritten and deleted
+var gv = function () { return 'first'; };
+out.globals = (() => { const r = [gv()]; gv = function () { return 'second'; }; r.push(gv()); globalThis.gv2 = function () { return 'g2'; }; r.push(gv2()); delete globalThis.gv2; try { gv2(); } catch (e) { r.push(e.constructor.name); } globalThis.gv2 = 5; r.push(gv2 + 1); delete globalThis.gv2; return r; })();
+JSON.stringify(out);
+""";
+
+    private const string CallPathExpected = """
+{"thisAtOneDepth":[0,"o","p",0,"global","undefined","o","global","o","global","o",1,"o","p",1,"global","undefined","o","global","o","global","o",2,"o","p",2,"global","undefined","o","global","o","global","o"],"primitiveReceivers":["object","number:5","object",1,"object","number:7","global","object","global",9],"detached":["global","undefined","global","o","o"],"arrowThis":["recv",1,"recv","recv",1,"recv","recv",1,"recv"],"newTargetInArrow":[true,null,1,true,null],"newNoThis":[1,1,"object",null,5],"classes":["AB","AABB","AAB","A",1,"TypeError"],"superTooEarly":"ReferenceError","registers":[[1,null,null,2,2],[null,null,null,null,null],[1,2,null,2,2],[null,2,null,null,null],[2,null,null,3,3]],"argsObjects":[[3,1,3],[0,null,null],[1,[2,3]],[null,[]],[1,2],[1,5],9,1,4,[3,1,3],[0,null,null],[1,[2,3]],[null,[]],[1,2],[1,5],9,1,4],"extraArgsDoNotLeak":[[0,null],[1,null],[2,null]],"argsAndCalleeRegister":[6,4,2],"notCallable":["TypeError","TypeError","TypeError","TypeError","TypeError","TypeError","TypeError","TypeError","TypeError","TypeError","TypeError","TypeError","TypeError","TypeError"],"getterCallable":["o","global"],"returns":[2,44,true,[1,2,3],[7,9],"function"],"deepChunks":[50,3000,10,"bottom",100,"bottom",101,"bottom",102],"throwAcrossKinds":["t",1,"t",1,"t",1,"t",1],"fib":[55,1,0,610],"globals":["first","second","g2","ReferenceError",6]}
+""";
+
+    [Fact]
+    public void CallFastPathsMatchReferenceBehavior()
+    {
+        using var engine = new JsEngine();
+        var exp = System.Text.Json.JsonDocument.Parse(CallPathExpected).RootElement;
+        var got = System.Text.Json.JsonDocument.Parse(engine.Evaluate(CallPathScript).AsString()).RootElement;
+        foreach (var p in exp.EnumerateObject())
+        {
+            Assert.True(got.TryGetProperty(p.Name, out var g), $"missing case {p.Name}");
+            Assert.True(p.Value.ToString() == g.ToString(), $"{p.Name}: expected {p.Value} got {g}");
+        }
+    }
 }

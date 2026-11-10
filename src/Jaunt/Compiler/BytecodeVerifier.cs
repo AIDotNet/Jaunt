@@ -13,6 +13,34 @@ internal static class BytecodeVerifier
     [ThreadStatic] private static bool[]? s_starts;
     [ThreadStatic] private static List<int>? s_jumps;
 
+    /// <summary>
+    /// Sets <see cref="FunctionFlags.NoThisBinding"/> on verified code without an instruction that reads the frame's this binding,
+    /// new.target or ThisBox. Listed by what can: the instructions themselves, and those that give the binding to code they create or run.
+    /// </summary>
+    public static void MarkThisBinding(FunctionTemplate t)
+    {
+        var code = t.Code;
+        for (int pc = 0; pc < code.Length; pc += OpInfo.Length(code, pc))
+        {
+            switch ((Op)code[pc])
+            {
+                case Op.LoadThis:
+                case Op.LoadNewTarget:
+                case Op.Closure:
+                case Op.ClassCreate:
+                case Op.SuperCall:
+                case Op.SuperCallSpread:
+                case Op.SuperBind:
+                case Op.CallEval:
+                case Op.CallEvalSpread:
+                case Op.TailCallEval:
+                case Op.InitFields:
+                    return;
+            }
+        }
+        t.Flags |= FunctionFlags.NoThisBinding;
+    }
+
     public static void Verify(FunctionTemplate t)
     {
         var code = t.Code;

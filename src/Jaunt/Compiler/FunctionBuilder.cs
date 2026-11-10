@@ -170,6 +170,7 @@ internal sealed class FunctionBuilder
         t.Handlers = Handlers.ToArray();
         t.Positions = Positions.ToArray();
         t.RegisterCount = Math.Max(MaxReg, 1);
+        if (t.InitUndefEnd < 0) t.InitUndefEnd = t.RegisterCount;   // no separate storage laid out: every register starts as undefined
         t.IcCount = IcCount;
         return t;
     }
