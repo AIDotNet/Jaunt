@@ -744,3 +744,25 @@ forwarding), and removing that dependency made a model interpreter 2.5 times fas
 slower) likely needs an int32 representation rather than handler tuning.
 
 Verified on the merged result: unit tests 649/649 plain and poisoned, test262 100,167/100,169, NativeAOT `verify`.
+
+## Twelfth pass: reviving the 2026-11-08 experiments (2026-11-10)
+
+Nine commits on the `perf3/fib` and `perf3/hof` branches never reached main. They were ported one by one onto main at 1e3b3f9, each
+measured on its own, and kept only with a gain beyond noise.
+
+| Original | Result | Measured, 5–7 rounds |
+| --- | --- | --- |
+| 506b161, lighter frame for call instructions | kept | `fib` −18.5%, `call-method` −22.6%, `call-mono` −17.6%, `sha256` −5.9%, `spectral-norm` −5.8%; `new-ctor2` +3.7% |
+| 7ba2c88, no write barrier when a store keeps the reference | kept | `nbody` −9.4%, `fannkuch` −4.9%, `float-loop` −3.9%, `fib` −2.3% |
+| ecfcb72, new frame in a callee-saved register | kept, borderline | `fib` −4.4%, `matmul` −3.6%, calls −3.5 to −3.9% |
+| f8b5392, array-like index reads and plain array construction | kept, species part dropped (main had it) | `Array.from({length})` −19.5%, `higher-order` −3.2% |
+| 86fb6b9 + b777130, push/pop without a prototype walk | kept | `array-push-pop` −6% |
+| 7fd70e7, object literals in one step | reverted | literal of 4 numbers −18 to −26%, but of 3 references +9% |
+| 6561f26, globals through a realm dictionary | reverted | `sieve` +4.9%, the rest flat |
+| 7ef511c, objects 8 bytes smaller | skipped | measured on 2026-11-09 as slowing `graph-algos` and `async-await` |
+
+Over all 59 workloads, three rounds against main: wall-time geometric mean −2.9%. `fib` −24.8%, `control-flow` −17.1%, `sha256` −9.3%.
+Five workloads read 1.3–5.5% slower at three rounds and between −1.1% and +1.3% at seven.
+
+Verified: unit tests 652/652 plain and poisoned, test262 100,167/100,169, NativeAOT `verify`, and 35 call-semantics cases (`this`,
+`new.target`, derived constructors, bound functions, tail calls, proxies, push/pop on unusual arrays) that match main exactly.
