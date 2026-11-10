@@ -49,6 +49,8 @@ internal sealed partial class Vm
         JsValue thrown;
         JsValue result;
         JsClosure callee;
+        FunctionTemplate calleeTemplate;
+        FunctionFlags calleeFlags;
         int callThis, callArgs, callArgc;
 
         if (recovering)
@@ -883,14 +885,19 @@ internal sealed partial class Vm
                         {
                             ref readonly var fv = ref Unsafe.Add(ref r0, Unsafe.Add(ref ip, 2));
                             f.Pc = PcAt(ref code0, ref ip) + 6;
-                            if (fv.Ref is JsClosure c && (c.Template.Flags & InlineCallMask) == 0)
+                            if (fv.Ref is JsClosure c)
                             {
-                                callee = c;
-                                int tr = Unsafe.Add(ref ip, 3);
-                                callThis = tr;
-                                callArgs = Unsafe.Add(ref ip, 4);
-                                callArgc = Unsafe.Add(ref ip, 5);
-                                goto EnterClosure;
+                                calleeTemplate = c.Template;
+                                calleeFlags = calleeTemplate.Flags;
+                                if ((calleeFlags & InlineCallMask) == 0)
+                                {
+                                    callee = c;
+                                    int tr = Unsafe.Add(ref ip, 3);
+                                    callThis = tr;
+                                    callArgs = Unsafe.Add(ref ip, 4);
+                                    callArgc = Unsafe.Add(ref ip, 5);
+                                    goto EnterClosure;
+                                }
                             }
                             var rf = CallOutOfLoop(f, PcAt(ref code0, ref ip), fv);
                             if (rf != null) { f = rf; goto Reload; }
@@ -924,13 +931,18 @@ internal sealed partial class Vm
                                 fv = GetPropSlow(ov, f.K[Unsafe.Add(ref ip, 3)], ref ic);
                             }
                             f.Pc = PcAt(ref code0, ref ip) + 7;
-                            if (fv.Ref is JsClosure c && (c.Template.Flags & InlineCallMask) == 0)
+                            if (fv.Ref is JsClosure c)
                             {
-                                callee = c;
-                                callThis = Unsafe.Add(ref ip, 2);
-                                callArgs = Unsafe.Add(ref ip, 5);
-                                callArgc = Unsafe.Add(ref ip, 6);
-                                goto EnterClosure;
+                                calleeTemplate = c.Template;
+                                calleeFlags = calleeTemplate.Flags;
+                                if ((calleeFlags & InlineCallMask) == 0)
+                                {
+                                    callee = c;
+                                    callThis = Unsafe.Add(ref ip, 2);
+                                    callArgs = Unsafe.Add(ref ip, 5);
+                                    callArgc = Unsafe.Add(ref ip, 6);
+                                    goto EnterClosure;
+                                }
                             }
                             // arr.push(v) on a plain array: append without building NativeArgs
                             if (Unsafe.Add(ref ip, 6) == 1 && fv.Ref is JsBuiltin pb && ReferenceEquals(pb.Fn, ArrayBuiltins.PushFn) && ov.Ref is JsArray pa
@@ -1115,63 +1127,61 @@ internal sealed partial class Vm
             // the overlapping register window. A callee with an arguments array, or a caller whose registers are not the top of the
             // shared stack (a coroutine, or the chunk is full), takes the general path.
             if (--_ticks <= 0) Checkpoint();
-            var ct = callee.Template;
             int bp = f.Base;
             int dst = bp + Unsafe.Add(ref ip, 1);
             JsValue[] regs = f.Regs;
             int argStart = bp + callArgs;
-            int end = argStart + ct.RegisterCount;
-            var tflags = ct.Flags;
-            if ((tflags & FunctionFlags.NeedsArgsArray) != 0 || !ReferenceEquals(regs, _chunk) || end > regs.Length)
+            int d = Sp;
+            if (d >= _spLimit) StackOverflowFrame();
+            // the new frame goes to f at once: it is live across the rare calls below, and f has a callee-saved register
+            f = _frames[d] ?? RentFrameSlow();
+            int end = argStart + calleeTemplate.RegisterCount;
+            if ((calleeFlags & FunctionFlags.NeedsArgsArray) != 0 || !ReferenceEquals(regs, _chunk) || end > regs.Length)
             {
                 f = PushCallFrameOutOfLine(callee, regs, callThis < 0 ? -1 : bp + callThis, argStart, callArgc);
                 f.RetIndex = dst;
                 goto Reload;
             }
-            int d = Sp;
-            if (d >= _spLimit) StackOverflowFrame();
-            var nf = _frames[d] ?? RentFrameSlow();
-            nf.SavedTop = _top;
-            nf.Flags = FrameFlags.None;
+            Sp = d + 1;
+            f.SavedTop = _top;
+            f.Flags = FrameFlags.None;
             _top = end;
-            if (end > _hwm) CallWindowHighWater(nf, ct, regs, argStart, end);
-            nf.Base = argStart;
-            if (!ReferenceEquals(nf.Regs, regs)) nf.Regs = regs;
+            if (end > _hwm) CallWindowHighWater(f, calleeTemplate, regs, argStart, end);
+            f.Base = argStart;
+            if (!ReferenceEquals(f.Regs, regs)) f.Regs = regs;
             // the bindings and missing parameters start as undefined, every other register is written before it is read
-            int n = callArgc < ct.ParamCount ? callArgc : ct.ParamCount;
-            int initEnd = ct.InitUndefEnd;
+            int n = callArgc < calleeTemplate.ParamCount ? callArgc : calleeTemplate.ParamCount;
+            int initEnd = calleeTemplate.InitUndefEnd;
             while (n < initEnd) { regs[argStart + n] = default; n++; }
-            if (!ReferenceEquals(nf.Callee, callee))
+            if (!ReferenceEquals(f.Callee, callee))
             {
-                nf.Callee = callee;
+                f.Callee = callee;
                 var fb = callee.Feedback;
-                if (!ReferenceEquals(nf.Feedback, fb)) nf.Feedback = fb;
+                if (!ReferenceEquals(f.Feedback, fb)) f.Feedback = fb;
             }
-            nf.Pc = 0;
+            f.Pc = 0;
             var env = callee.Env;
-            if (!ReferenceEquals(nf.Env, env)) nf.Env = env;
-            nf.EnvDepth = 0;
-            nf.Suspend = SuspendKind.None;
+            if (!ReferenceEquals(f.Env, env)) f.Env = env;
+            f.EnvDepth = 0;
+            f.Suspend = SuspendKind.None;
             var calleeRealm = callee.Realm;
-            if (!ReferenceEquals(Realm, calleeRealm)) SwitchCallRealm(nf, calleeRealm);
-            if ((tflags & FunctionFlags.NoThisBinding) == 0)
+            if (!ReferenceEquals(Realm, calleeRealm)) SwitchCallRealm(f, calleeRealm);
+            if ((calleeFlags & FunctionFlags.NoThisBinding) == 0)
             {
-                if (callThis < 0 || (tflags & FunctionFlags.Arrow) != 0 || callee.HasRareParts || nf.ThisBox != null)
-                    BindThisSlow(nf, callee, regs, callThis < 0 ? -1 : bp + callThis);
+                if (callThis < 0 || (calleeFlags & FunctionFlags.Arrow) != 0 || callee.HasRareParts || f.ThisBox != null)
+                    BindThisSlow(f, callee, regs, callThis < 0 ? -1 : bp + callThis);
                 else
                 {
                     ref readonly var tv = ref regs[bp + callThis];
-                    if ((tflags & FunctionFlags.Strict) != 0 || tv.IsObject)
+                    if ((calleeFlags & FunctionFlags.Strict) != 0 || tv.IsObject)
                     {
-                        if (!ReferenceEquals(nf.This.Ref, tv.Ref) || nf.This.Bits != tv.Bits) nf.This = tv;
+                        if (!ReferenceEquals(f.This.Ref, tv.Ref) || f.This.Bits != tv.Bits) f.This = tv;
                     }
-                    else nf.This = CoerceSloppyThis(calleeRealm, tv);
+                    else f.This = CoerceSloppyThis(calleeRealm, tv);
                 }
             }
-            Sp = d + 1;
-            nf.RetIndex = dst;
-            f = nf;
-            code0 = ref MemoryMarshal.GetArrayDataReference(ct.Code);
+            f.RetIndex = dst;
+            code0 = ref MemoryMarshal.GetArrayDataReference(calleeTemplate.Code);
             ip = ref code0;
             r0 = ref Unsafe.Add(ref MemoryMarshal.GetArrayDataReference(regs), argStart);
             goto Dispatch;
