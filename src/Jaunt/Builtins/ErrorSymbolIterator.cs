@@ -190,7 +190,7 @@ internal static class IteratorBuiltins
     {
         var iterProto = new JsObject(r, r.ObjectPrototype);
         r.IteratorPrototype = iterProto;
-        r.Method(iterProto, JsSymbol.Iterator, "[Symbol.iterator]", 0, static (in NativeArgs a) => a.This);
+        r.IteratorProtoIterator = r.Method(iterProto, JsSymbol.Iterator, "[Symbol.iterator]", 0, static (in NativeArgs a) => a.This);
 
         var arrayIter = new JsObject(r, iterProto);
         r.ArrayIteratorPrototype = arrayIter;
@@ -245,8 +245,8 @@ internal static class IteratorBuiltins
         r.GeneratorPrototype = genProto;
         r.GeneratorFunctionPrototype.AddOwnProperty("prototype", JsValue.FromObject(genProto), PropFlags.Configurable);
         genProto.AddOwnProperty("constructor", JsValue.FromObject(r.GeneratorFunctionPrototype), PropFlags.Configurable);
-        r.Method(genProto, "next", 1, static (in NativeArgs a) => Coroutines.Resume(a.Realm, a.This, Coroutines.ModeNext, a[0], "Generator.prototype.next"));
-        r.Method(genProto, "return", 1, static (in NativeArgs a) => Coroutines.Resume(a.Realm, a.This, Coroutines.ModeReturn, a[0], "Generator.prototype.return"));
+        r.GeneratorNext = r.MethodEager(genProto, "next", 1, static (in NativeArgs a) => Coroutines.Resume(a.Realm, a.This, Coroutines.ModeNext, a[0], "Generator.prototype.next"));
+        r.GeneratorReturn = r.MethodEager(genProto, "return", 1, static (in NativeArgs a) => Coroutines.Resume(a.Realm, a.This, Coroutines.ModeReturn, a[0], "Generator.prototype.return"));
         r.Method(genProto, "throw", 1, static (in NativeArgs a) => Coroutines.Resume(a.Realm, a.This, Coroutines.ModeThrow, a[0], "Generator.prototype.throw"));
         genProto.AddOwnProperty(JsSymbol.ToStringTag, new JsValue("Generator"), PropFlags.Configurable);
         AsyncGenerators.Setup(r);

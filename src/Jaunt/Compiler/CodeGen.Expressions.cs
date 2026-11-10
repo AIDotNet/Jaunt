@@ -441,8 +441,102 @@ internal sealed partial class CodeGen
 
     // ------------------------------------------------------------------ literals
 
+    /// <summary>The most parts a multi-part concatenation takes in one register window; longer ones use pairwise additions.</summary>
+    private const int MaxConcatParts = 32;
+
+    /// <summary>
+    /// A multi-part string concatenation: each part, a string constant or an expression, gets a register of one window.
+    /// Constants are loaded first (unobservable) and expressions evaluated in source order. <see cref="Op.StrConcat"/> converts
+    /// the parts in order, checking the length after each one as the pairwise additions would, and builds the result once.
+    /// A part followed by an expression whose evaluation can be observed is converted before it, by <see cref="Op.ToStrPart"/>,
+    /// which also checks the length of everything up to the next expression, where the pairwise additions would throw.
+    /// </summary>
+    private int ConcatParts(List<(string? Lit, Expression? E)> parts, bool primitiveFirst, int dst)
+    {
+        int m = Mark;
+        int start = m;
+        for (int i = 0; i < parts.Count; i++) Temp();
+        int lastObservable = -1;
+        for (int i = 0; i < parts.Count; i++)
+        {
+            if (parts[i].Lit is { } lit) _fb.Emit(Op.LoadConst, start + i, _fb.Const(lit));
+            else if (!IsUnobservableOperand(parts[i].E!)) lastObservable = i;
+        }
+        for (int i = 0; i < parts.Count; i++)
+        {
+            if (parts[i].E is not { } e) continue;
+            int mm = Mark;
+            if (i < lastObservable)
+            {
+                int v = Expr(e);
+                int end = i + 1;
+                while (end < parts.Count && parts[end].Lit != null) end++;
+                _fb.Emit(Op.ToStrPart, start + i, v, start, end, primitiveFirst ? 1 : 0);
+            }
+            else Expr(e, start + i);
+            ResetTo(mm);
+        }
+        int d = dst >= 0 ? dst : start;
+        _fb.Emit(Op.StrConcat, d, start, parts.Count, primitiveFirst ? 1 : 0);
+        ResetTo(dst >= 0 ? m : start + 1);
+        return d;
+    }
+
+    /// <summary>
+    /// An operand whose evaluation cannot run code, throw, or see a change made by converting an earlier operand: a literal,
+    /// or a local in a register that no closure captures and that needs no TDZ check.
+    /// </summary>
+    private static bool IsUnobservableOperand(Expression e)
+    {
+        switch (e)
+        {
+            case NumericLiteral or StringLiteral or BooleanLiteral or NullLiteral: return true;
+            case Identifier id:
+                var r = ResolvedRef.Get(id);
+                var b = r.Binding;
+                return b != null && !b.ArgumentsElided && !b.IsEvalDynamic && b.Scope.Kind != ScopeKind.Script && b.Kind != BindingKind.Import
+                    && !b.Captured && b.Register >= 0 && !(r.NeedsTdzCheck && b.HasTdz);
+            default: return false;
+        }
+    }
+
+    /// <summary>
+    /// The operands of a left-nested <c>+</c> chain of three or more that is a string from its first addition on: the first
+    /// operand is a string or template literal, or the second a string literal (whose evaluation cannot be observed between
+    /// the first operand's evaluation and its conversion). Every addition then concatenates strings.
+    /// </summary>
+    private static List<(string? Lit, Expression? E)>? StringAddChain(BinaryExpression be)
+    {
+        var ops = new List<Expression>();
+        Expression cur = be;
+        while (cur is BinaryExpression b && b is not LogicalExpression && b.Operator == Operator.Addition && b.Left is not PrivateIdentifier)
+        {
+            ops.Add(b.Right);
+            cur = b.Left;
+            if (ops.Count > MaxConcatParts) return null;
+        }
+        ops.Add(cur);
+        if (ops.Count < 3) return null;
+        ops.Reverse();
+        if (ops[0] is not (StringLiteral or TemplateLiteral) && ops[1] is not StringLiteral) return null;
+        var parts = new List<(string?, Expression?)>(ops.Count);
+        foreach (var o in ops) parts.Add(o is StringLiteral sl ? (sl.Value, null) : (null, o));
+        return parts;
+    }
+
     private int Template(TemplateLiteral tl, int dst)
     {
+        if (tl.Expressions.Count > 0 && tl.Quasis.Count + tl.Expressions.Count <= MaxConcatParts)
+        {
+            var parts = new List<(string? Lit, Expression? E)>();
+            for (int i = 0; i < tl.Quasis.Count; i++)
+            {
+                string q = tl.Quasis[i].Value.Cooked ?? "";
+                if (q.Length > 0) parts.Add((q, null));
+                if (i < tl.Expressions.Count) parts.Add((null, tl.Expressions[i]));
+            }
+            if (parts.Count >= 2) return ConcatParts(parts, primitiveFirst: false, dst);
+        }
         int d = Dst(dst);
         var quasis = tl.Quasis;
         _fb.Emit(Op.LoadConst, d, _fb.Const(quasis[0].Value.Cooked ?? ""));
@@ -748,6 +842,7 @@ internal sealed partial class CodeGen
             ResetTo(Math.Max(m0, d0 + 1));
             return d0;
         }
+        if (be.Operator == Operator.Addition && StringAddChain(be) is { } chain) return ConcatParts(chain, primitiveFirst: true, dst);
         int m = Mark;
         var op = BinaryOp(be.Operator, be);
         if (op is Op.Add or Op.Sub && TryInt32Literal(be.Right, out int k))
@@ -1694,11 +1789,23 @@ internal sealed partial class CodeGen
         _fb.Emit(Op.LoadInt, mode, 0);
         // obtain the raw iterator object (iter register holds an iterator record; ops below treat it as object)
         int loop = _fb.NewLabel(), done = _fb.NewLabel(), notNext = _fb.NewLabel(), notThrow = _fb.NewLabel(), haveRes = _fb.NewLabel();
+        int notValue = _fb.NewLabel(), nextDone = _fb.NewLabel(), end = _fb.NewLabel();
         _fb.Mark(loop);
         _fb.JumpIf(Op.JmpTrue, mode, notNext);
-        _fb.Emit(Op.CallMethod, res, iter, _fb.Const("next"), _fb.NewIc(), received, 1);
-        _fb.Emit(Op.ThrowIfNotObject, res, _fb.Const("Iterator result is not an object"));
-        _fb.Jump(haveRes);
+        // next: kind 0 yields a value (a generator inner iterator, resumed directly), 1 the inner result object, 2 is done
+        _fb.Emit(Op.DelegateNext, res, iter, received, tmp);
+        _fb.JumpIf(Op.JmpTrue, tmp, notValue);
+        _fb.Emit(Op.Yield, res, received, mode);
+        _fb.Jump(loop);
+        _fb.Mark(notValue);
+        _fb.Emit(Op.LoadInt, fn, 2);
+        _fb.Emit(Op.StrictEq, fn, tmp, fn);
+        _fb.JumpIf(Op.JmpTrue, fn, nextDone);
+        _fb.Emit(Op.YieldRaw, res, received, mode);
+        _fb.Jump(loop);
+        _fb.Mark(nextDone);
+        _fb.Emit(Op.Mov, d, res);
+        _fb.Jump(end);
         _fb.Mark(notNext);
         _fb.Emit(Op.LoadInt, tmp, 1);
         _fb.Emit(Op.StrictEq, tmp, mode, tmp);
@@ -1745,6 +1852,7 @@ internal sealed partial class CodeGen
         _fb.Jump(loop);
         _fb.Mark(done);
         _fb.Emit(Op.GetProp, d, res, _fb.Const("value"), _fb.NewIc());
+        _fb.Mark(end);
         ResetTo(Math.Max(m, d + 1));
         return d;
     }

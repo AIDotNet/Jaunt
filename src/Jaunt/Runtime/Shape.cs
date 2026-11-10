@@ -39,6 +39,8 @@ internal sealed class Shape
     public readonly bool HasSpecialProps;
     /// <summary>True when any property is an accessor: reading all values of the layout runs no code when this is false.</summary>
     public readonly bool HasAccessors;
+    /// <summary>Cache of the enumerable string keys in for-in order (see <c>ForInIterator</c>), filled on first use.</summary>
+    internal string[]? EnumKeys;
 
     /// <summary>Open-addressed key table (slot + 1, 0 = empty) of a shape too large for the linear scan.</summary>
     private byte[]? _index;

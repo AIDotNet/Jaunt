@@ -3130,4 +3130,653 @@ nestedStarsOrder = [[0,"aaab","aaa","",0],[0,"aaaa","aaa","a",0],[0,"aac","aa",0
         Assert.Equal(expected.Length, got.Length);
         for (int i = 0; i < expected.Length; i++) Assert.True(expected[i] == got[i], $"line {i}: expected {expected[i]} but got {got[i]}");
     }
+
+    // Generators resumed without result objects, the for-in key cache, iterator result layouts and yield*: patched next,
+    // return and throw, closing on break and on throws in destructuring, re-entrancy, switch and finally. Expected output from Node.
+    private const string GeneratorsControlFlowScript = """
+const L = [];
+const T = (name, fn) => { let r; try { r = fn(); } catch (e) { r = 'threw ' + (e && e.constructor ? e.constructor.name : typeof e) + (e instanceof Error ? '' : ' ' + String(e)); } L.push(name + ' = ' + JSON.stringify(r)); };
+const GP = Object.getPrototypeOf(function* () {}).prototype;
+const IP = Object.getPrototypeOf(GP);
+function* g3() { yield 1; yield 2; yield 3; }
+function* logged(log, n) { try { for (let i = 0; i < n; i++) { log.push('y' + i); yield i; } return 'ret'; } finally { log.push('fin'); } }
+// for-of, spread, destructuring, builtins over plain generators
+T('forOf', () => { const r = []; for (const x of g3()) r.push(x); return r; });
+T('spread', () => [...g3(), ...logged([], 2)]);
+T('spreadReturnValueDropped', () => { function* g() { yield 1; return 9; } return [...g()]; });
+T('destruct', () => { const log = []; const [a, b] = logged(log, 5); return [a, b, log]; });
+T('destructRest', () => { const log = []; const [a, ...r] = logged(log, 4); return [a, r, log]; });
+T('destructHoles', () => { const log = []; const [, , c, d, e] = logged(log, 3); return [c, d, e, log]; });
+T('builtins', () => [Array.from(g3()), Math.max(...g3()), [...new Set(g3())], [...new Map([[1, 2]].values())], Object.fromEntries((function* () { yield ['a', 1]; })())]);
+T('breakCloses', () => { const log = []; for (const x of logged(log, 5)) { if (x === 1) break; } return log; });
+T('returnInLoopCloses', () => { const log = []; (() => { for (const x of logged(log, 5)) if (x === 2) return; })(); return log; });
+T('throwInLoopCloses', () => { const log = []; try { for (const x of logged(log, 5)) if (x === 1) throw new Error('x'); } catch (e) { log.push(e.message); } return log; });
+T('continueLabelled', () => { const log = []; outer: for (const a of [1, 2]) { for (const x of logged(log, 3)) { if (x === 1) continue outer; log.push('b' + a + x); } } return log; });
+T('destructDefaultThrows', () => { const log = []; try { const [a, b = (() => { throw new Error('d'); })()] = (function* () { try { yield 1; yield undefined; yield 3; } finally { log.push('fin'); } })(); } catch (e) { log.push(e.message); } return log; });
+T('finallyYieldOnReturn', () => { function* g() { try { yield 1; } finally { yield 'f'; } } const it = g(); return [it.next(), it.return(5), it.next(), it.next()]; });
+T('finallyOverridesBreak', () => { const log = []; function* g() { try { yield 1; yield 2; } finally { log.push('cleanup'); } } for (const x of g()) { log.push(x); break; } return log; });
+// return and throw
+T('returnStart', () => { const log = []; const it = logged(log, 3); return [it.return(7), it.next(), log]; });
+T('throwStart', () => { const it = g3(); let e; try { it.throw(new Error('t')); } catch (x) { e = x.message; } return [e, it.next()]; });
+T('throwCaught', () => { function* g() { for (;;) { try { yield 1; } catch (e) { yield 'c' + e; } } } const it = g(); return [it.next(), it.throw(4), it.next(), it.throw(5)]; });
+T('throwDone', () => { const it = g3(); [...it]; try { it.throw(3); } catch (e) { return ['rethrown', e]; } });
+T('nextArgs', () => { function* g(a) { const b = yield a; const c = yield b * 2; return [a, b, c]; } const it = g(1); return [it.next('ignored'), it.next(10), it.next(20), it.next(30)]; });
+T('reentrant', () => { let it; function* g() { yield 1; it.next(); } it = g(); try { for (const x of it) {} } catch (e) { return [e.constructor.name, it.next()]; } });
+T('reentrantReturn', () => { let it; function* g() { try { yield 1; } finally { it.return(); } } it = g(); it.next(); try { it.return(); } catch (e) { return [e.constructor.name, it.next()]; } });
+T('paramsBeforeStart', () => { const log = []; function* g(a = log.push('def'), { b } = { b: 2 }) { log.push('body'); yield a + b; } const it = g(); log.push('created'); return [it.next(), log]; });
+T('argumentsAndThis', () => { function* g() { yield arguments.length; yield typeof this; } return [...g(1, 2), ...g.call(5)]; });
+T('protoFromFunction', () => { function* g() { yield 1; } const p = { next() { return { value: 'mine', done: false }; } }; g.prototype = p; const it = g(); return [Object.getPrototypeOf(it) === p, it.next().value]; });
+T('protoNotObject', () => { function* g() { yield 1; } g.prototype = 3; const it = g(); return [Object.getPrototypeOf(it) === GP, [...it]]; });
+// yield*
+T('yieldStar', () => { function* inner() { const x = yield 1; yield x; return 'r'; } function* outer() { const r = yield* inner(); yield r; } const it = outer(); return [it.next(), it.next('s'), it.next(), it.next()]; });
+T('yieldStarCustom', () => { const log = []; const inner = { [Symbol.iterator]() { return this; }, i: 0, next(v) { log.push('n' + v); return this.i++ < 2 ? { get value() { log.push('gv'); return 'v'; }, get done() { log.push('gd'); return false; } } : { value: 'end', done: true }; } }; function* outer() { log.push('ret ' + (yield* inner)); } const r = []; for (const x of outer()) r.push(x); return [r, log]; });
+T('yieldStarResultIdentity', () => { const res = { value: 1, done: false }; const inner = { [Symbol.iterator]() { return this; }, next() { return res; } }; function* outer() { yield* inner; } return outer().next() === res; });
+T('yieldStarReturn', () => { const log = []; function* inner() { try { yield 1; yield 2; } finally { log.push('inner fin'); } } function* outer() { try { yield* inner(); } finally { log.push('outer fin'); } } for (const x of outer()) { if (x === 1) break; } return log; });
+T('yieldStarThrow', () => { function* inner() { try { yield 1; } catch (e) { yield 'caught ' + e; } } function* outer() { yield* inner(); } const it = outer(); return [it.next(), it.throw('E'), it.next()]; });
+T('tree', () => { function* tree(d) { if (d === 0) { yield 1; return; } yield* tree(d - 1); yield d; yield* tree(d - 1); } let s = 0, n = 0; for (const v of tree(6)) { s += v; n++; } return [s, n]; });
+// patched protocol
+T('patchedNext', () => { const save = GP.next; const log = []; GP.next = function (v) { log.push('next'); return save.call(this, v); }; try { const r = [...g3()]; for (const x of g3()) r.push(x); const [a] = g3(); r.push(a); return [r, log.length]; } finally { GP.next = save; } });
+T('patchedReturn', () => { const save = GP.return; const log = []; GP.return = function (v) { log.push('return'); return save.call(this, v); }; try { for (const x of g3()) break; const [a] = g3(); return log; } finally { GP.return = save; } });
+T('returnNotCallable', () => { const save = GP.return; GP.return = 5; try { for (const x of g3()) break; return 'no throw'; } catch (e) { return e.constructor.name; } finally { GP.return = save; } });
+T('returnUndefined', () => { const save = GP.return; GP.return = undefined; const log = []; try { for (const x of logged(log, 3)) break; return log; } finally { GP.return = save; } });
+T('patchedOnFunctionPrototype', () => { function* g() { yield 1; yield 2; } g.prototype.next = function () { return { value: 'own', done: this.n = (this.n || 0) + 1, get x() { return 1; } }; }; let c = 0; const r = []; for (const x of g()) { r.push(x); if (++c > 3) break; } return r; });
+T('nextGetterOnce', () => { let reads = 0; function* g() { yield 1; yield 2; } Object.defineProperty(g.prototype, 'next', { get() { reads++; return GP.next; } }); const r = [...g()]; return [r, reads]; });
+T('patchedIteratorMethod', () => { const save = IP[Symbol.iterator]; IP[Symbol.iterator] = function () { return { next: () => ({ done: true }) }; }; try { return [...g3()]; } finally { IP[Symbol.iterator] = save; } });
+T('ownIteratorOnGenerator', () => { const it = g3(); it[Symbol.iterator] = function* () { yield 'other'; }; return [...it]; });
+T('nextOnOtherReceiver', () => { const it = g3(); try { GP.next.call({}); } catch (e) { return [e.constructor.name, it.next()]; } });
+T('iteratorProtoOnPrimitive', () => { try { const s = Object.create(IP); return [...s]; } catch (e) { return e.constructor.name; } });
+// custom iterators: result shapes and getters
+T('customShapes', () => { const log = []; let i = 0; const seq = [{ value: 1, done: false }, { done: false, value: 2 }, Object.defineProperty({ value: 0, done: false }, 'value', { get() { log.push('getter'); return 3; } }), Object.create({ done: false, value: 4 }), { value: 5, done: 0 }, { value: 6, done: '' }, { value: 7, done: false }, { value: 8, done: 'yes' }]; const it = { [Symbol.iterator]() { return { next() { return seq[i++]; } }; } }; return [[...it], log]; });
+T('customDoneGetter', () => { let i = 0; const log = []; const res = { value: 1 }; let d = false; Object.defineProperty(res, 'done', { get() { log.push('done'); return d; }, configurable: true }); const it = { [Symbol.iterator]() { return { next() { if (i++ === 2) d = true; return res; } }; } }; return [[...it], log]; });
+T('customProxyResult', () => { let i = 0; const log = []; const it = { [Symbol.iterator]() { return { next() { return new Proxy({ value: i, done: i++ > 1 }, { get(t, k) { log.push(String(k)); return t[k]; } }); } }; } }; return [[...it], log]; });
+T('customNonObject', () => { const it = { [Symbol.iterator]() { return { next() { return 1; } }; } }; try { [...it]; } catch (e) { return e.constructor.name; } });
+T('collSpread', () => { class Coll { constructor(n) { this.n = n; } [Symbol.iterator]() { let i = 0, n = this.n; return { next: () => i < n ? { value: i++, done: false } : { value: undefined, done: true } }; } } return [[...new Coll(5)].length, Math.max(...new Coll(30))]; });
+T('cacheThenPatchFnProto', () => { function* g() { yield 1; yield 2; } const a = [...g()]; g.prototype.next = function () { this.k = (this.k || 0) + 1; return { value: 'p', done: this.k > 2 }; }; return [a, [...g()]]; });
+T('cacheThenProtoIterator', () => { function* g() { yield 1; } const a = [...g()]; g.prototype[Symbol.iterator] = function* () { yield 'it'; }; return [a, [...g()]]; });
+T('cacheThenGPNext', () => { function* g() { yield 1; } const a = [...g()]; const save = GP.next; let n = 0; GP.next = function (v) { n++; return save.call(this, v); }; try { const b = [...g()]; function* o() { yield* g(); } const c = [...o()]; return [a, b, c, n]; } finally { GP.next = save; } });
+T('cacheThenSetProto', () => { function* g() { yield 1; } const a = [...g()]; Object.setPrototypeOf(g.prototype, { next() { return { value: 'swapped', done: (this.d = !this.d) === false }; }, [Symbol.iterator]() { return this; } }); return [a, [...g()]]; });
+T('generatorOwnProps', () => { function* g() { yield 1; yield 2; } const it = g(); it.extra = 1; const it2 = g(); it2.next = () => ({ value: 'own', done: (it2.c = (it2.c || 0) + 1) > 1 }); return [[...it], [...it2]]; });
+T('yieldStarInnerPatched', () => { function* inner() { yield 1; yield 2; } function* outer() { return yield* inner(); } const a = [...outer()]; inner.prototype.next = function (v) { return { value: 'x' + v, done: v === 'stop' }; }; const it = outer(); return [a, it.next('a'), it.next('b'), it.next('stop')]; });
+T('yieldStarNextArgs', () => { function* inner() { let v = yield 'first'; while (v !== 'end') v = yield 'got ' + v; return 'inner done'; } function* outer() { const r = yield* inner(); yield r; } const it = outer(); return [it.next('ignored'), it.next(1), it.next(2), it.next('end'), it.next()]; });
+T('yieldStarNonGenerator', () => { function* outer() { yield* [1, 2]; yield* 'ab'; yield* new Set([3]); } return [...outer()]; });
+T('yieldStarNotCallableNext', () => { function* outer() { yield* { [Symbol.iterator]() { return { next: 5 }; } }; } try { [...outer()]; } catch (e) { return e.constructor.name; } });
+T('yieldStarResultNotObject', () => { function* outer() { yield* { [Symbol.iterator]() { return { next() { return 3; } }; } }; } try { [...outer()]; } catch (e) { return e.constructor.name; } });
+T('yieldStarReentrant', () => { let it; function* inner() { yield 1; it.next(); } function* outer() { yield* inner(); } it = outer(); try { [...it]; } catch (e) { return e.constructor.name; } });
+T('crossRealmLike', () => { function* g() { yield 1; } const it = g(); const fakeNext = GP.next.bind(it); return [fakeNext(), [...{ [Symbol.iterator]: () => ({ next: fakeNext }) }]]; });
+// for-in
+T('forInBasic', () => { const r = []; for (const k in { b: 1, a: 2, 1: 3, 0: 4, [Symbol('s')]: 5 }) r.push(k); return r; });
+T('forInProto', () => { const p = { p1: 1, sh: 2 }; const o = Object.create(p); o.own = 1; Object.defineProperty(o, 'sh', { value: 3, enumerable: false }); const r = []; for (const k in o) r.push(k); return r; });
+T('forInDelete', () => { const o = { a: 1, b: 2, c: 3, d: 4 }; const r = []; for (const k in o) { r.push(k); if (k === 'a') delete o.c; } return r; });
+T('forInDeleteReadd', () => { const o = { a: 1, b: 2, c: 3 }; const r = []; for (const k in o) { r.push(k); if (k === 'a') { delete o.c; o.c = 5; } } return r; });
+T('forInAdd', () => { const o = { a: 1, b: 2 }; const r = []; for (const k in o) { r.push(k); if (k === 'a') o.z = 1; } return r; });
+T('forInProtoDeleteShadow', () => { const p = { a: 'p', b: 'p' }; const o = Object.create(p); o.a = 1; const r = []; for (const k in o) { r.push(k); if (k === 'a') delete o.a; } return r; });
+T('forInObjectPrototypePolluted', () => { Object.prototype.polluted = 1; try { const r = []; for (const k in { a: 1 }) r.push(k); for (const k in []) r.push(k); return r; } finally { delete Object.prototype.polluted; } });
+T('forInAfterUnpollute', () => { const r = []; for (const k in { a: 1 }) r.push(k); return r; });
+T('forInNullProto', () => { const o = Object.create(null); o.x = 1; o[2] = 2; const r = []; for (const k in o) r.push(k); return r; });
+T('forInClassInstance', () => { class A { constructor() { this.x = 1; } m() {} } class B extends A { constructor() { super(); this.y = 2; } } A.prototype.protoField = 3; const r = []; for (const k in new B()) r.push(k); return r; });
+T('forInDictionary', () => { const o = {}; for (let i = 0; i < 80; i++) o['k' + i] = i; for (let i = 0; i < 75; i++) delete o['k' + i]; const r = []; for (const k in o) r.push(k); return r; });
+T('forInMixed', () => { const r = []; for (const k in [5, 6]) r.push(k); for (const k in 'ab') r.push(k); for (const k in new String('xy')) r.push(k); for (const k in null) r.push(k); for (const k in 5) r.push(k); for (const k in function f() {}) r.push(k); return r; });
+T('forInProxyProto', () => { const log = []; const p = new Proxy({ q: 1 }, { ownKeys(t) { log.push('ownKeys'); return Reflect.ownKeys(t); }, getOwnPropertyDescriptor(t, k) { log.push('gopd ' + String(k)); return Reflect.getOwnPropertyDescriptor(t, k); } }); const o = Object.create(p); o.a = 1; const r = []; for (const k in o) r.push(k); return [r, log]; });
+T('forInSameShapeTwice', () => { const mk = () => ({ a: 1, b: 2 }); const r = []; for (let i = 0; i < 3; i++) for (const k in mk()) r.push(k); return r.join(''); });
+T('forInIndexOrder', () => { const o = { b: 1 }; o[10] = 1; o[2] = 1; o.a = 1; o['01'] = 1; o[4294967295] = 1; o[4294967294] = 1; const r = []; for (const k in o) r.push(k); return r; });
+T('forInFrozen', () => { const o = Object.freeze({ a: 1, b: 2 }); const r = []; for (const k in o) r.push(k); return r; });
+// switch
+const sw = v => { const r = []; switch (v) { case 1: r.push('one'); case '1': r.push('str1'); break; default: r.push('def'); case 2: r.push('two'); break; case -0: r.push('zero'); break; case NaN: r.push('nan'); } return r; };
+T('switchFallthrough', () => [1, '1', 2, 3, 0, -0, NaN, undefined, null, true].map(sw));
+const sws = s => { switch (s) { case 'a': return 1; case 'bb': return 2; case 'a' + 'b': return 3; case String(5): return 4; default: return 0; } };
+T('switchStrings', () => ['a', 'bb', 'ab', '5', 5, new String('a'), '', 'A'].map(sws));
+T('switchCaseOrderSideEffects', () => { const log = []; const c = x => (log.push(x), x); switch (3) { case c(1): log.push('m1'); case c(3): log.push('m3'); case c(4): log.push('m4'); break; case c(5): log.push('m5'); } return log; });
+T('switchDefaultFirst', () => { const f = v => { let s = ''; switch (v) { default: s += 'd'; case 1: s += '1'; break; case 2: s += '2'; } return s; }; return [f(1), f(2), f(3)]; });
+T('switchDense', () => { const f = n => { switch (n) { case 0: return 'a'; case 1: case 2: return 'b'; case 3: return n > 50 ? 'c' : 'd'; case 4.5: return 'half'; case 7: return 'seven'; default: return 'e'; } }; return [0, 1, 2, 3, 4, 4.5, 5, 6, 7, 8, -1, '1', 1.0000001].map(f).join(''); });
+T('switchLexical', () => { const f = v => { switch (v) { case 1: let x = 'one'; return x; case 2: try { return x; } catch (e) { return e.constructor.name; } } }; return [f(1), f(2)]; });
+T('switchBreakLabel', () => { let s = ''; out: for (let i = 0; i < 4; i++) { switch (i) { case 1: continue out; case 2: break out; default: s += i; } s += '.'; } return s; });
+// labelled loops, try/finally, try/catch
+T('labels', () => { let t = 0; outer: for (let i = 0; i < 20; i++) { for (let j = 0; j < 20; j++) { if (j > i) continue outer; if (i * j > 150) break outer; t += (i ^ j) & 3; } } return t; });
+T('labelBlock', () => { let s = ''; blk: { s += 'a'; if (s) break blk; s += 'b'; } return s; });
+T('finallyLoop', () => { const log = []; for (let i = 0; i < 4; i++) { try { if (i === 1) continue; if (i === 3) break; log.push('body' + i); } finally { log.push('fin' + i); } } return log; });
+T('finallyReturnOverride', () => { const f = () => { try { return 1; } finally { return 2; } }; const g = () => { for (;;) { try { return 'r'; } finally { break; } } return 'broke'; }; return [f(), g()]; });
+T('finallyThrowOverride', () => { const f = () => { try { throw new Error('a'); } finally { return 'swallowed'; } }; return f(); });
+T('nestedFinallyOrder', () => { const log = []; const f = () => { try { try { return 'x'; } finally { log.push('inner'); } } finally { log.push('outer'); } }; log.push(f()); return log; });
+T('tryCatchNoThrow', () => { let r = 0; for (let i = 0; i < 10; i++) { try { r += i; } catch (e) { r = -1; } } return r; });
+T('doWhileContinue', () => { let k = 0, s = ''; do { k++; if (k === 2) continue; s += k; } while (k < 4); return s; });
+L.join('\n');
+""";
+
+    private const string GeneratorsControlFlowExpected = """
+forOf = [1,2,3]
+spread = [1,2,3,0,1]
+spreadReturnValueDropped = [1]
+destruct = [0,1,["y0","y1","fin"]]
+destructRest = [0,[1,2,3],["y0","y1","y2","y3","fin"]]
+destructHoles = [2,null,null,["y0","y1","y2","fin"]]
+builtins = [[1,2,3],3,[1,2,3],[[1,2]],{"a":1}]
+breakCloses = ["y0","y1","fin"]
+returnInLoopCloses = ["y0","y1","y2","fin"]
+throwInLoopCloses = ["y0","y1","fin","x"]
+continueLabelled = ["y0","b10","y1","fin","y0","b20","y1","fin"]
+destructDefaultThrows = ["fin","d"]
+finallyYieldOnReturn = [{"value":1,"done":false},{"value":"f","done":false},{"value":5,"done":true},{"done":true}]
+finallyOverridesBreak = [1,"cleanup"]
+returnStart = [{"value":7,"done":true},{"done":true},[]]
+throwStart = ["t",{"done":true}]
+throwCaught = [{"value":1,"done":false},{"value":"c4","done":false},{"value":1,"done":false},{"value":"c5","done":false}]
+throwDone = ["rethrown",3]
+nextArgs = [{"value":1,"done":false},{"value":20,"done":false},{"value":[1,10,20],"done":true},{"done":true}]
+reentrant = ["TypeError",{"done":true}]
+reentrantReturn = ["TypeError",{"done":true}]
+paramsBeforeStart = [{"value":3,"done":false},["def","created","body"]]
+argumentsAndThis = [2,"object",0,"object"]
+protoFromFunction = [true,"mine"]
+protoNotObject = [true,[1]]
+yieldStar = [{"value":1,"done":false},{"value":"s","done":false},{"value":"r","done":false},{"done":true}]
+yieldStarCustom = [["v","v"],["nundefined","gd","gd","gv","nundefined","gd","gd","gv","nundefined","ret end"]]
+yieldStarResultIdentity = true
+yieldStarReturn = ["inner fin","outer fin"]
+yieldStarThrow = [{"value":1,"done":false},{"value":"caught E","done":false},{"done":true}]
+tree = [184,127]
+patchedNext = [[1,2,3,1,2,3,1],9]
+patchedReturn = ["return","return"]
+returnNotCallable = "TypeError"
+returnUndefined = ["y0"]
+patchedOnFunctionPrototype = []
+nextGetterOnce = [[1,2],1]
+patchedIteratorMethod = []
+ownIteratorOnGenerator = ["other"]
+nextOnOtherReceiver = ["TypeError",{"value":1,"done":false}]
+iteratorProtoOnPrimitive = "TypeError"
+customShapes = [[1,2,3,4,5,6,7],["getter"]]
+customDoneGetter = [[1,1],["done","done","done"]]
+customProxyResult = [[0,1],["done","value","done","value","done"]]
+customNonObject = "TypeError"
+collSpread = [5,29]
+cacheThenPatchFnProto = [[1,2],["p","p"]]
+cacheThenProtoIterator = [[1],["it"]]
+cacheThenGPNext = [[1],[1],[1],6]
+cacheThenSetProto = [[1],["swapped"]]
+generatorOwnProps = [[1,2],["own"]]
+yieldStarInnerPatched = [[1,2],{"value":"xundefined","done":false},{"value":"xb","done":false},{"value":"xstop","done":true}]
+yieldStarNextArgs = [{"value":"first","done":false},{"value":"got 1","done":false},{"value":"got 2","done":false},{"value":"inner done","done":false},{"done":true}]
+yieldStarNonGenerator = [1,2,"a","b",3]
+yieldStarNotCallableNext = "TypeError"
+yieldStarResultNotObject = "TypeError"
+yieldStarReentrant = "TypeError"
+crossRealmLike = [{"value":1,"done":false},[]]
+forInBasic = ["0","1","b","a"]
+forInProto = ["own","p1"]
+forInDelete = ["a","b","d"]
+forInDeleteReadd = ["a","b","c"]
+forInAdd = ["a","b"]
+forInProtoDeleteShadow = ["a","b"]
+forInObjectPrototypePolluted = ["a","polluted","polluted"]
+forInAfterUnpollute = ["a"]
+forInNullProto = ["2","x"]
+forInClassInstance = ["x","y","protoField"]
+forInDictionary = ["k75","k76","k77","k78","k79"]
+forInMixed = ["0","1","0","1","0","1"]
+forInProxyProto = [["a","q"],["ownKeys","gopd q"]]
+forInSameShapeTwice = "ababab"
+forInIndexOrder = ["2","10","4294967294","b","a","01","4294967295"]
+forInFrozen = ["a","b"]
+switchFallthrough = [["one","str1"],["str1"],["two"],["def","two"],["zero"],["zero"],["def","two"],["def","two"],["def","two"],["def","two"]]
+switchStrings = [1,2,3,4,0,0,0,0]
+switchCaseOrderSideEffects = [1,3,"m3","m4"]
+switchDefaultFirst = ["1","2","d1"]
+switchDense = "abbdehalfeeseveneeee"
+switchLexical = ["one","ReferenceError"]
+switchBreakLabel = "0."
+labels = 144
+labelBlock = "a"
+finallyLoop = ["body0","fin0","fin1","body2","fin2","fin3"]
+finallyReturnOverride = [2,"broke"]
+finallyThrowOverride = "swallowed"
+nestedFinallyOrder = ["inner","outer","x"]
+tryCatchNoThrow = 45
+doWhileContinue = "134"
+""";
+
+    [Fact]
+    public void GeneratorsForInAndControlFlowMatchReferenceBehavior()
+    {
+        using var engine = new JsEngine();
+        var got = engine.Evaluate(GeneratorsControlFlowScript).AsString().Split('\n');
+        var expected = GeneratorsControlFlowExpected.ReplaceLineEndings("\n").TrimEnd('\n').Split('\n');
+        Assert.Equal(expected.Length, got.Length);
+        for (int i = 0; i < expected.Length; i++) Assert.True(expected[i] == got[i], $"line {i}: expected {expected[i]} but got {got[i]}");
+    }
+
+    // Expected output generated by running the script in Node.
+    private const string CallbacksAndIteratorsScript = """
+const L = [];
+const T = (name, fn) => { let r; try { r = fn(); } catch (e) { r = 'threw ' + (e && e.constructor ? e.constructor.name : typeof e) + (e instanceof Error ? '' : ' ' + String(e)); } L.push(name + ' = ' + JSON.stringify(r)); };
+const kind = a => [Array.isArray(a), Object.getPrototypeOf(a) === Array.prototype, a.constructor && a.constructor.name, a.length];
+// species: the result of map/filter/slice/splice/concat/flat/flatMap follows the constructor that Get(O, "constructor") finds
+T('speciesPlain', () => [[1, 2].map(x => x), [1, 2].filter(x => x), [1, 2].slice(), [1, 2].concat([3]), [1, [2]].flat(), [1].flatMap(x => [x])].map(kind));
+T('speciesSubclass', () => { class A extends Array {} const a = A.from([1, 2, 3]); return [a.map(x => x * 2), a.filter(x => x > 1), a.slice(1), a.concat([4]), a.splice(0, 1)].map(r => [r instanceof A, r.length, [...r]]); });
+T('speciesOwnConstructor', () => { const a = [1, 2, 3]; let n = 0; a.constructor = function C(len) { n++; return { length: 0, len }; }; a.constructor[Symbol.species] = a.constructor; const m = a.map(x => x); return [n, m.len, m[0], m.length]; });
+T('speciesOwnConstructorUndefined', () => { const a = [1, 2]; a.constructor = undefined; return kind(a.map(x => x + 1)); });
+T('speciesOwnConstructorGetter', () => { const a = [1, 2]; const log = []; Object.defineProperty(a, 'constructor', { get() { log.push('get'); return Array; } }); a.map(x => x); a.filter(x => x); a.slice(); return log; });
+T('speciesOwnConstructorNotObject', () => { const a = [1]; a.constructor = 5; return a.map(x => x); });
+T('speciesProtoConstructorPatched', () => { const saved = Array.prototype.constructor; const log = []; try { Array.prototype.constructor = function P(n) { log.push('P ' + n); return []; }; Array.prototype.constructor[Symbol.species] = Array.prototype.constructor; [1, 2].map(x => x); [1, 2, 3].filter(x => x); [4].slice(); } finally { Array.prototype.constructor = saved; } return [log, kind([1].map(x => x))]; });
+T('speciesProtoConstructorAccessor', () => { const saved = Object.getOwnPropertyDescriptor(Array.prototype, 'constructor'); let n = 0; try { Object.defineProperty(Array.prototype, 'constructor', { get() { n++; return Array; }, configurable: true }); [1].map(x => x); [1].filter(x => x); [1].concat(); } finally { Object.defineProperty(Array.prototype, 'constructor', saved); } return [n, kind([2].map(x => x))]; });
+T('speciesProtoConstructorDeleted', () => { const saved = Object.getOwnPropertyDescriptor(Array.prototype, 'constructor'); let r; try { delete Array.prototype.constructor; r = kind([1, 2].map(x => x)); } finally { Object.defineProperty(Array.prototype, 'constructor', saved); } return [r, Array.prototype.constructor === Array]; });
+T('speciesSymbolOnConstructorProto', () => { const a = [1, 2]; Object.setPrototypeOf(a, Object.create(Array.prototype, { constructor: { value: { [Symbol.species]: function S(n) { this.made = n; } } } })); const r = a.map(x => x); return [r.made, r[0], r[1]]; });
+T('speciesManyOwnProps', () => { const a = [1, 2, 3]; for (let i = 0; i < 40; i++) a['p' + i] = i; delete a.p3; return [kind(a.map(x => x)), kind(a.filter(x => x > 1))]; });
+T('speciesSymbolKeyed', () => { const a = [1]; a[Symbol('s')] = 1; return kind(a.map(x => x)); });
+T('speciesNonArray', () => { const o = { length: 2, 0: 'a', 1: 'b', constructor: function () { throw new Error('not used'); } }; return [kind(Array.prototype.map.call(o, x => x + x)), Array.prototype.map.call(o, x => x + x)]; });
+// callbacks: kinds of callee, this, arguments, throws, re-entry, mutation
+T('cbKinds', () => { const a = [1, -2, 3]; const b = function (x) { return [this.k, x]; }.bind({ k: 'b' }); const p = new Proxy(x => x * 10, {}); const ph = new Proxy(function (x) { return x; }, { apply(t, th, args) { return 'ap' + args.length; } }); return [a.map(Math.abs), a.map(b), a.map(p), a.map(ph), a.filter(Boolean), a.map(String), a.some(Number.isInteger)]; });
+T('cbThisArg', () => { const r = []; [1, 2].forEach(function (v) { r.push(typeof this, this === undefined ? 'u' : this.n); }, { n: 5 }); [1].forEach(function () { 'use strict'; r.push(this); }, 7); [1].forEach(function () { r.push(typeof this); }, 7); [1].forEach(function () { r.push(this === globalThis); }); [1].forEach(() => r.push(typeof this)); return r; });
+T('cbArity', () => { const r = []; [5, 6].forEach(function () { r.push(arguments.length, arguments[0], arguments[1], arguments[2] && arguments[2].length); }); [5].reduce(function () { r.push(arguments.length); return 0; }, 1); [5].map((...xs) => r.push(xs.length)); [5].map((a, b, c, d, e) => r.push([a, b, c && c.length, d, e])); return r; });
+T('cbDefaultsAndArgs', () => [1, 2].map((v, i = 9, arr, extra = 'e') => [v, i, arr.length, extra]));
+T('cbThrows', () => { let n = 0; try { [1, 2, 3].map(x => { n++; if (x === 2) throw new RangeError('x'); return x; }); } catch (e) { return [e.constructor.name, n]; } });
+T('cbThrowsInsideTry', () => { const r = []; [1, 2, 3].forEach(x => { try { if (x === 2) throw x; r.push(x); } catch (e) { r.push('c' + e); } finally { r.push('f'); } }); return r; });
+T('cbThrowNonError', () => { try { [1].find(() => { throw 'str'; }); } catch (e) { return e; } });
+T('cbClassConstructor', () => { class K {} return [1].map(K); });
+T('cbGenerator', () => [1, 2].map(function* (x) { yield x; }).map(g => g.next().value));
+T('cbAsync', () => [1].map(async x => x).map(p => p instanceof Promise));
+T('cbReentrant', () => [1, 2, 3].map(x => [x, x + 1].map(y => [y].reduce((s, z) => s + z * x, 0)).filter(v => v > 2)));
+T('cbRecursive', () => { const f = n => n === 0 ? 0 : [n].map(x => f(x - 1) + 1)[0]; return f(200); });
+T('cbMutatesGrow', () => { const a = [1, 2, 3]; const seen = []; a.forEach(x => { seen.push(x); if (a.length < 6) a.push(x * 10); }); return [seen, a.length]; });
+T('cbMutatesShrink', () => { const a = [1, 2, 3, 4, 5]; const seen = []; const m = a.map((x, i) => { seen.push(x); if (i === 1) a.length = 3; return x; }); return [seen, m.length, 3 in m, m]; });
+T('cbMutatesHoles', () => { const a = [1, 2, 3, 4]; const seen = []; a.filter((x, i) => { seen.push(i); if (i === 0) delete a[2]; return true; }); return seen; });
+T('cbMutatesProtoIndex', () => { const a = [1, , 3]; const seen = []; a.forEach((x, i) => { seen.push([i, x]); if (i === 0) Array.prototype[1] = 'proto'; }); delete Array.prototype[1]; return seen; });
+T('cbMutatesConstructorMidway', () => { const a = [1, 2]; const r = a.map((x, i) => { if (i === 0) a.constructor = function () { throw new Error('late'); }; return x; }); return [kind(r), kind(a.map ? [0] : 0)]; });
+T('cbReduceVariants', () => [[1, 2, 3].reduce((s, x) => s + x), [1, 2, 3].reduceRight((s, x) => s + x, ''), [, 2, , 4].reduce((s, x, i) => s + i, 0), [[1], [2]].reduce((acc, x) => acc.concat(x), [])]);
+T('cbFindVariants', () => { const a = [5, 12, 8, 130]; return [a.find(x => x > 10), a.findIndex(x => x > 10), a.findLast(x => x > 10), a.findLastIndex(x => x > 200), [, 1].find((x, i) => i === 0), a.every(x => x > 1), a.some(x => x > 500)]; });
+T('cbSort', () => { const cmpLog = []; const a = [3, 1, 2]; a.sort((x, y) => { cmpLog.push(x + '' + y); return x - y; }); return [a, cmpLog.length > 0, [3, 1, 2].sort(function (x, y) { return this === undefined ? y - x : 0; }), [2, 1].sort(new Proxy((x, y) => x - y, {})), [2, 1].sort(((x, y) => x - y).bind(null))]; });
+T('cbTypedAndFrom', () => [Array.from([1, 2], function (x) { return x + this.k; }, { k: 10 }), Array.from({ length: 2 }, (_, i) => i * 3), new Int8Array([1, 2]).map(x => x * 2)[1], Array.from(new Set([1, 2]), x => -x)]);
+T('cbMapSetForEach', () => { const r = []; new Map([[1, 'a']]).forEach((v, k, m) => r.push(k, v, m.size)); new Set([7]).forEach(function (v, k) { r.push(v, k, this.t); }, { t: 't' }); return r; });
+// custom iterators: next() of a closure, with all the ways it can differ
+class Counter { constructor(n) { this.i = 0; this.n = n; } next() { return this.i < this.n ? { value: this.i++, done: false } : { value: undefined, done: true }; } [Symbol.iterator]() { return this; } }
+T('iterSpread', () => [...new Counter(4)]);
+T('iterForOfBreak', () => { const r = []; const it = new Counter(5); it.return = () => { r.push('ret'); return {}; }; for (const x of it) { if (x === 2) break; r.push(x); } return r; });
+T('iterDestructure', () => { const [a, b, ...rest] = new Counter(5); return [a, b, rest]; });
+T('iterArrayFrom', () => [Array.from(new Counter(3)), Array.from(new Counter(3), x => x * 2), new Set(new Counter(3)).size, Math.max(...new Counter(4))]);
+T('iterNextReplacedMidway', () => { const it = new Counter(4); const r = []; for (const x of it) { r.push(x); it.next = () => ({ done: true }); } return r; });
+T('iterNextPatchedOnProtoBefore', () => { const it = new Counter(2); it.next = function () { return this.i < 3 ? { value: 'own' + this.i++, done: false } : { done: true }; }; return [...it]; });
+T('iterNextArrow', () => { let i = 0; const it = { [Symbol.iterator]() { return this; }, next: () => i < 3 ? { value: i++, done: false } : { done: true } }; return [...it]; });
+T('iterNextSloppyThis', () => { const it = { [Symbol.iterator]() { return this; }, k: 0, next: function () { return this.k < 2 ? { value: this === it, done: false, k: this.k++ } : { done: true }; } }; return [...it]; });
+T('iterNextBound', () => { const st = { i: 0 }; const it = { [Symbol.iterator]() { return this; }, next: function () { return this.i < 2 ? { value: 'b' + this.i++, done: false } : { done: true }; }.bind(st) }; return [...it]; });
+T('iterNextNative', () => { const src = [1, 2][Symbol.iterator](); const it = { [Symbol.iterator]() { return this; }, next: src.next.bind(src) }; return [...it]; });
+T('iterNextProxy', () => { let i = 0; const it = { [Symbol.iterator]() { return this; }, next: new Proxy(function () { return i < 2 ? { value: i++, done: false } : { done: true }; }, {}) }; return [...it]; });
+T('iterNextGenerator', () => { const it = { [Symbol.iterator]() { return this; }, next: function* () {} }; const r = []; for (const x of it) { r.push(typeof x); if (r.length > 2) break; } return r; });
+T('iterNextClassCtor', () => { const it = { [Symbol.iterator]() { return this; }, next: class {} }; return [...it]; });
+T('iterNextNotCallable', () => { const it = { [Symbol.iterator]() { return this; }, next: 5 }; return [...it]; });
+T('iterNextThrows', () => { const r = []; const it = new Counter(5); it.return = () => { r.push('ret'); return {}; }; const orig = Counter.prototype.next; it.next = function () { if (this.i === 2) throw new TypeError('n'); return orig.call(this); }; try { for (const x of it) r.push(x); } catch (e) { r.push(e.constructor.name); } return r; });
+T('iterNextReturnsPrimitive', () => { const it = { [Symbol.iterator]() { return this; }, next() { return 1; } }; return [...it]; });
+T('iterNextResultGetters', () => { const log = []; let i = 0; const it = { [Symbol.iterator]() { return this; }, next() { const k = i++; return { get done() { log.push('d' + k); return k > 1; }, get value() { log.push('v' + k); return k; } }; } }; return [[...it], log]; });
+T('iterNextArgs', () => { const r = []; const it = { [Symbol.iterator]() { return this; }, next(...a) { r.push(a.length); return { done: r.length > 2 }; } }; [...it]; return r; });
+T('iterReentrantSpread', () => { const inner = () => [...new Counter(2)]; const it = { [Symbol.iterator]() { return this; }, n: 0, next() { return this.n < 2 ? { value: inner().concat(this.n++), done: false } : { done: true }; } }; return [...it]; });
+T('iterNestedSameIterator', () => { const it = new Counter(6); const r = []; for (const x of it) { r.push(x); for (const y of it) { r.push('i' + y); break; } } return r; });
+T('iterRecursiveDepth', () => { const make = d => ({ [Symbol.iterator]() { return this; }, k: 0, next() { return this.k++ < 1 ? { value: d === 0 ? 0 : [...make(d - 1)][0] + 1, done: false } : { done: true }; } }); return [...make(150)]; });
+T('iterGenerator', () => { function* g() { yield 1; yield* new Counter(2); } return [...g()]; });
+T('iterYieldStarCustom', () => { const it = new Counter(3); function* g() { const r = yield* it; return r; } return [...g()]; });
+T('iterInsideGeneratorResumedDeep', () => { function* g() { for (const x of new Counter(3)) yield x; } const gen = g(); const r = [gen.next().value]; const deep = n => n === 0 ? gen.next().value : deep(n - 1); r.push(deep(100), deep(10)); return r; });
+// getters called from builtins
+T('getterFromBuiltins', () => { let n = 0; const o = { get g() { n++; return n; }, h: 1 }; const r = [Reflect.get(o, 'g'), Object.assign({}, o).g, JSON.stringify(o), Object.entries(o).length, { ...o }.g]; return [r, n]; });
+T('getterArrowAndReceiver', () => { const o = {}; Object.defineProperty(o, 'a', { get: () => typeof this }); const p = { get w() { return this === r; } }; const r = Object.create(p); return [Reflect.get(o, 'a'), Reflect.get(p, 'w', r), Reflect.get(p, 'w')]; });
+L.join('\n');
+""";
+
+    private const string CallbacksAndIteratorsExpected = """
+speciesPlain = [[true,true,"Array",2],[true,true,"Array",2],[true,true,"Array",2],[true,true,"Array",3],[true,true,"Array",2],[true,true,"Array",1]]
+speciesSubclass = [[true,3,[2,4,6]],[true,2,[2,3]],[true,2,[2,3]],[true,4,[1,2,3,4]],[true,1,[1]]]
+speciesOwnConstructor = [1,3,1,0]
+speciesOwnConstructorUndefined = [true,true,"Array",2]
+speciesOwnConstructorGetter = ["get","get","get"]
+speciesOwnConstructorNotObject = "threw TypeError"
+speciesProtoConstructorPatched = [["P 2","P 0","P 1"],[true,true,"Array",1]]
+speciesProtoConstructorAccessor = [3,[true,true,"Array",1]]
+speciesProtoConstructorDeleted = [[true,true,"Object",2],true]
+speciesSymbolOnConstructorProto = [2,1,2]
+speciesManyOwnProps = [[true,true,"Array",3],[true,true,"Array",2]]
+speciesSymbolKeyed = [true,true,"Array",1]
+speciesNonArray = [[true,true,"Array",2],["aa","bb"]]
+cbKinds = [[1,2,3],[["b",1],["b",-2],["b",3]],[10,-20,30],["ap3","ap3","ap3"],[1,-2,3],["1","-2","3"],true]
+cbThisArg = ["object",5,"object",5,7,"object",true,"object"]
+cbArity = [3,5,0,2,3,6,1,2,4,3,[5,0,1,null,null]]
+cbDefaultsAndArgs = [[1,0,2,"e"],[2,1,2,"e"]]
+cbThrows = ["RangeError",2]
+cbThrowsInsideTry = [1,"f","c2","f",3,"f"]
+cbThrowNonError = "str"
+cbClassConstructor = "threw TypeError"
+cbGenerator = [1,2]
+cbAsync = [true]
+cbReentrant = [[],[4,6],[9,12]]
+cbRecursive = 200
+cbMutatesGrow = [[1,2,3],6]
+cbMutatesShrink = [[1,2,3],5,false,[1,2,3,null,null]]
+cbMutatesHoles = [0,1,3]
+cbMutatesProtoIndex = [[0,1],[1,"proto"],[2,3]]
+cbMutatesConstructorMidway = [[true,true,"Array",2],[true,true,"Array",1]]
+cbReduceVariants = [6,"321",4,[1,2]]
+cbFindVariants = [12,1,130,-1,null,true,false]
+cbSort = [[1,2,3],true,[3,1,2],[1,2],[1,2]]
+cbTypedAndFrom = [[11,12],[0,3],4,[-1,-2]]
+cbMapSetForEach = [1,"a",1,7,7,"t"]
+iterSpread = [0,1,2,3]
+iterForOfBreak = [0,1,"ret"]
+iterDestructure = [0,1,[2,3,4]]
+iterArrayFrom = [[0,1,2],[0,2,4],3,3]
+iterNextReplacedMidway = [0,1,2,3]
+iterNextPatchedOnProtoBefore = ["own0","own1","own2"]
+iterNextArrow = [0,1,2]
+iterNextSloppyThis = [true,true]
+iterNextBound = ["b0","b1"]
+iterNextNative = [1,2]
+iterNextProxy = [0,1]
+iterNextGenerator = ["undefined","undefined","undefined"]
+iterNextClassCtor = "threw TypeError"
+iterNextNotCallable = "threw TypeError"
+iterNextThrows = [0,1,"TypeError"]
+iterNextReturnsPrimitive = "threw TypeError"
+iterNextResultGetters = [[0,1],["d0","v0","d1","v1","d2"]]
+iterNextArgs = [0,0,0]
+iterReentrantSpread = [[0,1,0],[0,1,1]]
+iterNestedSameIterator = [0,"i1",2,"i3",4,"i5"]
+iterRecursiveDepth = [150]
+iterGenerator = [1,0,1]
+iterYieldStarCustom = [0,1,2]
+iterInsideGeneratorResumedDeep = [0,1,2]
+getterFromBuiltins = [[1,2,"{\"g\":3,\"h\":1}",2,5],5]
+getterArrowAndReceiver = ["object",true,false]
+""";
+
+    [Fact]
+    public void CallbacksSpeciesAndCustomIteratorsMatchReferenceBehavior()
+    {
+        using var engine = new JsEngine();
+        var got = engine.Evaluate(CallbacksAndIteratorsScript).AsString().Split('\n');
+        var expected = CallbacksAndIteratorsExpected.ReplaceLineEndings("\n").TrimEnd('\n').Split('\n');
+        Assert.Equal(expected.Length, got.Length);
+        for (int i = 0; i < expected.Length; i++) Assert.True(expected[i] == got[i], $"line {i}: expected {expected[i]} but got {got[i]}");
+    }
+
+    [Theory]
+    [InlineData("const a = Array.from({ length: 1000 }, (_, i) => i); for (;;) a.map(x => x + 1);")]
+    [InlineData("const a = [1, 2, 3]; for (;;) a.forEach(() => {});")]
+    [InlineData("class C { constructor() { this.i = 0; } next() { return { value: this.i++, done: false }; } [Symbol.iterator]() { return this; } } [...new C()];")]
+    public void LimitsStopLongCallbackAndIteratorLoops(string script)
+    {
+        using (var engine = new JsEngine(new JsEngineOptions { Limits = new JsLimits { MaxInstructions = 200_000 } }))
+            Assert.Equal(JsLimitKind.Instructions, Assert.Throws<JsLimitExceededException>(() => engine.Evaluate(script)).Kind);
+        using (var engine = new JsEngine(new JsEngineOptions { Limits = new JsLimits { Timeout = TimeSpan.FromMilliseconds(50) } }))
+            Assert.Equal(JsLimitKind.Timeout, Assert.Throws<JsLimitExceededException>(() => engine.Evaluate(script)).Kind);
+    }
+
+    [Theory]
+    [InlineData("const f = n => [n].map(x => f(x + 1)); f(0);")]
+    [InlineData("const f = n => { [1].forEach(() => f(n + 1)); }; f(0);")]
+    [InlineData("const mk = () => ({ [Symbol.iterator]() { return this; }, next() { return { value: [...mk()], done: false }; } }); [...mk()];")]
+    [InlineData("const o = { get g() { return Reflect.get(o, 'g'); } }; o.g;")]
+    public void RecursiveCallbacksAreBoundedByStackDepth(string script)
+    {
+        using var engine = new JsEngine(new JsEngineOptions { Limits = new JsLimits { MaxStackDepth = 500 } });
+        var ex = Assert.Throws<JsLimitExceededException>(() => engine.Evaluate(script));
+        Assert.Equal(JsLimitKind.StackDepth, ex.Kind);
+    }
+
+    // Expected output generated by Node 24 (V8 13.6) from StringBuildingScript.
+    private const string StringBuildingScript = """
+const L = [];
+const T = (name, fn) => { let r; try { r = fn(); } catch (e) { r = 'threw ' + (e && e.constructor ? e.constructor.name : typeof e); } const j = JSON.stringify(r); let o = ''; for (const ch of j ?? 'undefined') { const c = ch.charCodeAt(0); o += ch.length === 1 && c >= 32 && c < 127 ? ch : ch.split('').map(x => '\\u' + x.charCodeAt(0).toString(16)).join(''); } L.push(name + ' = ' + o); };
+const nums = [0, -0, 1, -1, 7, 10, 99, 100, -100, 2147483647, -2147483648, 2147483648, -2147483649, 4294967296, 1.5, -0.5, NaN, Infinity, -Infinity, 1e21, 1e-7, 123456789012, 0.1 + 0.2];
+const log = [];
+const obj = (name, prim) => ({ [Symbol.toPrimitive](hint) { log.push(name + ':' + hint); return prim; } });
+const vo = { valueOf() { log.push('valueOf'); return 42; }, toString() { log.push('toString'); return 'S'; } };
+const side = (v, n) => { log.push('eval ' + n); return v; };
+const take = r => { const l = log.slice(); log.length = 0; return [r, l]; };
+
+// ---- templates: every kind of substitution
+T('tplNums', () => nums.map(n => `<${n}>`));
+T('tplNumsMid', () => nums.map(n => `a${n}b${n}c`));
+T('tplKinds', () => [`${undefined}|${null}|${true}|${false}|${'s'}|${10n}|${-5n}|${[1, [2, 3]]}|${{}}|${[]}`]);
+T('tplEmpty', () => [`${''}`, `${''}${''}`, `a${''}`, `${''}b`, `${1}${2}${3}`, `${'x'}`, `${7}`, `${-0}`]);
+T('tplHint', () => take(`a${obj('o', 'P')}b${obj('p', 5)}`));
+T('tplValueOf', () => take(`${vo}|${vo}`));
+T('tplOrder', () => take(`${side(obj('x', 1), 1)}-${side(obj('y', 2), 2)}-${side(3, 3)}`));
+T('tplSymbol', () => { const r = (() => { try { return `${side(1, 1)}${side(Symbol('q'), 2)}${side(3, 3)}`; } catch (e) { return e.constructor.name; } })(); return take(r); });
+T('tplThrowInConv', () => { const bad = { toString() { throw new RangeError('no'); } }; try { return `${side(1, 1)}${bad}${side(2, 2)}`; } catch (e) { return take(e.message); } });
+T('tplNested', () => [`a${`b${1}c${`d${2}`}`}e`, `${`${`${'deep'}`}`}`]);
+T('tplSurrogates', () => { const hi = '\ud83d', lo = '\ude00'; return [`${hi}${lo}`, `${hi}x${lo}`, `${lo}${hi}`, `\ud800${'\udc00'}`].map(s => [s.length, s.codePointAt(0), s.charCodeAt(s.length - 1)]); });
+T('tplLong', () => { const a = 'x'.repeat(200), b = 'y'.repeat(100); const s = `${a}-${b}-${a}`; return [s.length, s.charCodeAt(200), s.slice(195, 210), s.charCodeAt(301), s.slice(-3)]; });
+T('tplLongNum', () => { const a = 'q'.repeat(250); const s = `${a}${123456}${a}`; return [s.length, s.slice(248, 258)]; });
+T('tplAround256', () => [250, 251, 252, 253, 254, 255, 256, 257].map(n => { const a = 'm'.repeat(n - 4); const s = `${a}${12}${'z'}!`; return [s.length, s.slice(-5)]; }));
+T('tplLoop', () => { const out = []; for (let i = -3; i < 300; i += 37) out.push(`${i}:${(i * 7).toString(16).padStart(5, '0')}`); return out; });
+T('tplRaw', () => [`a\tb${1}A${'\x42'}\
+c`]);
+T('tplManyParts', () => { const v = 'v'; return `0${v}1${v}2${v}3${v}4${v}5${v}6${v}7${v}8${v}9${v}10${v}11${v}12${v}13${v}14${v}15${v}16${v}17${v}18${v}19${v}`; });
+T('tplInGenerator', () => { function* g() { const r = `a${yield 1}b${yield 2}c`; return r; } const it = g(); it.next(); it.next('X'); return it.next(5).value; });
+T('tplReassign', () => { let s = 'q'; s = `${s}${s}x${s}`; let t = 1; t = `${t + 1}${t}`; return [s, t]; });
+T('tplDate', () => { const d = new Date(0); d.toString = () => 'D'; d.valueOf = () => 9; return [`${d}`, 'a' + d + 'b']; });
+
+// ---- + chains that are strings from the first addition
+T('addNums', () => nums.map(n => 'k' + n + ';'));
+T('addNumsLead', () => nums.map(n => n + ':' + n + ':' + n));
+T('addHint', () => take('a' + obj('o', 'P') + obj('p', 5) + 'z'));
+T('addHint2', () => take(obj('o', 'P') + '-' + obj('p', 7) + obj('q', true)));
+T('addValueOf', () => take('[' + vo + ']' + vo));
+T('addDate', () => { const d = new Date(86400000); return ['t' + d.getTime() + '|', typeof ('' + d + 1)]; });
+T('addOrder', () => take('s' + side(obj('x', 1), 1) + side(obj('y', 2), 2) + side(3, 3)));
+T('addOrder2', () => take(side(obj('x', 1), 1) + 'lit' + side(obj('y', 2), 2) + side(obj('z', 3), 3)));
+T('addSymbol', () => { const r = (() => { try { return 'a' + side(1, 1) + side(Symbol('q'), 2) + side(3, 3); } catch (e) { return e.constructor.name; } })(); return take(r); });
+T('addSymbolFirst', () => { const r = (() => { try { return side(Symbol('q'), 1) + 'a' + side(3, 2); } catch (e) { return e.constructor.name; } })(); return take(r); });
+T('addNotChains', () => { const x = 1, y = 2; return [x + y + 'a', 1 + 2 + 'a', 'a' + (1 + 2), 'a' + 1 + 2, x + y + 'a' + x + y, (x + 'b') + y + 3, x + 'b' + y + 3, 1n + 2n + 'n', 'n' + 1n + 2n, null + 'a' + undefined + true]; });
+T('addTemplateLead', () => { const x = 4; return take([`t${x}` + x + 5, `${x}` + obj("o", "P") + 1]); });
+T('addBigInt', () => ['b' + 10n + -3n + 0n, 'x' + 2n ** 70n + 'y']);
+T('addLong', () => { const a = 'L'.repeat(300); const s = 'pre' + a + 42 + 'post'; const t = 'x' + 1 + a; return [s.length, s.slice(300, 310), t.length, t.slice(0, 4), t.charCodeAt(301)]; });
+T('addSurrogates', () => { const hi = '\ud83d', lo = '\ude00'; const s = '' + hi + lo + hi; return [s.length, s.codePointAt(0), s.charCodeAt(2), ('\udc00' + 1 + '\ud800').split('').map(c => c.charCodeAt(0))]; });
+T('addAppendLoop', () => { let s = ''; for (let i = 0; i < 600; i++) s += 'item-' + i + ';'; return [s.length, s.charCodeAt(1234), s.slice(-12), s.indexOf('item-599')]; });
+T('addManyParts', () => { const v = 1; return 'a' + v + v + v + v + v + v + v + v + v + v + v + v + v + v + v + v + v + v + v + v + v + v + v + v + v + v + v + v + v + v + v + v + v + v + v + v + v + v + v + v + v; });
+T('addPatchedToString', () => { const save = Number.prototype.toString; Number.prototype.toString = () => 'P'; const r = ['a' + 5 + 'b', `${5}c`]; Number.prototype.toString = save; return r; });
+T('addPatchedProto', () => { const save = Object.prototype.toString; Object.prototype.toString = function () { return 'OBJ'; }; const r = ['a' + {} + 'b', `${{}}c`]; Object.prototype.toString = save; return r; });
+T('addThrowValueOf', () => { const bad = { valueOf() { throw new TypeError('v'); } }; try { return 'a' + side(1, 1) + bad + side(2, 2); } catch (e) { return take(e.message); } });
+T('compound', () => { let s = 'a'; s += 'b' + 1 + 'c'; s += `${s}!${s.length}`; return s; });
+T('addCaptured', () => { let y = 1; const o = { valueOf() { y = 2; return 'o'; } }; const r1 = 'a' + o + y; y = 1; const r2 = `${o}${y}`; y = 1; const r3 = 'a' + o + y + o + y; return [r1, r2, r3]; });
+T('addTdz', () => { const o = obj('o', 'P'); const r = (() => { try { return 'a' + o + z; } catch (e) { return e.constructor.name; } let z = 1; })(); return take(r); });
+T('tplTdz', () => { const o = obj('o', 'P'); const r = (() => { try { return `a${o}${z}`; } catch (e) { return e.constructor.name; } let z = 1; })(); return take(r); });
+T('addGlobalGetter', () => { Object.defineProperty(globalThis, 'gg', { get() { log.push('get gg'); return 'G'; }, configurable: true }); const o = obj('o', 'P'); const r = ['a' + o + gg + o, `${o}${gg}`]; delete globalThis.gg; return take(r); });
+T('addLocalsOnly', () => { const o = obj('o', 'P'), p = obj('p', 3); let n = 5, u; const r = ['a' + o + p + n + u + null + true + 1.5 + -0, `${o}${p}${n}${u}`, o + '|' + p + n]; return take(r); });
+T('addSelfMutation', () => { let s = 'x'; const o = { toString() { s = 'changed'; return 'O'; } }; return [`${s}${o}${s}`, s]; });
+const H = s => { let h = 0; for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0; return [s.length, h]; };
+T('ropeAppend', () => { let s = ''; for (let i = 0; i < 5000; i++) s += String.fromCharCode(97 + i % 26) + (i % 7 ? '' : '\ud83d'); return [H(s), s.slice(250, 270), s.codePointAt(0)]; });
+T('ropeForks', () => { let s = 'x'.repeat(300); s += 'a'; s += 'b'; const keep = s; s += 'c'; const t = keep + 'Z'; const u = keep + 'Y'; s += 'd'; return [s.slice(-6), t.slice(-6), u.slice(-6), keep.slice(-4), H(s), H(t), H(u)]; });
+T('ropeReadEachStep', () => { let s = 'p'.repeat(260); const out = []; for (let i = 0; i < 400; i++) { s += i; if (i % 37 === 0) out.push(s.charCodeAt(s.length - 1), s.length); } return [out, H(s)]; });
+T('ropeInterleaved', () => { let a = '', b = ''; for (let i = 0; i < 3000; i++) { a += 'A' + i; b += a.length % 10; if (i === 1500) b = a + b; } return [H(a), H(b)]; });
+T('ropePrepend', () => { let s = ''; for (let i = 0; i < 2000; i++) s = i + ',' + s; return H(s); });
+T('ropeBigPieces', () => { const big = 'Q'.repeat(1000); let s = ''; for (let i = 0; i < 50; i++) { s += big; s += i; s += '\udc00'; } return [H(s), s.slice(995, 1010)]; });
+T('ropeSelfDouble', () => { let s = 'ab'.repeat(200); s += 'c'; s += 'd'; for (let i = 0; i < 5; i++) s += s; return H(s); });
+T('ropeOps', () => { let s = ''; for (let i = 0; i < 500; i++) s += 'w' + (i % 10) + ' '; return [s.indexOf('w9 w0'), s.split(' ').length, s.toUpperCase().slice(0, 9), s === s.slice(0), s < s + 'x', new Map([[s, 1]]).get(s.slice(0)), JSON.stringify(s).length]; });
+T('joinForms', () => { let r = ''; for (let i = 0; i < 100; i++) r += 'r' + i; const a = ['a', '', 'b', '\ud800', r, 'c']; const holes = ['a', , 'b']; Array.prototype[1] = 'P'; const hp = holes.join('-'); delete Array.prototype[1]; const cyc = ['x', 'y']; cyc.push(cyc); return [a.join(), a.join(''), a.join('--').length, a.join(undefined).slice(0, 8), ['s', 1, 's'].join('+'), ['s', null, undefined, 's'].join('/'), hp, holes.join('-'), [].join(), ['only'].join('|'), cyc.join(';'), H(a.join('\udc00')), ['q', 'r'].join({ toString() { return '#'; } })]; });
+T('joinObserved', () => { const a = ['a', 'b', 'c']; let n = 0; const sep = { toString() { n++; a.push('d'); return ','; } }; const r = a.join(sep); return [r, n]; });
+L.join('\n');
+""";
+
+    private const string StringBuildingExpected = """
+tplNums = ["<0>","<0>","<1>","<-1>","<7>","<10>","<99>","<100>","<-100>","<2147483647>","<-2147483648>","<2147483648>","<-2147483649>","<4294967296>","<1.5>","<-0.5>","<NaN>","<Infinity>","<-Infinity>","<1e+21>","<1e-7>","<123456789012>","<0.30000000000000004>"]
+tplNumsMid = ["a0b0c","a0b0c","a1b1c","a-1b-1c","a7b7c","a10b10c","a99b99c","a100b100c","a-100b-100c","a2147483647b2147483647c","a-2147483648b-2147483648c","a2147483648b2147483648c","a-2147483649b-2147483649c","a4294967296b4294967296c","a1.5b1.5c","a-0.5b-0.5c","aNaNbNaNc","aInfinitybInfinityc","a-Infinityb-Infinityc","a1e+21b1e+21c","a1e-7b1e-7c","a123456789012b123456789012c","a0.30000000000000004b0.30000000000000004c"]
+tplKinds = ["undefined|null|true|false|s|10|-5|1,2,3|[object Object]|"]
+tplEmpty = ["","","a","b","123","x","7","0"]
+tplHint = ["aPb5",["o:string","p:string"]]
+tplValueOf = ["S|S",["toString","toString"]]
+tplOrder = ["1-2-3",["eval 1","x:string","eval 2","y:string","eval 3"]]
+tplSymbol = ["TypeError",["eval 1","eval 2"]]
+tplThrowInConv = ["no",["eval 1"]]
+tplNested = ["ab1cd2e","deep"]
+tplSurrogates = [[2,128512,56832],[3,55357,56832],[2,56832,55357],[2,65536,56320]]
+tplLong = [502,45,"xxxxx-yyyyyyyyy",45,"xxx"]
+tplLongNum = [506,"qq123456qq"]
+tplAround256 = [[250,"m12z!"],[251,"m12z!"],[252,"m12z!"],[253,"m12z!"],[254,"m12z!"],[255,"m12z!"],[256,"m12z!"],[257,"m12z!"]]
+tplLoop = ["-3:00-15","34:000ee","71:001f1","108:002f4","145:003f7","182:004fa","219:005fd","256:00700","293:00803"]
+tplRaw = ["a\tb1ABc"]
+tplManyParts = "0v1v2v3v4v5v6v7v8v9v10v11v12v13v14v15v16v17v18v19v"
+tplInGenerator = "aXb5c"
+tplReassign = ["qqxq","21"]
+tplDate = ["D","aDb"]
+addNums = ["k0;","k0;","k1;","k-1;","k7;","k10;","k99;","k100;","k-100;","k2147483647;","k-2147483648;","k2147483648;","k-2147483649;","k4294967296;","k1.5;","k-0.5;","kNaN;","kInfinity;","k-Infinity;","k1e+21;","k1e-7;","k123456789012;","k0.30000000000000004;"]
+addNumsLead = ["0:0:0","0:0:0","1:1:1","-1:-1:-1","7:7:7","10:10:10","99:99:99","100:100:100","-100:-100:-100","2147483647:2147483647:2147483647","-2147483648:-2147483648:-2147483648","2147483648:2147483648:2147483648","-2147483649:-2147483649:-2147483649","4294967296:4294967296:4294967296","1.5:1.5:1.5","-0.5:-0.5:-0.5","NaN:NaN:NaN","Infinity:Infinity:Infinity","-Infinity:-Infinity:-Infinity","1e+21:1e+21:1e+21","1e-7:1e-7:1e-7","123456789012:123456789012:123456789012","0.30000000000000004:0.30000000000000004:0.30000000000000004"]
+addHint = ["aP5z",["o:default","p:default"]]
+addHint2 = ["P-7true",["o:default","p:default","q:default"]]
+addValueOf = ["[42]42",["valueOf","valueOf"]]
+addDate = ["t86400000|","string"]
+addOrder = ["s123",["eval 1","x:default","eval 2","y:default","eval 3"]]
+addOrder2 = ["1lit23",["eval 1","x:default","eval 2","y:default","eval 3","z:default"]]
+addSymbol = ["TypeError",["eval 1","eval 2"]]
+addSymbolFirst = ["TypeError",["eval 1"]]
+addNotChains = ["3a","3a","a3","a12","3a12","1b23","1b23","3n","n12","nullaundefinedtrue"]
+addTemplateLead = [["t445","4P1"],["o:default"]]
+addBigInt = ["b10-30","x1180591620717411303424y"]
+addLong = [309,"LLL42post",302,"x1LL",76]
+addSurrogates = [3,128512,55357,[56320,49,55296]]
+addAppendLoop = [5290,109,"98;item-599;",5281]
+addManyParts = "a11111111111111111111111111111111111111111"
+addPatchedToString = ["a5b","5c"]
+addPatchedProto = ["aOBJb","OBJc"]
+addThrowValueOf = ["v",["eval 1"]]
+compound = "ab1cab1c!4"
+addCaptured = ["ao2","[object Object]1","ao2o2"]
+addTdz = ["ReferenceError",["o:default"]]
+tplTdz = ["ReferenceError",["o:string"]]
+addGlobalGetter = [["aPGP","PG"],["o:default","get gg","o:default","o:string","get gg"]]
+addLocalsOnly = [["aP35undefinednulltrue1.50","P35undefined","P|35"],["o:default","p:default","o:string","p:string","o:default","p:default"]]
+addSelfMutation = ["xOchanged","changed"]
+ropeAppend = [[5715,9787379],"klmnopq\ud83drstuvwx\ud83dyzab",97]
+ropeForks = ["xxabcd","xxxabZ","xxxabY","xxab",[304,51584578],[303,-1522356647],[303,-1522356648]]
+ropeReadEachStep = [[48,261,55,326,52,400,49,486,56,597,53,708,50,819,57,930,54,1041,51,1152,48,1263],[1350,-671561842]]
+ropeInterleaved = [[13890,653268712],[9395,1025801206]]
+ropePrepend = [8890,126651816]
+ropeBigPieces = [[50140,-770125505],"QQQQQ0\udc00QQQQQQQQ"]
+ropeSelfDouble = [12864,2054990112]
+ropeOps = [27,501,"W0 W1 W2 ",true,true,1,1502]
+joinForms = ["a,,b,\ud800,r0r1r2r3r4r5r6r7r8r9r10r11r12r13r14r15r16r17r18r19r20r21r22r23r24r25r26r27r28r29r30r31r32r33r34r35r36r37r38r39r40r41r42r43r44r45r46r47r48r49r50r51r52r53r54r55r56r57r58r59r60r61r62r63r64r65r66r67r68r69r70r71r72r73r74r75r76r77r78r79r80r81r82r83r84r85r86r87r88r89r90r91r92r93r94r95r96r97r98r99,c","ab\ud800r0r1r2r3r4r5r6r7r8r9r10r11r12r13r14r15r16r17r18r19r20r21r22r23r24r25r26r27r28r29r30r31r32r33r34r35r36r37r38r39r40r41r42r43r44r45r46r47r48r49r50r51r52r53r54r55r56r57r58r59r60r61r62r63r64r65r66r67r68r69r70r71r72r73r74r75r76r77r78r79r80r81r82r83r84r85r86r87r88r89r90r91r92r93r94r95r96r97r98r99c",304,"a,,b,\ud800,r","s+1+s","s///s","a-P-b","a--b","","only","x;y;",[299,1249562824],"q#r"]
+joinObserved = ["a,b,c",1]
+""";
+
+    [Fact]
+    public void TemplatesStringChainsRopesAndJoinMatchReferenceBehavior()
+    {
+        using var engine = new JsEngine();
+        var got = engine.Evaluate(StringBuildingScript).AsString().Split('\n');
+        var expected = StringBuildingExpected.ReplaceLineEndings("\n").TrimEnd('\n').Split('\n');
+        Assert.Equal(expected.Length, got.Length);
+        for (int i = 0; i < expected.Length; i++) Assert.True(expected[i] == got[i], $"line {i}: expected {expected[i]} but got {got[i]}");
+    }
+
+    [Fact]
+    public void MultiPartConcatenationThrowsTheLengthErrorWhereTheAdditionsWould()
+    {
+        // V8's limit is the default MaxStringLength; a small one gives the same order of effects on short strings
+        using var engine = new JsEngine(new JsEngineOptions { Limits = new JsLimits { MaxStringLength = 1000 } });
+        var got = engine.Evaluate("""
+const log = [], big = 'x'.repeat(600), f = n => { log.push('eval ' + n); return n; };
+const o = { [Symbol.toPrimitive](h) { log.push('conv ' + h); return 'o'; } };
+const t = (name, fn) => { try { log.push(name + ' ' + fn().length); } catch (e) { log.push(name + ' ' + e.name); } };
+t('tpl', () => `${big}${f(1)}${big}${f(2)}`);
+t('tplLocals', () => `${big}-${big}${o}`);
+t('tplLit', () => `${f(3)}${big}${'y'.repeat(500)}${f(4)}`);
+t('add', () => 'a' + f(5) + big + big + f(6));
+t('addLocals', () => 'a' + big + big + o);
+t('addConvFirst', () => 'a' + o + big + f(7) + big + o + f(8));
+t('append', () => { let s = ''; for (let i = 0; i < 2000; i++) s += 'xy'; return s; });
+t('appendNum', () => { let s = 'z'.repeat(300); s += 'a'; s += 'b'; for (let i = 0; ; i++) s += i; });
+t('ok', () => `${big}${f(9)}` + 'k' + o);
+log.join(',');
+""").AsString();
+        Assert.Equal("eval 1,tpl RangeError,tplLocals RangeError,eval 3,tplLit RangeError,eval 5,add RangeError,addLocals RangeError,"
+            + "conv default,eval 7,addConvFirst RangeError,append RangeError,appendNum RangeError,eval 9,conv default,ok 603", got);
+    }
+
+    [Fact]
+    public void StringAppendLoopsAreChargedToTheTrackedBytesBudget()
+    {
+        using (var engine = new JsEngine(new JsEngineOptions { Limits = new JsLimits { MaxTrackedBytes = 4 * 1024 * 1024 } }))
+        {
+            var ex = Assert.Throws<JsLimitExceededException>(() => engine.Evaluate("let s = ''; for (let i = 0; ; i++) s += 'abc' + i;"));
+            Assert.Equal(JsLimitKind.TrackedBytes, ex.Kind);
+        }
+        using (var engine = new JsEngine(new JsEngineOptions { Limits = new JsLimits { MaxTrackedBytes = 16 * 1024 * 1024 } }))
+            Assert.Equal(588940.0, engine.Evaluate("let s = ''; for (let i = 0; i < 100000; i++) s += 'k' + i; s.charCodeAt(5) + s.length").AsNumber());
+    }
+
+    // ToInt32 in the bitwise operators decodes number bits in integer registers, and ToBoolean of a number tests its bits:
+    // every exponent range, signs, zeros, NaN, the infinities, non-numbers and conversion order, against Node.
+    private const string NumberBitsScript = """
+const L = [];
+const T = (name, fn) => { let r; try { r = fn(); } catch (e) { r = 'threw ' + (e && e.constructor ? e.constructor.name : typeof e); } L.push(name + ' = ' + JSON.stringify(r)); };
+const vals = [0, -0, 0.5, -0.5, 1, -1, 1.5, -1.5, 3.99, -3.99, 31, 32, 33, 2147483647, 2147483648, -2147483648, -2147483649, 4294967295, 4294967296, 4294967297,
+  2 ** 52 + 1, -(2 ** 53) + 3, 2 ** 62 + 2 ** 40, 2 ** 63, -(2 ** 63), 2 ** 64 + 2 ** 33, 1e300, -1e300, 5e-324, -5e-324, NaN, Infinity, -Infinity,
+  '12', '-0x10', '', true, false, null, undefined, [7], { valueOf() { return -6; } }];
+const name = v => typeof v === 'object' && v !== null ? 'obj' + JSON.stringify(v) : Object.is(v, -0) ? '-0' : String(v);
+for (const a of vals) T('bits ' + name(a), () => vals.map(b => [a & b, a | b, a ^ b, a << b, a >> b, a >>> b].join(' ')).join(' | '));
+T('notAndNeg', () => vals.map(v => [~v, -v & v, ~~v, v | 0, v >>> 0].join(' ')).join(' | '));
+T('truthy', () => vals.map(v => (v ? 1 : 0) + (!v ? 'n' : 'y')).join(''));
+T('truthyLoops', () => { const out = []; for (const v of vals) { let n = 0, x = v; while (x && n < 3) { n++; x = typeof x === 'number' ? x / 2 ** 600 : 0; } out.push(n); } return out.join(''); });
+T('valueOfOrder', () => { const log = []; const o = k => ({ valueOf() { log.push(k); return k; } }); return [o(1) & o(2), o(3) << o(4), o(5) >>> o(6), log.join('')]; });
+T('symbolAndBigInt', () => { const r = []; for (const f of [() => Symbol() & 1, () => 1n | 2n, () => 1n << 70n, () => -5n >> 1n, () => 1n & 1, () => 1n >>> 1n]) { try { r.push(String(f())); } catch (e) { r.push(e.constructor.name); } } return r; });
+T('nqueens', () => { function solve(n, row, cols, d1, d2) { if (row === n) return 1; let c = 0, avail = ~(cols | d1 | d2) & ((1 << n) - 1); while (avail) { const bit = avail & -avail; avail ^= bit; c += solve(n, row + 1, cols | bit, ((d1 | bit) << 1) & ((1 << n) - 1), (d2 | bit) >> 1); } return c; } return [6, 7, 8].map(n => solve(n, 0, 0, 0, 0)); });
+T('hashChain', () => { let h = 0x811c9dc5; for (let i = 0; i < 2000; i++) { h ^= i * 2654435761; h = (h << 5) - h + (h >>> 7); h |= 0; } return h; });
+L.join('\n');
+""";
+
+    private const string NumberBitsExpected = """
+bits 0 = "0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 1 1 0 0 0 | 0 -1 -1 0 0 0 | 0 1 1 0 0 0 | 0 -1 -1 0 0 0 | 0 3 3 0 0 0 | 0 -3 -3 0 0 0 | 0 31 31 0 0 0 | 0 32 32 0 0 0 | 0 33 33 0 0 0 | 0 2147483647 2147483647 0 0 0 | 0 -2147483648 -2147483648 0 0 0 | 0 -2147483648 -2147483648 0 0 0 | 0 2147483647 2147483647 0 0 0 | 0 -1 -1 0 0 0 | 0 0 0 0 0 0 | 0 1 1 0 0 0 | 0 1 1 0 0 0 | 0 3 3 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 12 12 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 1 1 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 7 7 0 0 0 | 0 -6 -6 0 0 0"
+bits -0 = "0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 1 1 0 0 0 | 0 -1 -1 0 0 0 | 0 1 1 0 0 0 | 0 -1 -1 0 0 0 | 0 3 3 0 0 0 | 0 -3 -3 0 0 0 | 0 31 31 0 0 0 | 0 32 32 0 0 0 | 0 33 33 0 0 0 | 0 2147483647 2147483647 0 0 0 | 0 -2147483648 -2147483648 0 0 0 | 0 -2147483648 -2147483648 0 0 0 | 0 2147483647 2147483647 0 0 0 | 0 -1 -1 0 0 0 | 0 0 0 0 0 0 | 0 1 1 0 0 0 | 0 1 1 0 0 0 | 0 3 3 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 12 12 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 1 1 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 7 7 0 0 0 | 0 -6 -6 0 0 0"
+bits 0.5 = "0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 1 1 0 0 0 | 0 -1 -1 0 0 0 | 0 1 1 0 0 0 | 0 -1 -1 0 0 0 | 0 3 3 0 0 0 | 0 -3 -3 0 0 0 | 0 31 31 0 0 0 | 0 32 32 0 0 0 | 0 33 33 0 0 0 | 0 2147483647 2147483647 0 0 0 | 0 -2147483648 -2147483648 0 0 0 | 0 -2147483648 -2147483648 0 0 0 | 0 2147483647 2147483647 0 0 0 | 0 -1 -1 0 0 0 | 0 0 0 0 0 0 | 0 1 1 0 0 0 | 0 1 1 0 0 0 | 0 3 3 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 12 12 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 1 1 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 7 7 0 0 0 | 0 -6 -6 0 0 0"
+bits -0.5 = "0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 1 1 0 0 0 | 0 -1 -1 0 0 0 | 0 1 1 0 0 0 | 0 -1 -1 0 0 0 | 0 3 3 0 0 0 | 0 -3 -3 0 0 0 | 0 31 31 0 0 0 | 0 32 32 0 0 0 | 0 33 33 0 0 0 | 0 2147483647 2147483647 0 0 0 | 0 -2147483648 -2147483648 0 0 0 | 0 -2147483648 -2147483648 0 0 0 | 0 2147483647 2147483647 0 0 0 | 0 -1 -1 0 0 0 | 0 0 0 0 0 0 | 0 1 1 0 0 0 | 0 1 1 0 0 0 | 0 3 3 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 12 12 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 1 1 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 7 7 0 0 0 | 0 -6 -6 0 0 0"
+bits 1 = "0 1 1 1 1 1 | 0 1 1 1 1 1 | 0 1 1 1 1 1 | 0 1 1 1 1 1 | 1 1 0 2 0 0 | 1 -1 -2 -2147483648 0 0 | 1 1 0 2 0 0 | 1 -1 -2 -2147483648 0 0 | 1 3 2 8 0 0 | 1 -3 -4 536870912 0 0 | 1 31 30 -2147483648 0 0 | 0 33 33 1 1 1 | 1 33 32 2 0 0 | 1 2147483647 2147483646 -2147483648 0 0 | 0 -2147483647 -2147483647 1 1 1 | 0 -2147483647 -2147483647 1 1 1 | 1 2147483647 2147483646 -2147483648 0 0 | 1 -1 -2 -2147483648 0 0 | 0 1 1 1 1 1 | 1 1 0 2 0 0 | 1 1 0 2 0 0 | 1 3 2 8 0 0 | 0 1 1 1 1 1 | 0 1 1 1 1 1 | 0 1 1 1 1 1 | 0 1 1 1 1 1 | 0 1 1 1 1 1 | 0 1 1 1 1 1 | 0 1 1 1 1 1 | 0 1 1 1 1 1 | 0 1 1 1 1 1 | 0 1 1 1 1 1 | 0 1 1 1 1 1 | 0 13 13 4096 0 0 | 0 1 1 1 1 1 | 0 1 1 1 1 1 | 1 1 0 2 0 0 | 0 1 1 1 1 1 | 0 1 1 1 1 1 | 0 1 1 1 1 1 | 1 7 6 128 0 0 | 0 -5 -5 67108864 0 0"
+bits -1 = "0 -1 -1 -1 -1 4294967295 | 0 -1 -1 -1 -1 4294967295 | 0 -1 -1 -1 -1 4294967295 | 0 -1 -1 -1 -1 4294967295 | 1 -1 -2 -2 -1 2147483647 | -1 -1 0 -2147483648 -1 1 | 1 -1 -2 -2 -1 2147483647 | -1 -1 0 -2147483648 -1 1 | 3 -1 -4 -8 -1 536870911 | -3 -1 2 -536870912 -1 7 | 31 -1 -32 -2147483648 -1 1 | 32 -1 -33 -1 -1 4294967295 | 33 -1 -34 -2 -1 2147483647 | 2147483647 -1 -2147483648 -2147483648 -1 1 | -2147483648 -1 2147483647 -1 -1 4294967295 | -2147483648 -1 2147483647 -1 -1 4294967295 | 2147483647 -1 -2147483648 -2147483648 -1 1 | -1 -1 0 -2147483648 -1 1 | 0 -1 -1 -1 -1 4294967295 | 1 -1 -2 -2 -1 2147483647 | 1 -1 -2 -2 -1 2147483647 | 3 -1 -4 -8 -1 536870911 | 0 -1 -1 -1 -1 4294967295 | 0 -1 -1 -1 -1 4294967295 | 0 -1 -1 -1 -1 4294967295 | 0 -1 -1 -1 -1 4294967295 | 0 -1 -1 -1 -1 4294967295 | 0 -1 -1 -1 -1 4294967295 | 0 -1 -1 -1 -1 4294967295 | 0 -1 -1 -1 -1 4294967295 | 0 -1 -1 -1 -1 4294967295 | 0 -1 -1 -1 -1 4294967295 | 0 -1 -1 -1 -1 4294967295 | 12 -1 -13 -4096 -1 1048575 | 0 -1 -1 -1 -1 4294967295 | 0 -1 -1 -1 -1 4294967295 | 1 -1 -2 -2 -1 2147483647 | 0 -1 -1 -1 -1 4294967295 | 0 -1 -1 -1 -1 4294967295 | 0 -1 -1 -1 -1 4294967295 | 7 -1 -8 -128 -1 33554431 | -6 -1 5 -67108864 -1 63"
+bits 1.5 = "0 1 1 1 1 1 | 0 1 1 1 1 1 | 0 1 1 1 1 1 | 0 1 1 1 1 1 | 1 1 0 2 0 0 | 1 -1 -2 -2147483648 0 0 | 1 1 0 2 0 0 | 1 -1 -2 -2147483648 0 0 | 1 3 2 8 0 0 | 1 -3 -4 536870912 0 0 | 1 31 30 -2147483648 0 0 | 0 33 33 1 1 1 | 1 33 32 2 0 0 | 1 2147483647 2147483646 -2147483648 0 0 | 0 -2147483647 -2147483647 1 1 1 | 0 -2147483647 -2147483647 1 1 1 | 1 2147483647 2147483646 -2147483648 0 0 | 1 -1 -2 -2147483648 0 0 | 0 1 1 1 1 1 | 1 1 0 2 0 0 | 1 1 0 2 0 0 | 1 3 2 8 0 0 | 0 1 1 1 1 1 | 0 1 1 1 1 1 | 0 1 1 1 1 1 | 0 1 1 1 1 1 | 0 1 1 1 1 1 | 0 1 1 1 1 1 | 0 1 1 1 1 1 | 0 1 1 1 1 1 | 0 1 1 1 1 1 | 0 1 1 1 1 1 | 0 1 1 1 1 1 | 0 13 13 4096 0 0 | 0 1 1 1 1 1 | 0 1 1 1 1 1 | 1 1 0 2 0 0 | 0 1 1 1 1 1 | 0 1 1 1 1 1 | 0 1 1 1 1 1 | 1 7 6 128 0 0 | 0 -5 -5 67108864 0 0"
+bits -1.5 = "0 -1 -1 -1 -1 4294967295 | 0 -1 -1 -1 -1 4294967295 | 0 -1 -1 -1 -1 4294967295 | 0 -1 -1 -1 -1 4294967295 | 1 -1 -2 -2 -1 2147483647 | -1 -1 0 -2147483648 -1 1 | 1 -1 -2 -2 -1 2147483647 | -1 -1 0 -2147483648 -1 1 | 3 -1 -4 -8 -1 536870911 | -3 -1 2 -536870912 -1 7 | 31 -1 -32 -2147483648 -1 1 | 32 -1 -33 -1 -1 4294967295 | 33 -1 -34 -2 -1 2147483647 | 2147483647 -1 -2147483648 -2147483648 -1 1 | -2147483648 -1 2147483647 -1 -1 4294967295 | -2147483648 -1 2147483647 -1 -1 4294967295 | 2147483647 -1 -2147483648 -2147483648 -1 1 | -1 -1 0 -2147483648 -1 1 | 0 -1 -1 -1 -1 4294967295 | 1 -1 -2 -2 -1 2147483647 | 1 -1 -2 -2 -1 2147483647 | 3 -1 -4 -8 -1 536870911 | 0 -1 -1 -1 -1 4294967295 | 0 -1 -1 -1 -1 4294967295 | 0 -1 -1 -1 -1 4294967295 | 0 -1 -1 -1 -1 4294967295 | 0 -1 -1 -1 -1 4294967295 | 0 -1 -1 -1 -1 4294967295 | 0 -1 -1 -1 -1 4294967295 | 0 -1 -1 -1 -1 4294967295 | 0 -1 -1 -1 -1 4294967295 | 0 -1 -1 -1 -1 4294967295 | 0 -1 -1 -1 -1 4294967295 | 12 -1 -13 -4096 -1 1048575 | 0 -1 -1 -1 -1 4294967295 | 0 -1 -1 -1 -1 4294967295 | 1 -1 -2 -2 -1 2147483647 | 0 -1 -1 -1 -1 4294967295 | 0 -1 -1 -1 -1 4294967295 | 0 -1 -1 -1 -1 4294967295 | 7 -1 -8 -128 -1 33554431 | -6 -1 5 -67108864 -1 63"
+bits 3.99 = "0 3 3 3 3 3 | 0 3 3 3 3 3 | 0 3 3 3 3 3 | 0 3 3 3 3 3 | 1 3 2 6 1 1 | 3 -1 -4 -2147483648 0 0 | 1 3 2 6 1 1 | 3 -1 -4 -2147483648 0 0 | 3 3 0 24 0 0 | 1 -1 -2 1610612736 0 0 | 3 31 28 -2147483648 0 0 | 0 35 35 3 3 3 | 1 35 34 6 1 1 | 3 2147483647 2147483644 -2147483648 0 0 | 0 -2147483645 -2147483645 3 3 3 | 0 -2147483645 -2147483645 3 3 3 | 3 2147483647 2147483644 -2147483648 0 0 | 3 -1 -4 -2147483648 0 0 | 0 3 3 3 3 3 | 1 3 2 6 1 1 | 1 3 2 6 1 1 | 3 3 0 24 0 0 | 0 3 3 3 3 3 | 0 3 3 3 3 3 | 0 3 3 3 3 3 | 0 3 3 3 3 3 | 0 3 3 3 3 3 | 0 3 3 3 3 3 | 0 3 3 3 3 3 | 0 3 3 3 3 3 | 0 3 3 3 3 3 | 0 3 3 3 3 3 | 0 3 3 3 3 3 | 0 15 15 12288 0 0 | 0 3 3 3 3 3 | 0 3 3 3 3 3 | 1 3 2 6 1 1 | 0 3 3 3 3 3 | 0 3 3 3 3 3 | 0 3 3 3 3 3 | 3 7 4 384 0 0 | 2 -5 -7 201326592 0 0"
+bits -3.99 = "0 -3 -3 -3 -3 4294967293 | 0 -3 -3 -3 -3 4294967293 | 0 -3 -3 -3 -3 4294967293 | 0 -3 -3 -3 -3 4294967293 | 1 -3 -4 -6 -2 2147483646 | -3 -1 2 -2147483648 -1 1 | 1 -3 -4 -6 -2 2147483646 | -3 -1 2 -2147483648 -1 1 | 1 -1 -2 -24 -1 536870911 | -3 -3 0 -1610612736 -1 7 | 29 -1 -30 -2147483648 -1 1 | 32 -3 -35 -3 -3 4294967293 | 33 -3 -36 -6 -2 2147483646 | 2147483645 -1 -2147483646 -2147483648 -1 1 | -2147483648 -3 2147483645 -3 -3 4294967293 | -2147483648 -3 2147483645 -3 -3 4294967293 | 2147483645 -1 -2147483646 -2147483648 -1 1 | -3 -1 2 -2147483648 -1 1 | 0 -3 -3 -3 -3 4294967293 | 1 -3 -4 -6 -2 2147483646 | 1 -3 -4 -6 -2 2147483646 | 1 -1 -2 -24 -1 536870911 | 0 -3 -3 -3 -3 4294967293 | 0 -3 -3 -3 -3 4294967293 | 0 -3 -3 -3 -3 4294967293 | 0 -3 -3 -3 -3 4294967293 | 0 -3 -3 -3 -3 4294967293 | 0 -3 -3 -3 -3 4294967293 | 0 -3 -3 -3 -3 4294967293 | 0 -3 -3 -3 -3 4294967293 | 0 -3 -3 -3 -3 4294967293 | 0 -3 -3 -3 -3 4294967293 | 0 -3 -3 -3 -3 4294967293 | 12 -3 -15 -12288 -1 1048575 | 0 -3 -3 -3 -3 4294967293 | 0 -3 -3 -3 -3 4294967293 | 1 -3 -4 -6 -2 2147483646 | 0 -3 -3 -3 -3 4294967293 | 0 -3 -3 -3 -3 4294967293 | 0 -3 -3 -3 -3 4294967293 | 5 -1 -6 -384 -1 33554431 | -8 -1 7 -201326592 -1 63"
+bits 31 = "0 31 31 31 31 31 | 0 31 31 31 31 31 | 0 31 31 31 31 31 | 0 31 31 31 31 31 | 1 31 30 62 15 15 | 31 -1 -32 -2147483648 0 0 | 1 31 30 62 15 15 | 31 -1 -32 -2147483648 0 0 | 3 31 28 248 3 3 | 29 -1 -30 -536870912 0 0 | 31 31 0 -2147483648 0 0 | 0 63 63 31 31 31 | 1 63 62 62 15 15 | 31 2147483647 2147483616 -2147483648 0 0 | 0 -2147483617 -2147483617 31 31 31 | 0 -2147483617 -2147483617 31 31 31 | 31 2147483647 2147483616 -2147483648 0 0 | 31 -1 -32 -2147483648 0 0 | 0 31 31 31 31 31 | 1 31 30 62 15 15 | 1 31 30 62 15 15 | 3 31 28 248 3 3 | 0 31 31 31 31 31 | 0 31 31 31 31 31 | 0 31 31 31 31 31 | 0 31 31 31 31 31 | 0 31 31 31 31 31 | 0 31 31 31 31 31 | 0 31 31 31 31 31 | 0 31 31 31 31 31 | 0 31 31 31 31 31 | 0 31 31 31 31 31 | 0 31 31 31 31 31 | 12 31 19 126976 0 0 | 0 31 31 31 31 31 | 0 31 31 31 31 31 | 1 31 30 62 15 15 | 0 31 31 31 31 31 | 0 31 31 31 31 31 | 0 31 31 31 31 31 | 7 31 24 3968 0 0 | 26 -1 -27 2080374784 0 0"
+bits 32 = "0 32 32 32 32 32 | 0 32 32 32 32 32 | 0 32 32 32 32 32 | 0 32 32 32 32 32 | 0 33 33 64 16 16 | 32 -1 -33 0 0 0 | 0 33 33 64 16 16 | 32 -1 -33 0 0 0 | 0 35 35 256 4 4 | 32 -3 -35 0 0 0 | 0 63 63 0 0 0 | 32 32 0 32 32 32 | 32 33 1 64 16 16 | 32 2147483647 2147483615 0 0 0 | 0 -2147483616 -2147483616 32 32 32 | 0 -2147483616 -2147483616 32 32 32 | 32 2147483647 2147483615 0 0 0 | 32 -1 -33 0 0 0 | 0 32 32 32 32 32 | 0 33 33 64 16 16 | 0 33 33 64 16 16 | 0 35 35 256 4 4 | 0 32 32 32 32 32 | 0 32 32 32 32 32 | 0 32 32 32 32 32 | 0 32 32 32 32 32 | 0 32 32 32 32 32 | 0 32 32 32 32 32 | 0 32 32 32 32 32 | 0 32 32 32 32 32 | 0 32 32 32 32 32 | 0 32 32 32 32 32 | 0 32 32 32 32 32 | 0 44 44 131072 0 0 | 0 32 32 32 32 32 | 0 32 32 32 32 32 | 0 33 33 64 16 16 | 0 32 32 32 32 32 | 0 32 32 32 32 32 | 0 32 32 32 32 32 | 0 39 39 4096 0 0 | 32 -6 -38 -2147483648 0 0"
+bits 33 = "0 33 33 33 33 33 | 0 33 33 33 33 33 | 0 33 33 33 33 33 | 0 33 33 33 33 33 | 1 33 32 66 16 16 | 33 -1 -34 -2147483648 0 0 | 1 33 32 66 16 16 | 33 -1 -34 -2147483648 0 0 | 1 35 34 264 4 4 | 33 -3 -36 536870912 0 0 | 1 63 62 -2147483648 0 0 | 32 33 1 33 33 33 | 33 33 0 66 16 16 | 33 2147483647 2147483614 -2147483648 0 0 | 0 -2147483615 -2147483615 33 33 33 | 0 -2147483615 -2147483615 33 33 33 | 33 2147483647 2147483614 -2147483648 0 0 | 33 -1 -34 -2147483648 0 0 | 0 33 33 33 33 33 | 1 33 32 66 16 16 | 1 33 32 66 16 16 | 1 35 34 264 4 4 | 0 33 33 33 33 33 | 0 33 33 33 33 33 | 0 33 33 33 33 33 | 0 33 33 33 33 33 | 0 33 33 33 33 33 | 0 33 33 33 33 33 | 0 33 33 33 33 33 | 0 33 33 33 33 33 | 0 33 33 33 33 33 | 0 33 33 33 33 33 | 0 33 33 33 33 33 | 0 45 45 135168 0 0 | 0 33 33 33 33 33 | 0 33 33 33 33 33 | 1 33 32 66 16 16 | 0 33 33 33 33 33 | 0 33 33 33 33 33 | 0 33 33 33 33 33 | 1 39 38 4224 0 0 | 32 -5 -37 -2080374784 0 0"
+bits 2147483647 = "0 2147483647 2147483647 2147483647 2147483647 2147483647 | 0 2147483647 2147483647 2147483647 2147483647 2147483647 | 0 2147483647 2147483647 2147483647 2147483647 2147483647 | 0 2147483647 2147483647 2147483647 2147483647 2147483647 | 1 2147483647 2147483646 -2 1073741823 1073741823 | 2147483647 -1 -2147483648 -2147483648 0 0 | 1 2147483647 2147483646 -2 1073741823 1073741823 | 2147483647 -1 -2147483648 -2147483648 0 0 | 3 2147483647 2147483644 -8 268435455 268435455 | 2147483645 -1 -2147483646 -536870912 3 3 | 31 2147483647 2147483616 -2147483648 0 0 | 32 2147483647 2147483615 2147483647 2147483647 2147483647 | 33 2147483647 2147483614 -2 1073741823 1073741823 | 2147483647 2147483647 0 -2147483648 0 0 | 0 -1 -1 2147483647 2147483647 2147483647 | 0 -1 -1 2147483647 2147483647 2147483647 | 2147483647 2147483647 0 -2147483648 0 0 | 2147483647 -1 -2147483648 -2147483648 0 0 | 0 2147483647 2147483647 2147483647 2147483647 2147483647 | 1 2147483647 2147483646 -2 1073741823 1073741823 | 1 2147483647 2147483646 -2 1073741823 1073741823 | 3 2147483647 2147483644 -8 268435455 268435455 | 0 2147483647 2147483647 2147483647 2147483647 2147483647 | 0 2147483647 2147483647 2147483647 2147483647 2147483647 | 0 2147483647 2147483647 2147483647 2147483647 2147483647 | 0 2147483647 2147483647 2147483647 2147483647 2147483647 | 0 2147483647 2147483647 2147483647 2147483647 2147483647 | 0 2147483647 2147483647 2147483647 2147483647 2147483647 | 0 2147483647 2147483647 2147483647 2147483647 2147483647 | 0 2147483647 2147483647 2147483647 2147483647 2147483647 | 0 2147483647 2147483647 2147483647 2147483647 2147483647 | 0 2147483647 2147483647 2147483647 2147483647 2147483647 | 0 2147483647 2147483647 2147483647 2147483647 2147483647 | 12 2147483647 2147483635 -4096 524287 524287 | 0 2147483647 2147483647 2147483647 2147483647 2147483647 | 0 2147483647 2147483647 2147483647 2147483647 2147483647 | 1 2147483647 2147483646 -2 1073741823 1073741823 | 0 2147483647 2147483647 2147483647 2147483647 2147483647 | 0 2147483647 2147483647 2147483647 2147483647 2147483647 | 0 2147483647 2147483647 2147483647 2147483647 2147483647 | 7 2147483647 2147483640 -128 16777215 16777215 | 2147483642 -1 -2147483643 -67108864 31 31"
+bits 2147483648 = "0 -2147483648 -2147483648 -2147483648 -2147483648 2147483648 | 0 -2147483648 -2147483648 -2147483648 -2147483648 2147483648 | 0 -2147483648 -2147483648 -2147483648 -2147483648 2147483648 | 0 -2147483648 -2147483648 -2147483648 -2147483648 2147483648 | 0 -2147483647 -2147483647 0 -1073741824 1073741824 | -2147483648 -1 2147483647 0 -1 1 | 0 -2147483647 -2147483647 0 -1073741824 1073741824 | -2147483648 -1 2147483647 0 -1 1 | 0 -2147483645 -2147483645 0 -268435456 268435456 | -2147483648 -3 2147483645 0 -4 4 | 0 -2147483617 -2147483617 0 -1 1 | 0 -2147483616 -2147483616 -2147483648 -2147483648 2147483648 | 0 -2147483615 -2147483615 0 -1073741824 1073741824 | 0 -1 -1 0 -1 1 | -2147483648 -2147483648 0 -2147483648 -2147483648 2147483648 | -2147483648 -2147483648 0 -2147483648 -2147483648 2147483648 | 0 -1 -1 0 -1 1 | -2147483648 -1 2147483647 0 -1 1 | 0 -2147483648 -2147483648 -2147483648 -2147483648 2147483648 | 0 -2147483647 -2147483647 0 -1073741824 1073741824 | 0 -2147483647 -2147483647 0 -1073741824 1073741824 | 0 -2147483645 -2147483645 0 -268435456 268435456 | 0 -2147483648 -2147483648 -2147483648 -2147483648 2147483648 | 0 -2147483648 -2147483648 -2147483648 -2147483648 2147483648 | 0 -2147483648 -2147483648 -2147483648 -2147483648 2147483648 | 0 -2147483648 -2147483648 -2147483648 -2147483648 2147483648 | 0 -2147483648 -2147483648 -2147483648 -2147483648 2147483648 | 0 -2147483648 -2147483648 -2147483648 -2147483648 2147483648 | 0 -2147483648 -2147483648 -2147483648 -2147483648 2147483648 | 0 -2147483648 -2147483648 -2147483648 -2147483648 2147483648 | 0 -2147483648 -2147483648 -2147483648 -2147483648 2147483648 | 0 -2147483648 -2147483648 -2147483648 -2147483648 2147483648 | 0 -2147483648 -2147483648 -2147483648 -2147483648 2147483648 | 0 -2147483636 -2147483636 0 -524288 524288 | 0 -2147483648 -2147483648 -2147483648 -2147483648 2147483648 | 0 -2147483648 -2147483648 -2147483648 -2147483648 2147483648 | 0 -2147483647 -2147483647 0 -1073741824 1073741824 | 0 -2147483648 -2147483648 -2147483648 -2147483648 2147483648 | 0 -2147483648 -2147483648 -2147483648 -2147483648 2147483648 | 0 -2147483648 -2147483648 -2147483648 -2147483648 2147483648 | 0 -2147483641 -2147483641 0 -16777216 16777216 | -2147483648 -6 2147483642 0 -32 32"
+bits -2147483648 = "0 -2147483648 -2147483648 -2147483648 -2147483648 2147483648 | 0 -2147483648 -2147483648 -2147483648 -2147483648 2147483648 | 0 -2147483648 -2147483648 -2147483648 -2147483648 2147483648 | 0 -2147483648 -2147483648 -2147483648 -2147483648 2147483648 | 0 -2147483647 -2147483647 0 -1073741824 1073741824 | -2147483648 -1 2147483647 0 -1 1 | 0 -2147483647 -2147483647 0 -1073741824 1073741824 | -2147483648 -1 2147483647 0 -1 1 | 0 -2147483645 -2147483645 0 -268435456 268435456 | -2147483648 -3 2147483645 0 -4 4 | 0 -2147483617 -2147483617 0 -1 1 | 0 -2147483616 -2147483616 -2147483648 -2147483648 2147483648 | 0 -2147483615 -2147483615 0 -1073741824 1073741824 | 0 -1 -1 0 -1 1 | -2147483648 -2147483648 0 -2147483648 -2147483648 2147483648 | -2147483648 -2147483648 0 -2147483648 -2147483648 2147483648 | 0 -1 -1 0 -1 1 | -2147483648 -1 2147483647 0 -1 1 | 0 -2147483648 -2147483648 -2147483648 -2147483648 2147483648 | 0 -2147483647 -2147483647 0 -1073741824 1073741824 | 0 -2147483647 -2147483647 0 -1073741824 1073741824 | 0 -2147483645 -2147483645 0 -268435456 268435456 | 0 -2147483648 -2147483648 -2147483648 -2147483648 2147483648 | 0 -2147483648 -2147483648 -2147483648 -2147483648 2147483648 | 0 -2147483648 -2147483648 -2147483648 -2147483648 2147483648 | 0 -2147483648 -2147483648 -2147483648 -2147483648 2147483648 | 0 -2147483648 -2147483648 -2147483648 -2147483648 2147483648 | 0 -2147483648 -2147483648 -2147483648 -2147483648 2147483648 | 0 -2147483648 -2147483648 -2147483648 -2147483648 2147483648 | 0 -2147483648 -2147483648 -2147483648 -2147483648 2147483648 | 0 -2147483648 -2147483648 -2147483648 -2147483648 2147483648 | 0 -2147483648 -2147483648 -2147483648 -2147483648 2147483648 | 0 -2147483648 -2147483648 -2147483648 -2147483648 2147483648 | 0 -2147483636 -2147483636 0 -524288 524288 | 0 -2147483648 -2147483648 -2147483648 -2147483648 2147483648 | 0 -2147483648 -2147483648 -2147483648 -2147483648 2147483648 | 0 -2147483647 -2147483647 0 -1073741824 1073741824 | 0 -2147483648 -2147483648 -2147483648 -2147483648 2147483648 | 0 -2147483648 -2147483648 -2147483648 -2147483648 2147483648 | 0 -2147483648 -2147483648 -2147483648 -2147483648 2147483648 | 0 -2147483641 -2147483641 0 -16777216 16777216 | -2147483648 -6 2147483642 0 -32 32"
+bits -2147483649 = "0 2147483647 2147483647 2147483647 2147483647 2147483647 | 0 2147483647 2147483647 2147483647 2147483647 2147483647 | 0 2147483647 2147483647 2147483647 2147483647 2147483647 | 0 2147483647 2147483647 2147483647 2147483647 2147483647 | 1 2147483647 2147483646 -2 1073741823 1073741823 | 2147483647 -1 -2147483648 -2147483648 0 0 | 1 2147483647 2147483646 -2 1073741823 1073741823 | 2147483647 -1 -2147483648 -2147483648 0 0 | 3 2147483647 2147483644 -8 268435455 268435455 | 2147483645 -1 -2147483646 -536870912 3 3 | 31 2147483647 2147483616 -2147483648 0 0 | 32 2147483647 2147483615 2147483647 2147483647 2147483647 | 33 2147483647 2147483614 -2 1073741823 1073741823 | 2147483647 2147483647 0 -2147483648 0 0 | 0 -1 -1 2147483647 2147483647 2147483647 | 0 -1 -1 2147483647 2147483647 2147483647 | 2147483647 2147483647 0 -2147483648 0 0 | 2147483647 -1 -2147483648 -2147483648 0 0 | 0 2147483647 2147483647 2147483647 2147483647 2147483647 | 1 2147483647 2147483646 -2 1073741823 1073741823 | 1 2147483647 2147483646 -2 1073741823 1073741823 | 3 2147483647 2147483644 -8 268435455 268435455 | 0 2147483647 2147483647 2147483647 2147483647 2147483647 | 0 2147483647 2147483647 2147483647 2147483647 2147483647 | 0 2147483647 2147483647 2147483647 2147483647 2147483647 | 0 2147483647 2147483647 2147483647 2147483647 2147483647 | 0 2147483647 2147483647 2147483647 2147483647 2147483647 | 0 2147483647 2147483647 2147483647 2147483647 2147483647 | 0 2147483647 2147483647 2147483647 2147483647 2147483647 | 0 2147483647 2147483647 2147483647 2147483647 2147483647 | 0 2147483647 2147483647 2147483647 2147483647 2147483647 | 0 2147483647 2147483647 2147483647 2147483647 2147483647 | 0 2147483647 2147483647 2147483647 2147483647 2147483647 | 12 2147483647 2147483635 -4096 524287 524287 | 0 2147483647 2147483647 2147483647 2147483647 2147483647 | 0 2147483647 2147483647 2147483647 2147483647 2147483647 | 1 2147483647 2147483646 -2 1073741823 1073741823 | 0 2147483647 2147483647 2147483647 2147483647 2147483647 | 0 2147483647 2147483647 2147483647 2147483647 2147483647 | 0 2147483647 2147483647 2147483647 2147483647 2147483647 | 7 2147483647 2147483640 -128 16777215 16777215 | 2147483642 -1 -2147483643 -67108864 31 31"
+bits 4294967295 = "0 -1 -1 -1 -1 4294967295 | 0 -1 -1 -1 -1 4294967295 | 0 -1 -1 -1 -1 4294967295 | 0 -1 -1 -1 -1 4294967295 | 1 -1 -2 -2 -1 2147483647 | -1 -1 0 -2147483648 -1 1 | 1 -1 -2 -2 -1 2147483647 | -1 -1 0 -2147483648 -1 1 | 3 -1 -4 -8 -1 536870911 | -3 -1 2 -536870912 -1 7 | 31 -1 -32 -2147483648 -1 1 | 32 -1 -33 -1 -1 4294967295 | 33 -1 -34 -2 -1 2147483647 | 2147483647 -1 -2147483648 -2147483648 -1 1 | -2147483648 -1 2147483647 -1 -1 4294967295 | -2147483648 -1 2147483647 -1 -1 4294967295 | 2147483647 -1 -2147483648 -2147483648 -1 1 | -1 -1 0 -2147483648 -1 1 | 0 -1 -1 -1 -1 4294967295 | 1 -1 -2 -2 -1 2147483647 | 1 -1 -2 -2 -1 2147483647 | 3 -1 -4 -8 -1 536870911 | 0 -1 -1 -1 -1 4294967295 | 0 -1 -1 -1 -1 4294967295 | 0 -1 -1 -1 -1 4294967295 | 0 -1 -1 -1 -1 4294967295 | 0 -1 -1 -1 -1 4294967295 | 0 -1 -1 -1 -1 4294967295 | 0 -1 -1 -1 -1 4294967295 | 0 -1 -1 -1 -1 4294967295 | 0 -1 -1 -1 -1 4294967295 | 0 -1 -1 -1 -1 4294967295 | 0 -1 -1 -1 -1 4294967295 | 12 -1 -13 -4096 -1 1048575 | 0 -1 -1 -1 -1 4294967295 | 0 -1 -1 -1 -1 4294967295 | 1 -1 -2 -2 -1 2147483647 | 0 -1 -1 -1 -1 4294967295 | 0 -1 -1 -1 -1 4294967295 | 0 -1 -1 -1 -1 4294967295 | 7 -1 -8 -128 -1 33554431 | -6 -1 5 -67108864 -1 63"
+bits 4294967296 = "0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 1 1 0 0 0 | 0 -1 -1 0 0 0 | 0 1 1 0 0 0 | 0 -1 -1 0 0 0 | 0 3 3 0 0 0 | 0 -3 -3 0 0 0 | 0 31 31 0 0 0 | 0 32 32 0 0 0 | 0 33 33 0 0 0 | 0 2147483647 2147483647 0 0 0 | 0 -2147483648 -2147483648 0 0 0 | 0 -2147483648 -2147483648 0 0 0 | 0 2147483647 2147483647 0 0 0 | 0 -1 -1 0 0 0 | 0 0 0 0 0 0 | 0 1 1 0 0 0 | 0 1 1 0 0 0 | 0 3 3 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 12 12 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 1 1 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 7 7 0 0 0 | 0 -6 -6 0 0 0"
+bits 4294967297 = "0 1 1 1 1 1 | 0 1 1 1 1 1 | 0 1 1 1 1 1 | 0 1 1 1 1 1 | 1 1 0 2 0 0 | 1 -1 -2 -2147483648 0 0 | 1 1 0 2 0 0 | 1 -1 -2 -2147483648 0 0 | 1 3 2 8 0 0 | 1 -3 -4 536870912 0 0 | 1 31 30 -2147483648 0 0 | 0 33 33 1 1 1 | 1 33 32 2 0 0 | 1 2147483647 2147483646 -2147483648 0 0 | 0 -2147483647 -2147483647 1 1 1 | 0 -2147483647 -2147483647 1 1 1 | 1 2147483647 2147483646 -2147483648 0 0 | 1 -1 -2 -2147483648 0 0 | 0 1 1 1 1 1 | 1 1 0 2 0 0 | 1 1 0 2 0 0 | 1 3 2 8 0 0 | 0 1 1 1 1 1 | 0 1 1 1 1 1 | 0 1 1 1 1 1 | 0 1 1 1 1 1 | 0 1 1 1 1 1 | 0 1 1 1 1 1 | 0 1 1 1 1 1 | 0 1 1 1 1 1 | 0 1 1 1 1 1 | 0 1 1 1 1 1 | 0 1 1 1 1 1 | 0 13 13 4096 0 0 | 0 1 1 1 1 1 | 0 1 1 1 1 1 | 1 1 0 2 0 0 | 0 1 1 1 1 1 | 0 1 1 1 1 1 | 0 1 1 1 1 1 | 1 7 6 128 0 0 | 0 -5 -5 67108864 0 0"
+bits 4503599627370497 = "0 1 1 1 1 1 | 0 1 1 1 1 1 | 0 1 1 1 1 1 | 0 1 1 1 1 1 | 1 1 0 2 0 0 | 1 -1 -2 -2147483648 0 0 | 1 1 0 2 0 0 | 1 -1 -2 -2147483648 0 0 | 1 3 2 8 0 0 | 1 -3 -4 536870912 0 0 | 1 31 30 -2147483648 0 0 | 0 33 33 1 1 1 | 1 33 32 2 0 0 | 1 2147483647 2147483646 -2147483648 0 0 | 0 -2147483647 -2147483647 1 1 1 | 0 -2147483647 -2147483647 1 1 1 | 1 2147483647 2147483646 -2147483648 0 0 | 1 -1 -2 -2147483648 0 0 | 0 1 1 1 1 1 | 1 1 0 2 0 0 | 1 1 0 2 0 0 | 1 3 2 8 0 0 | 0 1 1 1 1 1 | 0 1 1 1 1 1 | 0 1 1 1 1 1 | 0 1 1 1 1 1 | 0 1 1 1 1 1 | 0 1 1 1 1 1 | 0 1 1 1 1 1 | 0 1 1 1 1 1 | 0 1 1 1 1 1 | 0 1 1 1 1 1 | 0 1 1 1 1 1 | 0 13 13 4096 0 0 | 0 1 1 1 1 1 | 0 1 1 1 1 1 | 1 1 0 2 0 0 | 0 1 1 1 1 1 | 0 1 1 1 1 1 | 0 1 1 1 1 1 | 1 7 6 128 0 0 | 0 -5 -5 67108864 0 0"
+bits -9007199254740989 = "0 3 3 3 3 3 | 0 3 3 3 3 3 | 0 3 3 3 3 3 | 0 3 3 3 3 3 | 1 3 2 6 1 1 | 3 -1 -4 -2147483648 0 0 | 1 3 2 6 1 1 | 3 -1 -4 -2147483648 0 0 | 3 3 0 24 0 0 | 1 -1 -2 1610612736 0 0 | 3 31 28 -2147483648 0 0 | 0 35 35 3 3 3 | 1 35 34 6 1 1 | 3 2147483647 2147483644 -2147483648 0 0 | 0 -2147483645 -2147483645 3 3 3 | 0 -2147483645 -2147483645 3 3 3 | 3 2147483647 2147483644 -2147483648 0 0 | 3 -1 -4 -2147483648 0 0 | 0 3 3 3 3 3 | 1 3 2 6 1 1 | 1 3 2 6 1 1 | 3 3 0 24 0 0 | 0 3 3 3 3 3 | 0 3 3 3 3 3 | 0 3 3 3 3 3 | 0 3 3 3 3 3 | 0 3 3 3 3 3 | 0 3 3 3 3 3 | 0 3 3 3 3 3 | 0 3 3 3 3 3 | 0 3 3 3 3 3 | 0 3 3 3 3 3 | 0 3 3 3 3 3 | 0 15 15 12288 0 0 | 0 3 3 3 3 3 | 0 3 3 3 3 3 | 1 3 2 6 1 1 | 0 3 3 3 3 3 | 0 3 3 3 3 3 | 0 3 3 3 3 3 | 3 7 4 384 0 0 | 2 -5 -7 201326592 0 0"
+bits 4611687117939016000 = "0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 1 1 0 0 0 | 0 -1 -1 0 0 0 | 0 1 1 0 0 0 | 0 -1 -1 0 0 0 | 0 3 3 0 0 0 | 0 -3 -3 0 0 0 | 0 31 31 0 0 0 | 0 32 32 0 0 0 | 0 33 33 0 0 0 | 0 2147483647 2147483647 0 0 0 | 0 -2147483648 -2147483648 0 0 0 | 0 -2147483648 -2147483648 0 0 0 | 0 2147483647 2147483647 0 0 0 | 0 -1 -1 0 0 0 | 0 0 0 0 0 0 | 0 1 1 0 0 0 | 0 1 1 0 0 0 | 0 3 3 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 12 12 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 1 1 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 7 7 0 0 0 | 0 -6 -6 0 0 0"
+bits 9223372036854776000 = "0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 1 1 0 0 0 | 0 -1 -1 0 0 0 | 0 1 1 0 0 0 | 0 -1 -1 0 0 0 | 0 3 3 0 0 0 | 0 -3 -3 0 0 0 | 0 31 31 0 0 0 | 0 32 32 0 0 0 | 0 33 33 0 0 0 | 0 2147483647 2147483647 0 0 0 | 0 -2147483648 -2147483648 0 0 0 | 0 -2147483648 -2147483648 0 0 0 | 0 2147483647 2147483647 0 0 0 | 0 -1 -1 0 0 0 | 0 0 0 0 0 0 | 0 1 1 0 0 0 | 0 1 1 0 0 0 | 0 3 3 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 12 12 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 1 1 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 7 7 0 0 0 | 0 -6 -6 0 0 0"
+bits -9223372036854776000 = "0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 1 1 0 0 0 | 0 -1 -1 0 0 0 | 0 1 1 0 0 0 | 0 -1 -1 0 0 0 | 0 3 3 0 0 0 | 0 -3 -3 0 0 0 | 0 31 31 0 0 0 | 0 32 32 0 0 0 | 0 33 33 0 0 0 | 0 2147483647 2147483647 0 0 0 | 0 -2147483648 -2147483648 0 0 0 | 0 -2147483648 -2147483648 0 0 0 | 0 2147483647 2147483647 0 0 0 | 0 -1 -1 0 0 0 | 0 0 0 0 0 0 | 0 1 1 0 0 0 | 0 1 1 0 0 0 | 0 3 3 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 12 12 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 1 1 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 7 7 0 0 0 | 0 -6 -6 0 0 0"
+bits 18446744082299486000 = "0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 1 1 0 0 0 | 0 -1 -1 0 0 0 | 0 1 1 0 0 0 | 0 -1 -1 0 0 0 | 0 3 3 0 0 0 | 0 -3 -3 0 0 0 | 0 31 31 0 0 0 | 0 32 32 0 0 0 | 0 33 33 0 0 0 | 0 2147483647 2147483647 0 0 0 | 0 -2147483648 -2147483648 0 0 0 | 0 -2147483648 -2147483648 0 0 0 | 0 2147483647 2147483647 0 0 0 | 0 -1 -1 0 0 0 | 0 0 0 0 0 0 | 0 1 1 0 0 0 | 0 1 1 0 0 0 | 0 3 3 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 12 12 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 1 1 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 7 7 0 0 0 | 0 -6 -6 0 0 0"
+bits 1e+300 = "0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 1 1 0 0 0 | 0 -1 -1 0 0 0 | 0 1 1 0 0 0 | 0 -1 -1 0 0 0 | 0 3 3 0 0 0 | 0 -3 -3 0 0 0 | 0 31 31 0 0 0 | 0 32 32 0 0 0 | 0 33 33 0 0 0 | 0 2147483647 2147483647 0 0 0 | 0 -2147483648 -2147483648 0 0 0 | 0 -2147483648 -2147483648 0 0 0 | 0 2147483647 2147483647 0 0 0 | 0 -1 -1 0 0 0 | 0 0 0 0 0 0 | 0 1 1 0 0 0 | 0 1 1 0 0 0 | 0 3 3 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 12 12 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 1 1 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 7 7 0 0 0 | 0 -6 -6 0 0 0"
+bits -1e+300 = "0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 1 1 0 0 0 | 0 -1 -1 0 0 0 | 0 1 1 0 0 0 | 0 -1 -1 0 0 0 | 0 3 3 0 0 0 | 0 -3 -3 0 0 0 | 0 31 31 0 0 0 | 0 32 32 0 0 0 | 0 33 33 0 0 0 | 0 2147483647 2147483647 0 0 0 | 0 -2147483648 -2147483648 0 0 0 | 0 -2147483648 -2147483648 0 0 0 | 0 2147483647 2147483647 0 0 0 | 0 -1 -1 0 0 0 | 0 0 0 0 0 0 | 0 1 1 0 0 0 | 0 1 1 0 0 0 | 0 3 3 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 12 12 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 1 1 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 7 7 0 0 0 | 0 -6 -6 0 0 0"
+bits 5e-324 = "0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 1 1 0 0 0 | 0 -1 -1 0 0 0 | 0 1 1 0 0 0 | 0 -1 -1 0 0 0 | 0 3 3 0 0 0 | 0 -3 -3 0 0 0 | 0 31 31 0 0 0 | 0 32 32 0 0 0 | 0 33 33 0 0 0 | 0 2147483647 2147483647 0 0 0 | 0 -2147483648 -2147483648 0 0 0 | 0 -2147483648 -2147483648 0 0 0 | 0 2147483647 2147483647 0 0 0 | 0 -1 -1 0 0 0 | 0 0 0 0 0 0 | 0 1 1 0 0 0 | 0 1 1 0 0 0 | 0 3 3 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 12 12 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 1 1 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 7 7 0 0 0 | 0 -6 -6 0 0 0"
+bits -5e-324 = "0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 1 1 0 0 0 | 0 -1 -1 0 0 0 | 0 1 1 0 0 0 | 0 -1 -1 0 0 0 | 0 3 3 0 0 0 | 0 -3 -3 0 0 0 | 0 31 31 0 0 0 | 0 32 32 0 0 0 | 0 33 33 0 0 0 | 0 2147483647 2147483647 0 0 0 | 0 -2147483648 -2147483648 0 0 0 | 0 -2147483648 -2147483648 0 0 0 | 0 2147483647 2147483647 0 0 0 | 0 -1 -1 0 0 0 | 0 0 0 0 0 0 | 0 1 1 0 0 0 | 0 1 1 0 0 0 | 0 3 3 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 12 12 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 1 1 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 7 7 0 0 0 | 0 -6 -6 0 0 0"
+bits NaN = "0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 1 1 0 0 0 | 0 -1 -1 0 0 0 | 0 1 1 0 0 0 | 0 -1 -1 0 0 0 | 0 3 3 0 0 0 | 0 -3 -3 0 0 0 | 0 31 31 0 0 0 | 0 32 32 0 0 0 | 0 33 33 0 0 0 | 0 2147483647 2147483647 0 0 0 | 0 -2147483648 -2147483648 0 0 0 | 0 -2147483648 -2147483648 0 0 0 | 0 2147483647 2147483647 0 0 0 | 0 -1 -1 0 0 0 | 0 0 0 0 0 0 | 0 1 1 0 0 0 | 0 1 1 0 0 0 | 0 3 3 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 12 12 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 1 1 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 7 7 0 0 0 | 0 -6 -6 0 0 0"
+bits Infinity = "0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 1 1 0 0 0 | 0 -1 -1 0 0 0 | 0 1 1 0 0 0 | 0 -1 -1 0 0 0 | 0 3 3 0 0 0 | 0 -3 -3 0 0 0 | 0 31 31 0 0 0 | 0 32 32 0 0 0 | 0 33 33 0 0 0 | 0 2147483647 2147483647 0 0 0 | 0 -2147483648 -2147483648 0 0 0 | 0 -2147483648 -2147483648 0 0 0 | 0 2147483647 2147483647 0 0 0 | 0 -1 -1 0 0 0 | 0 0 0 0 0 0 | 0 1 1 0 0 0 | 0 1 1 0 0 0 | 0 3 3 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 12 12 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 1 1 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 7 7 0 0 0 | 0 -6 -6 0 0 0"
+bits -Infinity = "0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 1 1 0 0 0 | 0 -1 -1 0 0 0 | 0 1 1 0 0 0 | 0 -1 -1 0 0 0 | 0 3 3 0 0 0 | 0 -3 -3 0 0 0 | 0 31 31 0 0 0 | 0 32 32 0 0 0 | 0 33 33 0 0 0 | 0 2147483647 2147483647 0 0 0 | 0 -2147483648 -2147483648 0 0 0 | 0 -2147483648 -2147483648 0 0 0 | 0 2147483647 2147483647 0 0 0 | 0 -1 -1 0 0 0 | 0 0 0 0 0 0 | 0 1 1 0 0 0 | 0 1 1 0 0 0 | 0 3 3 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 12 12 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 1 1 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 7 7 0 0 0 | 0 -6 -6 0 0 0"
+bits 12 = "0 12 12 12 12 12 | 0 12 12 12 12 12 | 0 12 12 12 12 12 | 0 12 12 12 12 12 | 0 13 13 24 6 6 | 12 -1 -13 0 0 0 | 0 13 13 24 6 6 | 12 -1 -13 0 0 0 | 0 15 15 96 1 1 | 12 -3 -15 -2147483648 0 0 | 12 31 19 0 0 0 | 0 44 44 12 12 12 | 0 45 45 24 6 6 | 12 2147483647 2147483635 0 0 0 | 0 -2147483636 -2147483636 12 12 12 | 0 -2147483636 -2147483636 12 12 12 | 12 2147483647 2147483635 0 0 0 | 12 -1 -13 0 0 0 | 0 12 12 12 12 12 | 0 13 13 24 6 6 | 0 13 13 24 6 6 | 0 15 15 96 1 1 | 0 12 12 12 12 12 | 0 12 12 12 12 12 | 0 12 12 12 12 12 | 0 12 12 12 12 12 | 0 12 12 12 12 12 | 0 12 12 12 12 12 | 0 12 12 12 12 12 | 0 12 12 12 12 12 | 0 12 12 12 12 12 | 0 12 12 12 12 12 | 0 12 12 12 12 12 | 12 12 0 49152 0 0 | 0 12 12 12 12 12 | 0 12 12 12 12 12 | 0 13 13 24 6 6 | 0 12 12 12 12 12 | 0 12 12 12 12 12 | 0 12 12 12 12 12 | 4 15 11 1536 0 0 | 8 -2 -10 805306368 0 0"
+bits -0x10 = "0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 1 1 0 0 0 | 0 -1 -1 0 0 0 | 0 1 1 0 0 0 | 0 -1 -1 0 0 0 | 0 3 3 0 0 0 | 0 -3 -3 0 0 0 | 0 31 31 0 0 0 | 0 32 32 0 0 0 | 0 33 33 0 0 0 | 0 2147483647 2147483647 0 0 0 | 0 -2147483648 -2147483648 0 0 0 | 0 -2147483648 -2147483648 0 0 0 | 0 2147483647 2147483647 0 0 0 | 0 -1 -1 0 0 0 | 0 0 0 0 0 0 | 0 1 1 0 0 0 | 0 1 1 0 0 0 | 0 3 3 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 12 12 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 1 1 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 7 7 0 0 0 | 0 -6 -6 0 0 0"
+bits  = "0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 1 1 0 0 0 | 0 -1 -1 0 0 0 | 0 1 1 0 0 0 | 0 -1 -1 0 0 0 | 0 3 3 0 0 0 | 0 -3 -3 0 0 0 | 0 31 31 0 0 0 | 0 32 32 0 0 0 | 0 33 33 0 0 0 | 0 2147483647 2147483647 0 0 0 | 0 -2147483648 -2147483648 0 0 0 | 0 -2147483648 -2147483648 0 0 0 | 0 2147483647 2147483647 0 0 0 | 0 -1 -1 0 0 0 | 0 0 0 0 0 0 | 0 1 1 0 0 0 | 0 1 1 0 0 0 | 0 3 3 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 12 12 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 1 1 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 7 7 0 0 0 | 0 -6 -6 0 0 0"
+bits true = "0 1 1 1 1 1 | 0 1 1 1 1 1 | 0 1 1 1 1 1 | 0 1 1 1 1 1 | 1 1 0 2 0 0 | 1 -1 -2 -2147483648 0 0 | 1 1 0 2 0 0 | 1 -1 -2 -2147483648 0 0 | 1 3 2 8 0 0 | 1 -3 -4 536870912 0 0 | 1 31 30 -2147483648 0 0 | 0 33 33 1 1 1 | 1 33 32 2 0 0 | 1 2147483647 2147483646 -2147483648 0 0 | 0 -2147483647 -2147483647 1 1 1 | 0 -2147483647 -2147483647 1 1 1 | 1 2147483647 2147483646 -2147483648 0 0 | 1 -1 -2 -2147483648 0 0 | 0 1 1 1 1 1 | 1 1 0 2 0 0 | 1 1 0 2 0 0 | 1 3 2 8 0 0 | 0 1 1 1 1 1 | 0 1 1 1 1 1 | 0 1 1 1 1 1 | 0 1 1 1 1 1 | 0 1 1 1 1 1 | 0 1 1 1 1 1 | 0 1 1 1 1 1 | 0 1 1 1 1 1 | 0 1 1 1 1 1 | 0 1 1 1 1 1 | 0 1 1 1 1 1 | 0 13 13 4096 0 0 | 0 1 1 1 1 1 | 0 1 1 1 1 1 | 1 1 0 2 0 0 | 0 1 1 1 1 1 | 0 1 1 1 1 1 | 0 1 1 1 1 1 | 1 7 6 128 0 0 | 0 -5 -5 67108864 0 0"
+bits false = "0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 1 1 0 0 0 | 0 -1 -1 0 0 0 | 0 1 1 0 0 0 | 0 -1 -1 0 0 0 | 0 3 3 0 0 0 | 0 -3 -3 0 0 0 | 0 31 31 0 0 0 | 0 32 32 0 0 0 | 0 33 33 0 0 0 | 0 2147483647 2147483647 0 0 0 | 0 -2147483648 -2147483648 0 0 0 | 0 -2147483648 -2147483648 0 0 0 | 0 2147483647 2147483647 0 0 0 | 0 -1 -1 0 0 0 | 0 0 0 0 0 0 | 0 1 1 0 0 0 | 0 1 1 0 0 0 | 0 3 3 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 12 12 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 1 1 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 7 7 0 0 0 | 0 -6 -6 0 0 0"
+bits null = "0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 1 1 0 0 0 | 0 -1 -1 0 0 0 | 0 1 1 0 0 0 | 0 -1 -1 0 0 0 | 0 3 3 0 0 0 | 0 -3 -3 0 0 0 | 0 31 31 0 0 0 | 0 32 32 0 0 0 | 0 33 33 0 0 0 | 0 2147483647 2147483647 0 0 0 | 0 -2147483648 -2147483648 0 0 0 | 0 -2147483648 -2147483648 0 0 0 | 0 2147483647 2147483647 0 0 0 | 0 -1 -1 0 0 0 | 0 0 0 0 0 0 | 0 1 1 0 0 0 | 0 1 1 0 0 0 | 0 3 3 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 12 12 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 1 1 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 7 7 0 0 0 | 0 -6 -6 0 0 0"
+bits undefined = "0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 1 1 0 0 0 | 0 -1 -1 0 0 0 | 0 1 1 0 0 0 | 0 -1 -1 0 0 0 | 0 3 3 0 0 0 | 0 -3 -3 0 0 0 | 0 31 31 0 0 0 | 0 32 32 0 0 0 | 0 33 33 0 0 0 | 0 2147483647 2147483647 0 0 0 | 0 -2147483648 -2147483648 0 0 0 | 0 -2147483648 -2147483648 0 0 0 | 0 2147483647 2147483647 0 0 0 | 0 -1 -1 0 0 0 | 0 0 0 0 0 0 | 0 1 1 0 0 0 | 0 1 1 0 0 0 | 0 3 3 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 12 12 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 1 1 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 0 0 0 0 0 | 0 7 7 0 0 0 | 0 -6 -6 0 0 0"
+bits obj[7] = "0 7 7 7 7 7 | 0 7 7 7 7 7 | 0 7 7 7 7 7 | 0 7 7 7 7 7 | 1 7 6 14 3 3 | 7 -1 -8 -2147483648 0 0 | 1 7 6 14 3 3 | 7 -1 -8 -2147483648 0 0 | 3 7 4 56 0 0 | 5 -1 -6 -536870912 0 0 | 7 31 24 -2147483648 0 0 | 0 39 39 7 7 7 | 1 39 38 14 3 3 | 7 2147483647 2147483640 -2147483648 0 0 | 0 -2147483641 -2147483641 7 7 7 | 0 -2147483641 -2147483641 7 7 7 | 7 2147483647 2147483640 -2147483648 0 0 | 7 -1 -8 -2147483648 0 0 | 0 7 7 7 7 7 | 1 7 6 14 3 3 | 1 7 6 14 3 3 | 3 7 4 56 0 0 | 0 7 7 7 7 7 | 0 7 7 7 7 7 | 0 7 7 7 7 7 | 0 7 7 7 7 7 | 0 7 7 7 7 7 | 0 7 7 7 7 7 | 0 7 7 7 7 7 | 0 7 7 7 7 7 | 0 7 7 7 7 7 | 0 7 7 7 7 7 | 0 7 7 7 7 7 | 4 15 11 28672 0 0 | 0 7 7 7 7 7 | 0 7 7 7 7 7 | 1 7 6 14 3 3 | 0 7 7 7 7 7 | 0 7 7 7 7 7 | 0 7 7 7 7 7 | 7 7 0 896 0 0 | 2 -1 -3 469762048 0 0"
+bits obj{} = "0 -6 -6 -6 -6 4294967290 | 0 -6 -6 -6 -6 4294967290 | 0 -6 -6 -6 -6 4294967290 | 0 -6 -6 -6 -6 4294967290 | 0 -5 -5 -12 -3 2147483645 | -6 -1 5 0 -1 1 | 0 -5 -5 -12 -3 2147483645 | -6 -1 5 0 -1 1 | 2 -5 -7 -48 -1 536870911 | -8 -1 7 1073741824 -1 7 | 26 -1 -27 0 -1 1 | 32 -6 -38 -6 -6 4294967290 | 32 -5 -37 -12 -3 2147483645 | 2147483642 -1 -2147483643 0 -1 1 | -2147483648 -6 2147483642 -6 -6 4294967290 | -2147483648 -6 2147483642 -6 -6 4294967290 | 2147483642 -1 -2147483643 0 -1 1 | -6 -1 5 0 -1 1 | 0 -6 -6 -6 -6 4294967290 | 0 -5 -5 -12 -3 2147483645 | 0 -5 -5 -12 -3 2147483645 | 2 -5 -7 -48 -1 536870911 | 0 -6 -6 -6 -6 4294967290 | 0 -6 -6 -6 -6 4294967290 | 0 -6 -6 -6 -6 4294967290 | 0 -6 -6 -6 -6 4294967290 | 0 -6 -6 -6 -6 4294967290 | 0 -6 -6 -6 -6 4294967290 | 0 -6 -6 -6 -6 4294967290 | 0 -6 -6 -6 -6 4294967290 | 0 -6 -6 -6 -6 4294967290 | 0 -6 -6 -6 -6 4294967290 | 0 -6 -6 -6 -6 4294967290 | 8 -2 -10 -24576 -1 1048575 | 0 -6 -6 -6 -6 4294967290 | 0 -6 -6 -6 -6 4294967290 | 0 -5 -5 -12 -3 2147483645 | 0 -6 -6 -6 -6 4294967290 | 0 -6 -6 -6 -6 4294967290 | 0 -6 -6 -6 -6 4294967290 | 2 -1 -3 -768 -1 33554431 | -6 -6 0 -402653184 -1 63"
+notAndNeg = "-1 0 0 0 0 | -1 0 0 0 0 | -1 0 0 0 0 | -1 0 0 0 0 | -2 1 1 1 1 | 0 1 -1 -1 4294967295 | -2 1 1 1 1 | 0 1 -1 -1 4294967295 | -4 1 3 3 3 | 2 1 -3 -3 4294967293 | -32 1 31 31 31 | -33 32 32 32 32 | -34 1 33 33 33 | -2147483648 1 2147483647 2147483647 2147483647 | 2147483647 -2147483648 -2147483648 -2147483648 2147483648 | 2147483647 -2147483648 -2147483648 -2147483648 2147483648 | -2147483648 1 2147483647 2147483647 2147483647 | 0 1 -1 -1 4294967295 | -1 0 0 0 0 | -2 1 1 1 1 | -2 1 1 1 1 | -4 1 3 3 3 | -1 0 0 0 0 | -1 0 0 0 0 | -1 0 0 0 0 | -1 0 0 0 0 | -1 0 0 0 0 | -1 0 0 0 0 | -1 0 0 0 0 | -1 0 0 0 0 | -1 0 0 0 0 | -1 0 0 0 0 | -1 0 0 0 0 | -13 4 12 12 12 | -1 0 0 0 0 | -1 0 0 0 0 | -2 1 1 1 1 | -1 0 0 0 0 | -1 0 0 0 0 | -1 0 0 0 0 | -8 1 7 7 7 | 5 2 -6 -6 4294967290"
+truthy = "0n0n1y1y1y1y1y1y1y1y1y1y1y1y1y1y1y1y1y1y1y1y1y1y1y1y1y1y1y1y0n1y1y1y1y0n1y0n0n0n1y1y"
+truthyLoops = "002222222222222222222222223311033110100011"
+valueOfOrder = [0,48,0,"123456"]
+symbolAndBigInt = ["TypeError","3","1180591620717411303424","-3","TypeError","TypeError"]
+nqueens = [4,40,92]
+hashChain = -254617337
+""";
+
+    [Fact]
+    public void BitwiseDecodeAndNumberTruthinessMatchReferenceBehavior()
+    {
+        using var engine = new JsEngine();
+        var got = engine.Evaluate(NumberBitsScript).AsString().Split('\n');
+        var expected = NumberBitsExpected.ReplaceLineEndings("\n").TrimEnd('\n').Split('\n');
+        Assert.Equal(expected.Length, got.Length);
+        for (int i = 0; i < expected.Length; i++) Assert.True(expected[i] == got[i], $"line {i}: expected {expected[i]} but got {got[i]}");
+    }
 }

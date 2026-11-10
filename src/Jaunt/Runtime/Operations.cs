@@ -185,11 +185,15 @@ internal static class Operations
     public static int NumberBitsToInt32(ulong numberBits)
     {
         ulong b = numberBits ^ JsValue.NumberXor;
-        int t = (int)((b >> 52) & 0x7FF) - 1023;
+        int hi = (int)(b >> 52);
+        int t = (hi & 0x7FF) - 1023;
         if ((uint)t <= 62)
         {
-            // the sign without a branch: hashes and checksums have sign bits no predictor can learn
-            long v = (long)(((b << 11) | (1UL << 63)) >> (63 - t)), s = (long)b >> 63;
+            // the sign without a branch: hashes and checksums have sign bits no predictor can learn. The shift count 63 - t is
+            // 1086 minus the exponent field, taken from the top bits with the sign: a shift uses its count modulo 64, which drops
+            // the sign's 2048, so the count does not wait for the masking and the range test (a dependent chain of bitwise
+            // operators runs about 5% faster in a miniature interpreter on an Apple M4).
+            long v = (long)(((b << 11) | (1UL << 63)) >> (1086 - hi)), s = (long)b >> 63;
             return unchecked((int)((v ^ s) - s));
         }
         return t < 0 ? 0 : DoubleToInt32Slow(BitConverter.Int64BitsToDouble(unchecked((long)b)));
@@ -385,6 +389,83 @@ internal static class Operations
         // (building a string piecewise stays linear). The characters themselves are charged when a rope is flattened.
         realm.ChargeBytes(Math.Min(la, lb) * 2L + 48);
         return new JsValue(new JsRope(a, b, (int)len));
+    }
+
+    /// <summary>
+    /// A part of a multi-part concatenation (<see cref="Jaunt.Compiler.Op.ToStrPart"/>): the value converted as a template
+    /// substitution (ToString) or as the operand of a string <c>+</c> (ToPrimitive with no hint, then ToString). The result is
+    /// a string, flat or rope, or a number that is a 32-bit integer: its digits are written straight into the concatenation.
+    /// </summary>
+    internal static JsValue ToStringPart(Realm realm, in JsValue v, bool primitiveFirst)
+    {
+        if (v.IsString) return v;
+        var p = v;
+        if (p.IsObject && primitiveFirst)
+        {
+            p = ToPrimitive(realm, v);
+            if (p.IsString) return p;
+        }
+        if (p.IsNumber && p.Num == (int)p.Num) return p;   // -0 prints as "0", as (int)-0 does
+        return new JsValue(ToString(realm, p));
+    }
+
+    /// <summary>The number of UTF-16 units of a part made by <see cref="ToStringPart"/>.</summary>
+    internal static int PartLength(in JsValue v)
+    {
+        if (v.IsString) return v.StringLength;
+        int n = (int)v.Num;
+        uint mag = n < 0 ? (uint)(-(long)n) : (uint)n;
+        int digits = n < 0 ? 2 : 1;
+        while (mag >= 10) { mag /= 10; digits++; }
+        return digits;
+    }
+
+    /// <summary>Throws the RangeError of the pairwise additions when the parts in the window are longer than allowed.</summary>
+    internal static void CheckPartsLength(Realm realm, ReadOnlySpan<JsValue> parts)
+    {
+        long len = 0;
+        foreach (ref readonly var p in parts) len += PartLength(p);
+        if (len > realm.MaxStringLength) throw JsErrors.RangeError(realm, "Invalid string length");
+    }
+
+    private static object PartObject(Realm realm, in JsValue v) => v.IsString ? v.Ref! : NumberFormatting.ToString(v.Num);
+
+    /// <summary>
+    /// The concatenation of parts made by <see cref="ToStringPart"/> or string constants (<see cref="Jaunt.Compiler.Op.StrConcat"/>).
+    /// A short result is built in one allocation of the exact size, instead of one per <c>+</c>; a long one is concatenated
+    /// pairwise from the left, exactly as the additions would, so ropes and charges stay as they were.
+    /// </summary>
+    internal static JsValue ConcatN(Realm realm, JsValue[] regs, int start, int count, int total)
+    {
+        var parts = new ReadOnlySpan<JsValue>(regs, start, count);
+        if (total == 0) return JsValue.EmptyString;
+        if (total < JsRope.MinLength)
+        {
+            realm.ChargeBytes(total * 2 + 24);
+            return new JsValue(string.Create((int)total, (regs, start, count), static (span, st) =>
+            {
+                var (rs, s0, n) = st;
+                int pos = 0;
+                for (int i = s0; i < s0 + n; i++)
+                {
+                    ref readonly var v = ref rs[i];
+                    if (v.IsString)
+                    {
+                        var s = v.AsStringUnchecked;   // flat: a rope is never shorter than the result
+                        s.AsSpan().CopyTo(span.Slice(pos));
+                        pos += s.Length;
+                    }
+                    else
+                    {
+                        ((int)v.Num).TryFormat(span.Slice(pos), out int w, default, CultureInfo.InvariantCulture);
+                        pos += w;
+                    }
+                }
+            }));
+        }
+        object acc = PartObject(realm, parts[0]);
+        for (int i = 1; i < parts.Length; i++) acc = ConcatParts(realm, acc, PartObject(realm, parts[i])).Ref!;
+        return acc is string str ? new JsValue(str) : new JsValue((JsRope)acc);
     }
 
     /// <summary>IsLessThan (ECMA-262 7.2.13). Returns null for undefined (NaN involved).</summary>

@@ -7,6 +7,39 @@ namespace Jaunt.Runtime;
 internal sealed partial class Vm
 {
     /// <summary>
+    /// Op.DelegateNext: Call(iterator.next, iterator, received), IteratorComplete and, when done, IteratorValue, as the
+    /// general yield* loop does them, or a direct resume when the iterator is a generator with the original next.
+    /// </summary>
+    private int DelegateNext(JsValue iter, JsValue received, out JsValue res)
+    {
+        var realm = Realm;
+        JsValue r;
+        if (iter.Ref is JsGenerator g && realm.IsGeneratorIterationPristine(g))
+        {
+            int kind = Coroutines.ResumeStep(realm, g, Coroutines.ModeNext, received, out r);
+            if (kind != Coroutines.StepRaw)
+            {
+                res = r;
+                return kind == Coroutines.StepYield ? 0 : 2;
+            }
+        }
+        else
+        {
+            var fn = Operations.GetV(realm, iter, "next");
+            r = Call(fn, iter, new ReadOnlySpan<JsValue>(in received));
+            if (r.IsNotObject) throw JsErrors.TypeError(realm, "Iterator result is not an object");
+        }
+        var ro = r.AsObjectUnchecked;
+        if (Operations.ToBoolean(ro.Get("done", r)))
+        {
+            res = ro.Get("value", r);
+            return 2;
+        }
+        res = r;
+        return 1;
+    }
+
+    /// <summary>
     /// Executes an infrequent opcode outside the hot dispatch loop and returns the next pc. None of these
     /// opcodes switch frames; JS errors are raised as <see cref="JsThrowException"/> (f.Pc is already synced).
     /// </summary>
@@ -157,6 +190,18 @@ internal sealed partial class Vm
                 regs[bp + code[pc + 1]] = a.IsString ? a : new JsValue(Operations.ToString(realm, a));
                 return pc + 3;
             }
+            case Op.ToStrPart:
+            {
+                // the conversion can run user code: store through the frame's current register file afterwards
+                var v = Operations.ToStringPart(realm, regs[bp + code[pc + 2]], code[pc + 5] != 0);
+                regs = f.Regs;
+                regs[bp + code[pc + 1]] = v;
+                Operations.CheckPartsLength(realm, new ReadOnlySpan<JsValue>(regs, bp + code[pc + 3], code[pc + 4]));
+                return pc + 6;
+            }
+            case Op.StrConcat:
+                StrConcat(f, code[pc + 1], code[pc + 2], code[pc + 3], code[pc + 4] != 0);
+                return pc + 5;
             case Op.AddConst:
                 regs[bp + code[pc + 1]] = Operations.Add(realm, regs[bp + code[pc + 2]], k[code[pc + 3]]);
                 return pc + 4;
@@ -239,10 +284,18 @@ internal sealed partial class Vm
                 var src = regs[bp + code[pc + 2]];
                 var method = Operations.GetV(realm, src, JsSymbol.Iterator);
                 if (!method.IsFunction) throw JsErrors.TypeError(realm, $"{JsErrors.Describe(src)} is not iterable");
-                var it = Call(method, src, ReadOnlySpan<JsValue>.Empty);
+                // %IteratorPrototype%[@@iterator] returns its this value and does nothing else
+                var it = ReferenceEquals(method.Ref, realm.IteratorProtoIterator) ? src : Call(method, src, ReadOnlySpan<JsValue>.Empty);
                 if (it.IsNotObject) throw JsErrors.TypeError(realm, "Result of the Symbol.iterator method is not an object");
                 regs[bp + code[pc + 1]] = it;
                 return pc + 3;
+            }
+            case Op.DelegateNext:
+            {
+                int kind = DelegateNext(regs[bp + code[pc + 2]], regs[bp + code[pc + 3]], out var res);
+                regs[bp + code[pc + 1]] = res;
+                regs[bp + code[pc + 4]] = new JsValue(kind);
+                return pc + 5;
             }
             case Op.IterNextOrUndef:
             {
@@ -362,5 +415,30 @@ internal sealed partial class Vm
             default:
                 throw new InvalidOperationException($"Jaunt internal error: unknown opcode {code[pc]}.");
         }
+    }
+
+    /// <summary>
+    /// <see cref="Op.StrConcat"/>: converts each part in order (parts already converted by <see cref="Op.ToStrPart"/> stay as
+    /// they are), throws the pairwise additions' RangeError at the part that makes the result too long, then concatenates.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private void StrConcat(Frame f, int dst, int start, int count, bool primitiveFirst)
+    {
+        var realm = Realm;
+        int bp = f.Base;
+        long total = 0;
+        for (int i = bp + start, end = i + count; i < end; i++)
+        {
+            var v = f.Regs[i];
+            if (!v.IsString && !(v.IsNumber && v.Num == (int)v.Num))
+            {
+                v = Operations.ToStringPart(realm, v, primitiveFirst);   // may run user code
+                f.Regs[i] = v;
+            }
+            total += Operations.PartLength(v);
+            if (total > realm.MaxStringLength) throw JsErrors.RangeError(realm, "Invalid string length");
+        }
+        var regs = f.Regs;
+        regs[bp + dst] = Operations.ConcatN(realm, regs, bp + start, count, (int)total);
     }
 }
