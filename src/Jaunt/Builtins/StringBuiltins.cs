@@ -237,7 +237,7 @@ internal static class StringBuiltins
             int pos = 0;
             while (res.Length < lim)
             {
-                int idx = s.IndexOf(sep, pos, StringComparison.Ordinal);
+                int idx = sep.Length == 1 ? s.IndexOf(sep[0], pos) : s.IndexOf(sep, pos, StringComparison.Ordinal);
                 if (idx < 0) { res.Push(new JsValue(s.Substring(pos))); break; }
                 res.Push(new JsValue(s.Substring(pos, idx - pos)));
                 pos = idx + sep.Length;

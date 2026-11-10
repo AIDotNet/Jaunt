@@ -907,8 +907,41 @@ internal static class ArrayBuiltins
         return res;
     }
 
+    /// <summary>
+    /// <c>join</c> of a dense array of strings, no join in progress: sized in one pass and built in one allocation, instead of
+    /// growing a StringBuilder and copying it out. Reading such elements and converting strings cannot be observed, so the
+    /// result, the RangeError and the charges are those of the general loop. Returns null for anything else.
+    /// </summary>
+    private static string? TryJoinStrings(Realm realm, JsObject o, string sep, long len)
+    {
+        if (o is not JsArray arr || !arr.Dense || len != arr.Length || len > arr.Items.Length || len < 2 || realm.JoinStack.Count != 0) return null;
+        var items = arr.Items;
+        long total = (len - 1) * sep.Length;
+        for (int i = 0; i < len; i++)
+        {
+            if (!items[i].IsString) return null;
+            total += items[i].StringLength;
+        }
+        if (total > realm.MaxStringLength) throw JsErrors.RangeError(realm, "Invalid string length");
+        realm.Vm.Tick((int)len);
+        realm.ChargeOutput(total);
+        return string.Create((int)total, (items, (int)len, sep), static (span, st) =>
+        {
+            var (xs, n, sp) = st;
+            int pos = 0;
+            for (int i = 0; i < n; i++)
+            {
+                if (i > 0) { sp.AsSpan().CopyTo(span.Slice(pos)); pos += sp.Length; }
+                var s = xs[i].AsStringUnchecked;
+                s.AsSpan().CopyTo(span.Slice(pos));
+                pos += s.Length;
+            }
+        });
+    }
+
     public static string Join(Realm realm, JsObject o, string sep, long len = -1)
     {
+        if (len >= 0 && TryJoinStrings(realm, o, sep, len) is { } joined) return joined;
         if (!realm.JoinStack.Add(o)) return "";
         realm.Vm.EnsureNativeStack();
         try
