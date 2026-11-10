@@ -680,6 +680,8 @@ internal static class ArrayBuiltins
     public static JsObject ArraySpeciesCreate(Realm realm, JsObject original, long length, out bool intrinsic)
     {
         intrinsic = true;
+        // the usual case: reading "constructor" finds this realm's %Array%, which is used as is
+        if (original is JsArray oa && realm.IsArraySpeciesPristine(oa)) return CreateArray(realm, length);
         if (!IsArray(realm, JsValue.FromObject(original))) return CreateArray(realm, length);
         var c = original.Get("constructor");
         if (Operations.IsConstructor(c))

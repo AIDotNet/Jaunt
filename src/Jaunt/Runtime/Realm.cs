@@ -680,6 +680,27 @@ internal sealed partial class Realm
             && ReferenceEquals(ArrayIteratorPrototype.ReadSlot(_nextSlot).Ref, ArrayIteratorNext);
     }
 
+    private int _ctorPristineEpoch = -1, _ctorSlot = -1;
+
+    /// <summary>
+    /// Whether ArraySpeciesCreate on <paramref name="arr"/> would read %Array% of this realm as its constructor without
+    /// running code: the array has no own named properties, its prototype is this realm's %Array.prototype%, and that
+    /// object's constructor is still the original data property. (A constructor that is this realm's %Array% is used as
+    /// is, see <c>ArrayBuiltins.ArraySpeciesCreate</c>.)
+    /// </summary>
+    public bool IsArraySpeciesPristine(JsArray arr)
+    {
+        if (arr.Shape.Count != 0 || arr.Dict != null || !ReferenceEquals(arr.Proto, ArrayPrototype)) return false;
+        var ap = ArrayPrototype;
+        if (_ctorPristineEpoch != ProtoEpoch)
+        {
+            _ctorSlot = ap.FindOwn("constructor", out var flags);
+            if ((flags & PropFlags.Accessor) != 0) _ctorSlot = -1;
+            _ctorPristineEpoch = ProtoEpoch;
+        }
+        return _ctorSlot >= 0 && _arrayConstructor != null && ReferenceEquals(ap.ReadSlot(_ctorSlot).Ref, _arrayConstructor);
+    }
+
     private int _genPristineEpoch = -1, _genNextSlot = -1, _genIterSlot = -1;
     /// <summary>The last generator function prototype layout seen to have neither an own next nor an own @@iterator.</summary>
     private Shape? _genOwnerShape;

@@ -146,7 +146,7 @@ internal sealed class IteratorRecord
             }
             // yield* handed out its inner iterator's result object: read it as below
         }
-        else r = _realm.Vm.Call(NextMethod, JsValue.FromObject(Iterator!), ReadOnlySpan<JsValue>.Empty);
+        else r = CallNext();
         if (r.IsNotObject) throw JsErrors.TypeError(_realm, $"Iterator result {r} is not an object");
         var ro = r.AsObjectUnchecked;
         var layout = _realm.IterResultLayout;
@@ -172,6 +172,31 @@ internal sealed class IteratorRecord
         Done = false;
         return true;
     }
+
+    /// <summary>
+    /// Calls next() with no arguments. A plain closure is called directly (<see cref="Vm.CallCallback"/>), as builtins call
+    /// their callbacks; it is looked at once per record, as NextMethod never changes. The record can be stepped from
+    /// different native depths (a generator holding it is resumed from anywhere), so the stack is checked per call.
+    /// </summary>
+    private JsValue CallNext()
+    {
+        var vm = _realm.Vm;
+        var c = _nextClosure;
+        if (c == null)
+        {
+            if (_nextChecked || !vm.TryPrepareFastCalls(NextMethod, out c))
+            {
+                _nextChecked = true;
+                return vm.Call(NextMethod, JsValue.FromObject(Iterator!), ReadOnlySpan<JsValue>.Empty);
+            }
+            _nextClosure = c;
+        }
+        else vm.EnsureNativeStack();
+        return vm.CallCallback(c, JsValue.FromObject(Iterator!), default, default, default, default, 0);
+    }
+
+    private JsClosure? _nextClosure;
+    private bool _nextChecked;
 
     /// <summary>Learns the layout of an iterator result whose done and value are own data properties (see <see cref="Realm.IterResultLayout"/>).</summary>
     private void LearnResultShape(JsObject ro)
