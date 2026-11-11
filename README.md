@@ -19,6 +19,18 @@ engine.SetFunction("tax", (double amount) => amount * 0.13);
 double total = engine.Evaluate("price * 2 + tax(price * 2)").AsNumber();   // 226
 ```
 
+## Performance
+
+![Warm per-call time relative to Jaunt NativeAOT, by workload category: overall QuickJS 1.49×, MoeJS 1.20×](docs/images/perf-aot-quickjs-moejs.svg)
+
+Warm per-call time on the [`bench/cross`](bench/cross) workloads, Jaunt published with NativeAOT (commit `f4f9969`) against
+QuickJS 2026-06-04 (release build, default Makefile) and MoeJS at source `9341716` (2026-11-09, default options). Each
+bar is the geometric mean, per category, of each workload's time divided by Jaunt's; lower is better. Only the 53 workloads
+whose results match Node on all three engines are counted. Measured on an Apple M4 on 2026-11-10: the engines ran one after
+another in 3 interleaved rounds, and each figure is the median of those rounds. Jaunt was fastest on 34 workloads, MoeJS
+on 13 and QuickJS on 6. Script compilation is a different story: QuickJS compiles in about 0.88× Jaunt's time, and MoeJS
+matches Jaunt. Methodology and more comparisons are in [`docs/benchmarks.md`](docs/benchmarks.md).
+
 ## Architecture (short)
 
 ```text
