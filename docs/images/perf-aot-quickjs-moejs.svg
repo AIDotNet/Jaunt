@@ -1,0 +1,108 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="621" viewBox="0 0 760 621" font-family="-apple-system,BlinkMacSystemFont,Segoe UI,Helvetica,Arial,sans-serif" role="img" aria-labelledby="t d">
+<title id="t">Jaunt NativeAOT vs QuickJS vs MoeJS</title><desc id="d">Geometric mean of warm per-call time relative to Jaunt NativeAOT over 53 workloads; lower is better.</desc>
+<style>
+.bg{fill:#ffffff}.fg{fill:#1f2328}.mu{fill:#59636e}.grid{stroke:#d1d9e0}.one{stroke:#2a78d6}
+.a{fill:#2a78d6}.q{fill:#0f9d8a}.m{fill:#eb6834}
+@media (prefers-color-scheme:dark){.bg{fill:#0d1117}.fg{fill:#f0f6fc}.mu{fill:#9198a1}.grid{stroke:#3d444d}.one{stroke:#3987e5}
+.a{fill:#3987e5}.q{fill:#1aa594}.m{fill:#e0703f}}
+text{font-size:12px}.h{font-size:15px;font-weight:600}.b{font-weight:600}.v{font-size:11px;font-variant-numeric:tabular-nums}
+</style>
+<rect class="bg" width="760" height="621" rx="8"/>
+<text class="fg h" x="16" y="26">Warm per-call time relative to Jaunt NativeAOT (lower is better)</text>
+<text class="mu" x="16" y="45">Geometric mean over the 53 bench/cross workloads all three engines pass; Apple M4, median of 3 interleaved rounds.</text>
+<rect class="a" x="16" y="58" width="11" height="11" rx="2"/><text class="fg" x="32" y="68">Jaunt (NativeAOT)</text>
+<rect class="q" x="166.2" y="58" width="11" height="11" rx="2"/><text class="fg" x="182.2" y="68">QuickJS 2026-06-04</text>
+<rect class="m" x="323.0" y="58" width="11" height="11" rx="2"/><text class="fg" x="339.0" y="68">MoeJS 9341716</text>
+<line class="grid" x1="150.0" y1="86" x2="150.0" y2="591" stroke-width="1"/>
+<text class="mu v" x="150.0" y="607" text-anchor="middle">0×</text>
+<line class="grid" x1="204.7" y1="86" x2="204.7" y2="591" stroke-width="1"/>
+<text class="mu v" x="204.7" y="607" text-anchor="middle">0.5×</text>
+<line class="one" x1="259.5" y1="86" x2="259.5" y2="591" stroke-width="1.5"/>
+<text class="mu v" x="259.5" y="607" text-anchor="middle">1×</text>
+<line class="grid" x1="314.2" y1="86" x2="314.2" y2="591" stroke-width="1"/>
+<text class="mu v" x="314.2" y="607" text-anchor="middle">1.5×</text>
+<line class="grid" x1="368.9" y1="86" x2="368.9" y2="591" stroke-width="1"/>
+<text class="mu v" x="368.9" y="607" text-anchor="middle">2×</text>
+<line class="grid" x1="423.7" y1="86" x2="423.7" y2="591" stroke-width="1"/>
+<text class="mu v" x="423.7" y="607" text-anchor="middle">2.5×</text>
+<line class="grid" x1="478.4" y1="86" x2="478.4" y2="591" stroke-width="1"/>
+<text class="mu v" x="478.4" y="607" text-anchor="middle">3×</text>
+<line class="grid" x1="533.2" y1="86" x2="533.2" y2="591" stroke-width="1"/>
+<text class="mu v" x="533.2" y="607" text-anchor="middle">3.5×</text>
+<line class="grid" x1="587.9" y1="86" x2="587.9" y2="591" stroke-width="1"/>
+<text class="mu v" x="587.9" y="607" text-anchor="middle">4×</text>
+<line class="grid" x1="642.6" y1="86" x2="642.6" y2="591" stroke-width="1"/>
+<text class="mu v" x="642.6" y="607" text-anchor="middle">4.5×</text>
+<text class="fg b" x="16" y="110.5">Overall</text>
+<text class="mu v" x="16" y="124.5">53 workloads</text>
+<rect class="a" x="150" y="92" width="109.5" height="11" rx="2"/>
+<text class="fg v" x="264.5" y="101.5">1.00×</text>
+<rect class="q" x="150" y="106" width="163.4" height="11" rx="2"/>
+<text class="fg v" x="318.4" y="115.5">1.49×</text>
+<rect class="m" x="150" y="120" width="131.5" height="11" rx="2"/>
+<text class="fg v" x="286.5" y="129.5">1.20×</text>
+<text class="fg" x="16" y="165.5">async</text>
+<text class="mu v" x="16" y="179.5">3 workloads</text>
+<rect class="a" x="150" y="147" width="109.5" height="11" rx="2"/>
+<text class="fg v" x="264.5" y="156.5">1.00×</text>
+<rect class="q" x="150" y="161" width="460.5" height="11" rx="2"/>
+<text class="fg v" x="615.5" y="170.5">4.21×</text>
+<rect class="m" x="150" y="175" width="199.6" height="11" rx="2"/>
+<text class="fg v" x="354.6" y="184.5">1.82×</text>
+<text class="fg" x="16" y="220.5">collections</text>
+<text class="mu v" x="16" y="234.5">5 workloads</text>
+<rect class="a" x="150" y="202" width="109.5" height="11" rx="2"/>
+<text class="fg v" x="264.5" y="211.5">1.00×</text>
+<rect class="q" x="150" y="216" width="187.3" height="11" rx="2"/>
+<text class="fg v" x="342.3" y="225.5">1.71×</text>
+<rect class="m" x="150" y="230" width="155.1" height="11" rx="2"/>
+<text class="fg v" x="310.1" y="239.5">1.42×</text>
+<text class="fg" x="16" y="275.5">advanced</text>
+<text class="mu v" x="16" y="289.5">5 workloads</text>
+<rect class="a" x="150" y="257" width="109.5" height="11" rx="2"/>
+<text class="fg v" x="264.5" y="266.5">1.00×</text>
+<rect class="q" x="150" y="271" width="181.4" height="11" rx="2"/>
+<text class="fg v" x="336.4" y="280.5">1.66×</text>
+<rect class="m" x="150" y="285" width="140.6" height="11" rx="2"/>
+<text class="fg v" x="295.6" y="294.5">1.28×</text>
+<text class="fg" x="16" y="330.5">strings</text>
+<text class="mu v" x="16" y="344.5">4 workloads</text>
+<rect class="a" x="150" y="312" width="109.5" height="11" rx="2"/>
+<text class="fg v" x="264.5" y="321.5">1.00×</text>
+<rect class="q" x="150" y="326" width="181.6" height="11" rx="2"/>
+<text class="fg v" x="336.6" y="335.5">1.66×</text>
+<rect class="m" x="150" y="340" width="135.5" height="11" rx="2"/>
+<text class="fg v" x="290.5" y="349.5">1.24×</text>
+<text class="fg" x="16" y="385.5">functional</text>
+<text class="mu v" x="16" y="399.5">5 workloads</text>
+<rect class="a" x="150" y="367" width="109.5" height="11" rx="2"/>
+<text class="fg v" x="264.5" y="376.5">1.00×</text>
+<rect class="q" x="150" y="381" width="163.4" height="11" rx="2"/>
+<text class="fg v" x="318.4" y="390.5">1.49×</text>
+<rect class="m" x="150" y="395" width="144.6" height="11" rx="2"/>
+<text class="fg v" x="299.6" y="404.5">1.32×</text>
+<text class="fg" x="16" y="440.5">apps</text>
+<text class="mu v" x="16" y="454.5">10 workloads</text>
+<rect class="a" x="150" y="422" width="109.5" height="11" rx="2"/>
+<text class="fg v" x="264.5" y="431.5">1.00×</text>
+<rect class="q" x="150" y="436" width="149.2" height="11" rx="2"/>
+<text class="fg v" x="304.2" y="445.5">1.36×</text>
+<rect class="m" x="150" y="450" width="116.5" height="11" rx="2"/>
+<text class="fg v" x="271.5" y="459.5">1.06×</text>
+<text class="fg" x="16" y="495.5">objects</text>
+<text class="mu v" x="16" y="509.5">6 workloads</text>
+<rect class="a" x="150" y="477" width="109.5" height="11" rx="2"/>
+<text class="fg v" x="264.5" y="486.5">1.00×</text>
+<rect class="q" x="150" y="491" width="144.1" height="11" rx="2"/>
+<text class="fg v" x="299.1" y="500.5">1.32×</text>
+<rect class="m" x="150" y="505" width="120.1" height="11" rx="2"/>
+<text class="fg v" x="275.1" y="514.5">1.10×</text>
+<text class="fg" x="16" y="550.5">compute</text>
+<text class="mu v" x="16" y="564.5">15 workloads</text>
+<rect class="a" x="150" y="532" width="109.5" height="11" rx="2"/>
+<text class="fg v" x="264.5" y="541.5">1.00×</text>
+<rect class="q" x="150" y="546" width="133.0" height="11" rx="2"/>
+<text class="fg v" x="288.0" y="555.5">1.21×</text>
+<rect class="m" x="150" y="560" width="121.0" height="11" rx="2"/>
+<text class="fg v" x="276.0" y="569.5">1.11×</text>
+</svg>
