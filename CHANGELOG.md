@@ -5,6 +5,8 @@ counts as public API.
 
 ## Unreleased
 
+## 1.0.3 (2026-11-11)
+
 ### Performance
 
 - Number arithmetic, comparisons and bitwise operators keep numbers in floating-point registers, and `ToInt32` decodes the bits
@@ -118,5 +120,5 @@ The exact surface is in [docs/FEATURES.md](docs/FEATURES.md), including what is 
 
 ### Compatibility notes
 
-- The `net11.0` assets are built with the .NET 11 RC SDK (`11.0.100-rc.2`), and .NET 11 was verified on that RC. They will
-  be rebuilt and verified again once .NET 11 reaches general availability.
+- The `net11.0` assets are built with the .NET 11 SDK 11.0.100 (general availability), and NativeAOT builds pin the 11.0.0 runtime
+  and ILCompiler packs.

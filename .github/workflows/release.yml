@@ -36,7 +36,7 @@ jobs:
           dotnet-version: |
             8.0.x
             10.0.401
-            11.0.100-rc.2.26504.105
+            11.0.100
 
       - name: Read the package version from the tag
         id: version
