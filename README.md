@@ -89,7 +89,7 @@ Errors: `JsCompileException` (with code/line/column), `JsException` (JS throw; e
 
 ```bash
 dotnet test tests/Jaunt.Tests                      # unit + contract tests
-./eng/verify-aot.sh                                # NativeAOT gate (needs .NET 10 SDK; .NET 11 RC via eng/sdk11)
+./eng/verify-aot.sh                                # NativeAOT gate (needs .NET 10 SDK; .NET 11 SDK via eng/sdk11)
 dotnet run -c Release --project bench/Jaunt.Benchmarks -- --quick
 dotnet run -c Release --project bench/Jaunt.Benchmarks -- --filter '*'   # BenchmarkDotNet
 bench/cross/aot-vs-jit.sh                          # hot-path throughput: NativeAOT binary vs the same host on CoreCLR

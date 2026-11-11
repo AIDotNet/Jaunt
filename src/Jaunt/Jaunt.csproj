@@ -14,7 +14,7 @@
     <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
     <Description>Jaunt: a fully managed, NativeAOT-compatible JavaScript engine for .NET.</Description>
     <!-- local default; release builds take the version from the git tag (.github/workflows/release.yml) -->
-    <Version>1.0.2</Version>
+    <Version>1.0.3</Version>
     <PackageReleaseNotes>https://github.com/AIDotNet/Jaunt/blob/main/CHANGELOG.md</PackageReleaseNotes>
     <Authors>AIDotNet</Authors>
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
