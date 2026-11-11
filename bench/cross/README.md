@@ -11,7 +11,7 @@ every result against `expected.json` (produced with Node). It is a development h
 | --- | --- | --- |
 | Jaunt | this repository | `new JsEngine()` — `JsProfile.Standard`: **mutable** intrinsics, created per engine (lazily, per group) |
 | Jint | 4.17.0 | `new Engine()` — mutable intrinsics per engine, prepared scripts |
-| MoeJS | v0.1.0-alpha.11 | `moejs.NewRuntime(moejs.Options{})` — MoeJS's default: intrinsics built once per process, **deeply frozen and shared** by every runtime (`MutableIntrinsics: false`) |
+| MoeJS | source `9341716` (2026-11-09; Go pseudo-version `v0.1.1-0.20261109125924-934171643e14`) | `moejs.NewRuntime(moejs.Options{})` — MoeJS's default: intrinsics built once per process, **deeply frozen and shared** by every runtime (`MutableIntrinsics: false`) |
 
 So the per-runtime creation and first-call figures (`coldUs` in the raw output: new engine + load + first call; not a
 process cold start) compare engines that build per-engine mutable intrinsics (Jaunt, Jint) with one that shares a
